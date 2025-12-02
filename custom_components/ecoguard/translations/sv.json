@@ -1,0 +1,50 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "EcoGuard Konfiguration",
+        "description": "Ange dina EcoGuard-uppgifter för att ansluta till ditt energimätningssystem.",
+        "data": {
+          "username": "Användarnamn/Objektnummer (från EcoGuard-portalen)",
+          "password": "Lösenord (EcoGuard-konto)",
+          "domain": "Domänkod (t.ex. SkrentenBrl - från portalens URL)",
+          "nord_pool_area": "Nord Pool-område (valfritt - t.ex. NO1, SE3)"
+        },
+        "data_description": {
+          "username": "Ditt EcoGuard-användarnamn eller objektnummer som används för att logga in på EcoGuard-portalen.",
+          "password": "Ditt EcoGuard-kontolösenord.",
+          "domain": "Din EcoGuard-domänkod (t.ex. 'SkrentenBrl'). Detta hittas vanligtvis i din EcoGuard-portalens URL eller tillhandahålls av din energileverantör.",
+          "nord_pool_area": "Din Nord Pool-prisområdeskod (t.ex. 'NO1' för Oslo, 'SE3' för Stockholm). Detta används för elprisdata. [Hitta ditt område på Nord Pool-kartan]({nord_pool_link})."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Kunde inte ansluta till EcoGuard. Vänligen kontrollera dina uppgifter och domän.",
+      "invalid_auth": "Ogiltiga autentiseringsuppgifter. Vänligen kontrollera ditt användarnamn och lösenord.",
+      "unknown": "Ett oväntat fel uppstod. Vänligen försök igen."
+    },
+    "abort": {
+      "already_configured": "Denna EcoGuard-domän är redan konfigurerad."
+    }
+  },
+  "sensor": {
+    "utility": {
+      "hw": "Varmvatten",
+      "cw": "Kallvatten"
+    },
+    "name": {
+      "daily_consumption": "Daglig förbrukning",
+      "last_update": "Senaste mätning",
+      "month_to_date_consumption": "Månadsförbrukning hittills",
+      "month_to_date_price": "Månadspris hittills",
+      "estimated": "Uppskattad",
+      "metered": "Avläst",
+      "other_items_monthly_cost": "Andra månadskostnader (från senaste faktura)",
+      "month_to_date_total_cost_estimated": "Total månadskostnad hittills (uppskattad)",
+      "month_to_date_total_cost_metered": "Total månadskostnad hittills (avläst)",
+      "end_of_month_estimate": "Uppskattad faktura vid månadsslut",
+      "measuring_point": "Mätpunkt {id}",
+      "device_name": "EcoGuard Node {node_id}"
+    }
+  }
+}

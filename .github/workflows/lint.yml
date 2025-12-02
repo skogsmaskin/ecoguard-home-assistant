@@ -1,0 +1,33 @@
+name: Lint
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: 'pip'
+
+    - name: Install linting tools
+      run: |
+        pip install --upgrade pip
+        pip install ruff pylint
+
+    - name: Run ruff
+      run: |
+        ruff check custom_components/ecoguard/ tests/
+
+    - name: Run pylint
+      run: |
+        pylint custom_components/ecoguard/ tests/ || true

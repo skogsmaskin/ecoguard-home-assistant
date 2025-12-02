@@ -1,0 +1,22 @@
+hass
+private
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.ruff_cache
+.pytest_cache
+
+# Coverage
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# Test reports
+.pytest_report.xml
+.pytest_report.html
+.pytest_report.json

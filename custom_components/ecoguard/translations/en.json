@@ -1,0 +1,50 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "EcoGuard Configuration",
+        "description": "Enter your EcoGuard credentials to connect to your energy monitoring system.",
+        "data": {
+          "username": "Username/Object number (from EcoGuard portal)",
+          "password": "Password (EcoGuard account)",
+          "domain": "Domain code (e.g., SkrentenBrl - from portal URL)",
+          "nord_pool_area": "Nord Pool Area (optional - e.g., NO1, SE3)"
+        },
+        "data_description": {
+          "username": "Your EcoGuard username or object number used to log in to the EcoGuard portal.",
+          "password": "Your EcoGuard account password.",
+          "domain": "Your EcoGuard domain code (e.g., 'SkrentenBrl'). This is typically found in your EcoGuard portal URL or provided by your energy provider.",
+          "nord_pool_area": "Your Nord Pool pricing area code (e.g., 'NO1' for Oslo, 'SE3' for Stockholm). This is used for electricity price data. [Find your area on the Nord Pool map]({nord_pool_link})."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to EcoGuard. Please check your credentials and domain.",
+      "invalid_auth": "Invalid authentication credentials. Please check your username and password.",
+      "unknown": "An unexpected error occurred. Please try again."
+    },
+    "abort": {
+      "already_configured": "This EcoGuard domain is already configured."
+    }
+  },
+  "sensor": {
+    "utility": {
+      "hw": "Hot Water",
+      "cw": "Cold Water"
+    },
+    "name": {
+      "daily_consumption": "Daily Consumption",
+      "last_update": "Latest Measurement",
+      "month_to_date_consumption": "Month-to-Date Consumption",
+      "month_to_date_price": "Month-to-Date Price",
+      "estimated": "Estimated",
+      "metered": "Metered",
+      "other_items_monthly_cost": "Other Items Monthly Cost (Last Bill)",
+      "month_to_date_total_cost_estimated": "Month-to-Date Total Cost (Estimated)",
+      "month_to_date_total_cost_metered": "Month-to-Date Total Cost (Metered)",
+      "end_of_month_estimate": "End-of-Month Bill Estimate",
+      "measuring_point": "Measuring Point {id}",
+      "device_name": "EcoGuard Node {node_id}"
+    }
+  }
+}
