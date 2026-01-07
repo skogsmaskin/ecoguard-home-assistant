@@ -650,8 +650,16 @@ async def async_setup_entry(
     # This ensures entity_ids match our desired format and individual meter sensors are disabled
     async def _update_entity_registry_after_setup() -> None:
         """Update entity registry after entities have been added."""
-        # Wait a moment for entities to be registered
+        # Wait for pending tasks to complete
         await hass.async_block_till_done()
+
+        # Add a small delay to ensure entities are fully registered in the entity registry
+        # This helps avoid race conditions where entities might not be immediately available
+        await asyncio.sleep(1.5)
+
+        # Retry mechanism: attempt to find entities with up to 3 retries
+        max_retries = 3
+        retry_delay = 0.5  # seconds
 
         entity_registry = async_get_entity_registry(hass)
 
@@ -671,18 +679,36 @@ async def async_setup_entry(
                     object_id = unique_id[len(f"{DOMAIN}_"):]
                     desired_entity_id = f"sensor.{object_id}"
 
-                    # Find the entity registry entry by unique_id
+                    # Find the entity registry entry by unique_id with retry mechanism
+                    # This handles race conditions where entities might not be immediately registered
                     entity_entry = None
-                    # Try to get entity_id first, then get the entry
-                    entity_id = _get_entity_id_by_unique_id(entity_registry, unique_id)
-                    if entity_id:
-                        entity_entry = entity_registry.async_get(entity_id)
-                    else:
-                        # Fallback: search by unique_id
-                        for entry in entity_registry.entities.values():
-                            if entry.unique_id == unique_id and entry.platform == DOMAIN:
-                                entity_entry = entry
+                    for attempt in range(max_retries):
+                        # Try to get entity_id first, then get the entry
+                        entity_id = _get_entity_id_by_unique_id(entity_registry, unique_id)
+                        if entity_id:
+                            entity_entry = entity_registry.async_get(entity_id)
+                            if entity_entry:
                                 break
+
+                        # Fallback: search by unique_id
+                        if not entity_entry:
+                            for entry in entity_registry.entities.values():
+                                if entry.unique_id == unique_id and entry.platform == DOMAIN:
+                                    entity_entry = entry
+                                    break
+
+                        if entity_entry:
+                            break
+
+                        # If not found and we have retries left, wait and try again
+                        if attempt < max_retries - 1:
+                            _LOGGER.debug(
+                                "Entity registry entry not found for unique_id=%s (attempt %d/%d), retrying...",
+                                unique_id, attempt + 1, max_retries
+                            )
+                            await asyncio.sleep(retry_delay)
+                            # Refresh entity registry to get latest state
+                            entity_registry = async_get_entity_registry(hass)
 
                     if entity_entry:
                         # Update the entity_id if it doesn't match
@@ -807,7 +833,10 @@ async def async_setup_entry(
                                 _LOGGER.debug("Preserving existing entity state for %s (unique_id=%s, disabled_by=%s)",
                                             entity_entry.entity_id, unique_id, entity_entry.disabled_by)
                     else:
-                        _LOGGER.debug("Entity registry entry not yet found for unique_id=%s (may be created later)", unique_id)
+                        _LOGGER.debug(
+                            "Entity registry entry not found for unique_id=%s after %d retries (entity may be created later)",
+                            unique_id, max_retries
+                        )
 
     # Schedule the update to run after setup completes
     hass.async_create_task(_update_entity_registry_after_setup())
