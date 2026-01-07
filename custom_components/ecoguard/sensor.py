@@ -1234,7 +1234,7 @@ class EcoGuardLatestReceptionSensor(CoordinatorEntity, SensorEntity):
 
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update by fetching latest reception."""
-        if self.hass:
+        if self.hass and not self.hass.is_stopping:
             self.hass.async_create_task(self._async_fetch_value())
 
     async def _async_fetch_value(self) -> None:
@@ -1432,7 +1432,7 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update by fetching monthly aggregate."""
-        if self.hass:
+        if self.hass and not self.hass.is_stopping:
             self.hass.async_create_task(self._async_fetch_value())
 
     async def _async_fetch_value(self) -> None:
@@ -1566,7 +1566,7 @@ class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator],
 
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update by fetching other items cost."""
-        if self.hass:
+        if self.hass and not self.hass.is_stopping:
             self.hass.async_create_task(self._async_fetch_value())
 
     async def _async_fetch_value(self) -> None:
@@ -1725,7 +1725,7 @@ class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update by fetching total monthly cost."""
-        if self.hass:
+        if self.hass and not self.hass.is_stopping:
             self.hass.async_create_task(self._async_fetch_value())
 
     async def _async_fetch_value(self) -> None:
@@ -1937,7 +1937,7 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
 
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update by fetching end-of-month estimate."""
-        if self.hass:
+        if self.hass and not self.hass.is_stopping:
             self.hass.async_create_task(self._async_fetch_value())
 
     async def _async_fetch_value(self) -> None:
@@ -2107,7 +2107,7 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
 
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update by fetching aggregated daily consumption."""
-        if self.hass:
+        if self.hass and not self.hass.is_stopping:
             self.hass.async_create_task(self._async_fetch_value())
 
     async def _async_fetch_value(self) -> None:
@@ -2288,7 +2288,7 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
 
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update by fetching combined daily consumption."""
-        if self.hass:
+        if self.hass and not self.hass.is_stopping:
             self.hass.async_create_task(self._async_fetch_value())
 
     async def _async_fetch_value(self) -> None:
@@ -2512,7 +2512,7 @@ class EcoGuardDailyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], 
 
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update by fetching latest daily cost value."""
-        if self.hass:
+        if self.hass and not self.hass.is_stopping:
             self.hass.async_create_task(self._async_fetch_value())
 
     async def _async_fetch_value(self) -> None:
@@ -2672,7 +2672,7 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
 
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update by fetching aggregated daily cost."""
-        if self.hass:
+        if self.hass and not self.hass.is_stopping:
             self.hass.async_create_task(self._async_fetch_value())
 
     async def _async_fetch_value(self) -> None:
@@ -2878,7 +2878,7 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
 
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update by fetching combined daily cost."""
-        if self.hass:
+        if self.hass and not self.hass.is_stopping:
             self.hass.async_create_task(self._async_fetch_value())
 
     async def _async_fetch_value(self) -> None:
@@ -3143,7 +3143,7 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
 
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update by fetching monthly value."""
-        if self.hass:
+        if self.hass and not self.hass.is_stopping:
             self.hass.async_create_task(self._async_fetch_value())
 
     async def _async_fetch_value(self) -> None:
@@ -3321,7 +3321,7 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
 
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update by fetching combined water value."""
-        if self.hass:
+        if self.hass and not self.hass.is_stopping:
             self.hass.async_create_task(self._async_fetch_value())
 
     async def _async_fetch_value(self) -> None:
