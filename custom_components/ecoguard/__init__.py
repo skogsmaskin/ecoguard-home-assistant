@@ -79,8 +79,25 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     if unload_ok:
-        # Clean up API client
+        # Clean up API client and cancel background tasks
         if entry.entry_id in hass.data[DOMAIN]:
+            # Cancel entity registry update task if it exists
+            # Just cancel it, don't wait - the task has its own timeout and will exit quickly
+            update_task = hass.data[DOMAIN][entry.entry_id].get("entity_registry_update_task")
+            if update_task and not update_task.done():
+                update_task.cancel()
+                # Don't wait - task will handle its own cleanup with timeout
+            
+            # Cancel pending coordinator requests
+            # Just cancel them, don't wait - they'll handle their own cleanup
+            coordinator = hass.data[DOMAIN][entry.entry_id].get("coordinator")
+            if coordinator and hasattr(coordinator, "_pending_requests"):
+                for cache_key, task in list(coordinator._pending_requests.items()):
+                    if not task.done():
+                        task.cancel()
+                coordinator._pending_requests.clear()
+            
+            # Close API client (this will close the aiohttp session)
             api = hass.data[DOMAIN][entry.entry_id].get("api")
             if api:
                 await api.async_close()

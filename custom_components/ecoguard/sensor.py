@@ -650,196 +650,254 @@ async def async_setup_entry(
     # This ensures entity_ids match our desired format and individual meter sensors are disabled
     async def _update_entity_registry_after_setup() -> None:
         """Update entity registry after entities have been added."""
-        # Wait for pending tasks to complete
-        await hass.async_block_till_done()
+        try:
+            # Early exit if Home Assistant is stopping
+            if hass.is_stopping:
+                return
+            
+            # Note: We don't use async_block_till_done() here as it can cause hangs by waiting
+            # for all pending tasks, including ones that might be waiting on other operations
+            
+            # No delay - proceed immediately to speed up execution
+            # If entities aren't found on first try, retry mechanism will handle it
 
-        # Add a small delay to ensure entities are fully registered in the entity registry
-        # This helps avoid race conditions where entities might not be immediately available
-        await asyncio.sleep(1.5)
+            # Simplified retry mechanism: attempt to find entities with minimal retries
+            # Reduced to 1 retry to speed up execution and prevent hanging
+            max_retries = 1
+            retry_delay = 0.1  # seconds - minimal delay
 
-        # Retry mechanism: attempt to find entities with up to 3 retries
-        max_retries = 3
-        retry_delay = 0.5  # seconds
+            entity_registry = async_get_entity_registry(hass)
 
-        entity_registry = async_get_entity_registry(hass)
+            # Define which sensor classes are individual meter sensors (should be disabled by default)
+            individual_meter_sensor_classes = (
+                EcoGuardDailyConsumptionSensor,
+                EcoGuardDailyCostSensor,
+                EcoGuardMonthlyMeterSensor,
+                EcoGuardLatestReceptionSensor,
+            )
 
-        # Define which sensor classes are individual meter sensors (should be disabled by default)
-        individual_meter_sensor_classes = (
-            EcoGuardDailyConsumptionSensor,
-            EcoGuardDailyCostSensor,
-            EcoGuardMonthlyMeterSensor,
-            EcoGuardLatestReceptionSensor,
-        )
+            for sensor in sensors:
+                # Check if Home Assistant is stopping before processing each sensor
+                if hass.is_stopping:
+                    return
+                
+                if hasattr(sensor, '_attr_unique_id') and sensor._attr_unique_id:
+                    unique_id = sensor._attr_unique_id
+                    # Remove domain prefix to get the entity_id suffix (object_id)
+                    if unique_id.startswith(f"{DOMAIN}_"):
+                        object_id = unique_id[len(f"{DOMAIN}_"):]
+                        desired_entity_id = f"sensor.{object_id}"
 
-        for sensor in sensors:
-            if hasattr(sensor, '_attr_unique_id') and sensor._attr_unique_id:
-                unique_id = sensor._attr_unique_id
-                # Remove domain prefix to get the entity_id suffix (object_id)
-                if unique_id.startswith(f"{DOMAIN}_"):
-                    object_id = unique_id[len(f"{DOMAIN}_"):]
-                    desired_entity_id = f"sensor.{object_id}"
+                        # Find the entity registry entry by unique_id with retry mechanism
+                        # This handles race conditions where entities might not be immediately registered
+                        entity_entry = None
+                        for attempt in range(max_retries):
+                            # Check if Home Assistant is stopping before each retry attempt
+                            if hass.is_stopping:
+                                return
+                            # Try to get entity_id first, then get the entry
+                            entity_id = _get_entity_id_by_unique_id(entity_registry, unique_id)
+                            if entity_id:
+                                entity_entry = entity_registry.async_get(entity_id)
+                                if entity_entry:
+                                    break
 
-                    # Find the entity registry entry by unique_id with retry mechanism
-                    # This handles race conditions where entities might not be immediately registered
-                    entity_entry = None
-                    for attempt in range(max_retries):
-                        # Try to get entity_id first, then get the entry
-                        entity_id = _get_entity_id_by_unique_id(entity_registry, unique_id)
-                        if entity_id:
-                            entity_entry = entity_registry.async_get(entity_id)
+                            # Fallback: search by unique_id
+                            if not entity_entry:
+                                for entry in entity_registry.entities.values():
+                                    if entry.unique_id == unique_id and entry.platform == DOMAIN:
+                                        entity_entry = entry
+                                        break
+
                             if entity_entry:
                                 break
 
-                        # Fallback: search by unique_id
-                        if not entity_entry:
-                            for entry in entity_registry.entities.values():
-                                if entry.unique_id == unique_id and entry.platform == DOMAIN:
-                                    entity_entry = entry
-                                    break
+                            # If not found and we have retries left, wait and try again
+                            if attempt < max_retries - 1:
+                                # Check if Home Assistant is stopping before retrying
+                                if hass.is_stopping:
+                                    return
+                                
+                                _LOGGER.debug(
+                                    "Entity registry entry not found for unique_id=%s (attempt %d/%d), retrying...",
+                                    unique_id, attempt + 1, max_retries
+                                )
+                                try:
+                                    await asyncio.sleep(retry_delay)
+                                except asyncio.CancelledError:
+                                    return
+                                
+                                # Check again if Home Assistant is stopping
+                                if hass.is_stopping:
+                                    return
+                                
+                                # Refresh entity registry to get latest state
+                                entity_registry = async_get_entity_registry(hass)
 
                         if entity_entry:
-                            break
-
-                        # If not found and we have retries left, wait and try again
-                        if attempt < max_retries - 1:
-                            _LOGGER.debug(
-                                "Entity registry entry not found for unique_id=%s (attempt %d/%d), retrying...",
-                                unique_id, attempt + 1, max_retries
-                            )
-                            await asyncio.sleep(retry_delay)
-                            # Refresh entity registry to get latest state
-                            entity_registry = async_get_entity_registry(hass)
-
-                    if entity_entry:
-                        # Update the entity_id if it doesn't match
-                        if entity_entry.entity_id != desired_entity_id:
-                            _LOGGER.info("Updating entity_id from %s to %s (unique_id=%s)",
-                                       entity_entry.entity_id, desired_entity_id, unique_id)
-                            try:
-                                entity_registry.async_update_entity(
-                                    entity_entry.entity_id,
-                                    new_entity_id=desired_entity_id,
-                                )
-                                # Re-fetch entity_entry after entity_id update
-                                entity_entry = entity_registry.async_get(desired_entity_id)
-                            except ValueError as e:
-                                # Entity ID might already exist, log and continue
-                                _LOGGER.warning("Could not update entity_id to %s: %s", desired_entity_id, e)
-
-                        # Update entity registry name for individual meter sensors to ensure translations are applied
-                        # This is needed because the entity might not be registered when async_added_to_hass runs
-                        # Build the translated name directly here to ensure it's correct
-                        if isinstance(sensor, (EcoGuardDailyConsumptionSensor, EcoGuardDailyCostSensor,
-                                             EcoGuardLatestReceptionSensor, EcoGuardMonthlyMeterSensor)):
-                            try:
-                                translated_name = None
-
-                                if isinstance(sensor, EcoGuardDailyConsumptionSensor):
-                                    # Get translated components
-                                    measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
-                                        hass, "name.measuring_point", id=sensor._measuring_point_id
+                            # Update the entity_id if it doesn't match
+                            if entity_entry.entity_id != desired_entity_id:
+                                _LOGGER.info("Updating entity_id from %s to %s (unique_id=%s)",
+                                           entity_entry.entity_id, desired_entity_id, unique_id)
+                                try:
+                                    entity_registry.async_update_entity(
+                                        entity_entry.entity_id,
+                                        new_entity_id=desired_entity_id,
                                     )
-                                    utility_name = await _async_get_translation(
-                                        hass, f"utility.{sensor._utility_code.lower()}"
-                                    )
-                                    if utility_name == f"utility.{sensor._utility_code.lower()}":
-                                        utility_name = sensor._utility_code
-                                    consumption_daily = await _async_get_translation(hass, "name.consumption_daily")
-                                    meter = await _async_get_translation(hass, "name.meter")
-                                    translated_name = f'{consumption_daily} - {meter} "{measuring_point_display}" ({utility_name})'
+                                    # Re-fetch entity_entry after entity_id update
+                                    entity_entry = entity_registry.async_get(desired_entity_id)
+                                except ValueError as e:
+                                    # Entity ID might already exist, log and continue
+                                    _LOGGER.warning("Could not update entity_id to %s: %s", desired_entity_id, e)
 
-                                elif isinstance(sensor, EcoGuardDailyCostSensor):
-                                    measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
-                                        hass, "name.measuring_point", id=sensor._measuring_point_id
-                                    )
-                                    utility_name = await _async_get_translation(
-                                        hass, f"utility.{sensor._utility_code.lower()}"
-                                    )
-                                    if utility_name == f"utility.{sensor._utility_code.lower()}":
-                                        utility_name = sensor._utility_code
-                                    cost_daily = await _async_get_translation(hass, "name.cost_daily")
-                                    meter = await _async_get_translation(hass, "name.meter")
-                                    if sensor._cost_type == "estimated":
-                                        estimated = await _async_get_translation(hass, "name.estimated")
-                                        translated_name = f'{cost_daily} {estimated} - {meter} "{measuring_point_display}" ({utility_name})'
-                                    else:
-                                        metered = await _async_get_translation(hass, "name.metered")
-                                        translated_name = f'{cost_daily} {metered} - {meter} "{measuring_point_display}" ({utility_name})'
+                            # Update entity registry name for individual meter sensors to ensure translations are applied
+                            # This is needed because the entity might not be registered when async_added_to_hass runs
+                            # Build the translated name directly here to ensure it's correct
+                            # Skip translation updates if Home Assistant is stopping to avoid delays during shutdown
+                            # Translation updates are expensive (multiple async calls) so we skip them when stopping
+                            if not hass.is_stopping and isinstance(sensor, (EcoGuardDailyConsumptionSensor, EcoGuardDailyCostSensor,
+                                                 EcoGuardLatestReceptionSensor, EcoGuardMonthlyMeterSensor)):
+                                try:
+                                    # Check again before starting expensive translation operations
+                                    if hass.is_stopping:
+                                        return
+                                    
+                                    translated_name = None
+                                    
+                                    # Add a quick check before each async translation call to exit fast if stopping
 
-                                elif isinstance(sensor, EcoGuardLatestReceptionSensor):
-                                    measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
-                                        hass, "name.measuring_point", id=sensor._measuring_point_id
-                                    )
-                                    reception_last_update = await _async_get_translation(hass, "name.reception_last_update")
-                                    meter = await _async_get_translation(hass, "name.meter")
-                                    if sensor._utility_code:
+                                    if isinstance(sensor, EcoGuardDailyConsumptionSensor):
+                                        # Get translated components
+                                        if hass.is_stopping:
+                                            return
+                                        measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
+                                            hass, "name.measuring_point", id=sensor._measuring_point_id
+                                        )
+                                        if hass.is_stopping:
+                                            return
                                         utility_name = await _async_get_translation(
                                             hass, f"utility.{sensor._utility_code.lower()}"
                                         )
                                         if utility_name == f"utility.{sensor._utility_code.lower()}":
                                             utility_name = sensor._utility_code
-                                        translated_name = f'{reception_last_update} - {meter} "{measuring_point_display}" ({utility_name})'
-                                    else:
-                                        translated_name = f'{reception_last_update} - {meter} "{measuring_point_display}"'
+                                        if hass.is_stopping:
+                                            return
+                                        consumption_daily = await _async_get_translation(hass, "name.consumption_daily")
+                                        if hass.is_stopping:
+                                            return
+                                        meter = await _async_get_translation(hass, "name.meter")
+                                        translated_name = f'{consumption_daily} - {meter} "{measuring_point_display}" ({utility_name})'
 
-                                elif isinstance(sensor, EcoGuardMonthlyMeterSensor):
-                                    measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
-                                        hass, "name.measuring_point", id=sensor._measuring_point_id
-                                    )
-                                    utility_name = await _async_get_translation(
-                                        hass, f"utility.{sensor._utility_code.lower()}"
-                                    )
-                                    if utility_name == f"utility.{sensor._utility_code.lower()}":
-                                        utility_name = sensor._utility_code
-                                    if sensor._aggregate_type == "con":
-                                        aggregate_name = await _async_get_translation(hass, "name.consumption_monthly_aggregated")
-                                    else:
-                                        aggregate_name = await _async_get_translation(hass, "name.cost_monthly_aggregated")
-                                    if sensor._aggregate_type == "price" and sensor._cost_type == "estimated":
-                                        estimated = await _async_get_translation(hass, "name.estimated")
-                                        aggregate_name = f"{aggregate_name} {estimated}"
-                                    elif sensor._aggregate_type == "price" and sensor._cost_type == "actual":
-                                        metered = await _async_get_translation(hass, "name.metered")
-                                        aggregate_name = f"{aggregate_name} {metered}"
-                                    meter = await _async_get_translation(hass, "name.meter")
-                                    translated_name = f'{aggregate_name} - {meter} "{measuring_point_display}" ({utility_name})'
+                                    elif isinstance(sensor, EcoGuardDailyCostSensor):
+                                        measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
+                                            hass, "name.measuring_point", id=sensor._measuring_point_id
+                                        )
+                                        utility_name = await _async_get_translation(
+                                            hass, f"utility.{sensor._utility_code.lower()}"
+                                        )
+                                        if utility_name == f"utility.{sensor._utility_code.lower()}":
+                                            utility_name = sensor._utility_code
+                                        cost_daily = await _async_get_translation(hass, "name.cost_daily")
+                                        meter = await _async_get_translation(hass, "name.meter")
+                                        if sensor._cost_type == "estimated":
+                                            estimated = await _async_get_translation(hass, "name.estimated")
+                                            translated_name = f'{cost_daily} {estimated} - {meter} "{measuring_point_display}" ({utility_name})'
+                                        else:
+                                            metered = await _async_get_translation(hass, "name.metered")
+                                            translated_name = f'{cost_daily} {metered} - {meter} "{measuring_point_display}" ({utility_name})'
 
-                                if translated_name and entity_entry.name != translated_name:
-                                    _LOGGER.debug("Updating entity registry name for %s from '%s' to '%s'",
-                                                entity_entry.entity_id, entity_entry.name, translated_name)
-                                    entity_registry.async_update_entity(
-                                        entity_entry.entity_id,
-                                        name=translated_name,
-                                    )
-                            except Exception as e:
-                                _LOGGER.debug("Could not update entity registry name for %s: %s",
-                                            entity_entry.entity_id, e)
+                                    elif isinstance(sensor, EcoGuardLatestReceptionSensor):
+                                        measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
+                                            hass, "name.measuring_point", id=sensor._measuring_point_id
+                                        )
+                                        reception_last_update = await _async_get_translation(hass, "name.reception_last_update")
+                                        meter = await _async_get_translation(hass, "name.meter")
+                                        if sensor._utility_code:
+                                            utility_name = await _async_get_translation(
+                                                hass, f"utility.{sensor._utility_code.lower()}"
+                                            )
+                                            if utility_name == f"utility.{sensor._utility_code.lower()}":
+                                                utility_name = sensor._utility_code
+                                            translated_name = f'{reception_last_update} - {meter} "{measuring_point_display}" ({utility_name})'
+                                        else:
+                                            translated_name = f'{reception_last_update} - {meter} "{measuring_point_display}"'
 
-                        # Only disable individual meter sensors if they're newly created (not in existing_unique_ids)
-                        # This preserves the state of entities that existed before
-                        if isinstance(sensor, individual_meter_sensor_classes):
-                            is_new_entity = unique_id not in existing_unique_ids
-                            if is_new_entity and entity_entry.disabled_by is None:
-                                _LOGGER.info("Disabling newly created individual meter sensor: %s (unique_id=%s)",
-                                           entity_entry.entity_id, unique_id)
-                                try:
-                                    entity_registry.async_update_entity(
-                                        entity_entry.entity_id,
-                                        disabled_by=RegistryEntryDisabler.INTEGRATION,
-                                    )
+                                    elif isinstance(sensor, EcoGuardMonthlyMeterSensor):
+                                        measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
+                                            hass, "name.measuring_point", id=sensor._measuring_point_id
+                                        )
+                                        utility_name = await _async_get_translation(
+                                            hass, f"utility.{sensor._utility_code.lower()}"
+                                        )
+                                        if utility_name == f"utility.{sensor._utility_code.lower()}":
+                                            utility_name = sensor._utility_code
+                                        if sensor._aggregate_type == "con":
+                                            aggregate_name = await _async_get_translation(hass, "name.consumption_monthly_aggregated")
+                                        else:
+                                            aggregate_name = await _async_get_translation(hass, "name.cost_monthly_aggregated")
+                                        if sensor._aggregate_type == "price" and sensor._cost_type == "estimated":
+                                            estimated = await _async_get_translation(hass, "name.estimated")
+                                            aggregate_name = f"{aggregate_name} {estimated}"
+                                        elif sensor._aggregate_type == "price" and sensor._cost_type == "actual":
+                                            metered = await _async_get_translation(hass, "name.metered")
+                                            aggregate_name = f"{aggregate_name} {metered}"
+                                        meter = await _async_get_translation(hass, "name.meter")
+                                        translated_name = f'{aggregate_name} - {meter} "{measuring_point_display}" ({utility_name})'
+
+                                    if translated_name and entity_entry.name != translated_name:
+                                        _LOGGER.debug("Updating entity registry name for %s from '%s' to '%s'",
+                                                    entity_entry.entity_id, entity_entry.name, translated_name)
+                                        entity_registry.async_update_entity(
+                                            entity_entry.entity_id,
+                                            name=translated_name,
+                                        )
                                 except Exception as e:
-                                    _LOGGER.warning("Could not disable entity %s: %s", entity_entry.entity_id, e)
-                            elif not is_new_entity:
-                                _LOGGER.debug("Preserving existing entity state for %s (unique_id=%s, disabled_by=%s)",
-                                            entity_entry.entity_id, unique_id, entity_entry.disabled_by)
-                    else:
-                        _LOGGER.debug(
-                            "Entity registry entry not found for unique_id=%s after %d retries (entity may be created later)",
-                            unique_id, max_retries
-                        )
+                                    _LOGGER.debug("Could not update entity registry name for %s: %s",
+                                                entity_entry.entity_id, e)
+
+                            # Only disable individual meter sensors if they're newly created (not in existing_unique_ids)
+                            # This preserves the state of entities that existed before
+                            if isinstance(sensor, individual_meter_sensor_classes):
+                                is_new_entity = unique_id not in existing_unique_ids
+                                if is_new_entity and entity_entry.disabled_by is None:
+                                    _LOGGER.info("Disabling newly created individual meter sensor: %s (unique_id=%s)",
+                                               entity_entry.entity_id, unique_id)
+                                    try:
+                                        entity_registry.async_update_entity(
+                                            entity_entry.entity_id,
+                                            disabled_by=RegistryEntryDisabler.INTEGRATION,
+                                        )
+                                    except Exception as e:
+                                        _LOGGER.warning("Could not disable entity %s: %s", entity_entry.entity_id, e)
+                                elif not is_new_entity:
+                                    _LOGGER.debug("Preserving existing entity state for %s (unique_id=%s, disabled_by=%s)",
+                                                entity_entry.entity_id, unique_id, entity_entry.disabled_by)
+                        else:
+                            _LOGGER.debug(
+                                "Entity registry entry not found for unique_id=%s after %d retries (entity may be created later)",
+                                unique_id, max_retries
+                            )
+        except asyncio.CancelledError:
+            _LOGGER.debug("Entity registry update task cancelled")
+            raise
+        except Exception as e:
+            _LOGGER.warning("Error in entity registry update task: %s", e)
 
     # Schedule the update to run after setup completes
-    hass.async_create_task(_update_entity_registry_after_setup())
+    # Store task reference so it can be cancelled during unload/shutdown
+    # Wrap in timeout to prevent hanging - max 1 second
+    async def _update_with_timeout() -> None:
+        try:
+            await asyncio.wait_for(_update_entity_registry_after_setup(), timeout=1.0)
+        except asyncio.TimeoutError:
+            _LOGGER.debug("Entity registry update task timed out after 1 second")
+        except asyncio.CancelledError:
+            _LOGGER.debug("Entity registry update task was cancelled")
+            raise
+    
+    update_task = hass.async_create_task(_update_with_timeout())
+    if entry.entry_id in hass.data[DOMAIN]:
+        hass.data[DOMAIN][entry.entry_id]["entity_registry_update_task"] = update_task
 
 
 class EcoGuardSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
@@ -1011,7 +1069,7 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update by fetching latest daily consumption value."""
-        if self.hass:
+        if self.hass and not self.hass.is_stopping:
             self.hass.async_create_task(self._async_fetch_value())
 
     async def _async_fetch_value(self) -> None:
