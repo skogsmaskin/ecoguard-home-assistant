@@ -560,6 +560,8 @@ async def async_setup_entry(
             )
 
             # Monthly cost sensors per meter: metered and estimated
+            # Note: aggregate_type="price" matches API terminology (API uses "[price]" in utility codes),
+            # but sensor names use "cost" terminology for user-facing display
             monthly_cost_metered_meter_sensor = EcoGuardMonthlyMeterSensor(
                 hass=hass,
                 coordinator=coordinator,
@@ -1285,8 +1287,15 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
             hass: Home Assistant instance
             coordinator: The coordinator instance
             utility_code: Utility code (e.g., "HW", "CW")
-            aggregate_type: "con" for consumption, "price" for price
+            aggregate_type: "con" for consumption, "price" for price/cost
             cost_type: "actual" for metered API data, "estimated" for estimated (only for price)
+
+        Note:
+            The aggregate_type parameter uses "price" to match the EcoGuard API terminology
+            (the API uses "[price]" in utility codes like "HW[price]"). However, user-facing
+            sensor names use "cost" terminology (e.g., "Cost Monthly Aggregated") as it's more
+            natural in English. This distinction is intentional: "price" for API/internal use,
+            "cost" for user-facing display.
         """
         super().__init__(coordinator)
         self._hass = hass
@@ -2977,8 +2986,15 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
             utility_code: Utility code (e.g., "HW", "CW")
             measuring_point_id: Measuring point ID
             measuring_point_name: Measuring point name
-            aggregate_type: "con" for consumption, "price" for price
+            aggregate_type: "con" for consumption, "price" for price/cost
             cost_type: "actual" for metered API data, "estimated" for estimated (only for price)
+
+        Note:
+            The aggregate_type parameter uses "price" to match the EcoGuard API terminology
+            (the API uses "[price]" in utility codes like "HW[price]"). However, user-facing
+            sensor names use "cost" terminology (e.g., "Cost Monthly Aggregated") as it's more
+            natural in English. This distinction is intentional: "price" for API/internal use,
+            "cost" for user-facing display.
         """
         super().__init__(coordinator)
         self._hass = hass
@@ -3180,8 +3196,15 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
         Args:
             hass: Home Assistant instance
             coordinator: The coordinator instance
-            aggregate_type: "con" for consumption, "price" for price
+            aggregate_type: "con" for consumption, "price" for price/cost
             cost_type: "actual" for metered API data, "estimated" for estimated (only for price)
+
+        Note:
+            The aggregate_type parameter uses "price" to match the EcoGuard API terminology
+            (the API uses "[price]" in utility codes like "HW[price]"). However, user-facing
+            sensor names use "cost" terminology (e.g., "Cost Monthly Aggregated") as it's more
+            natural in English. This distinction is intentional: "price" for API/internal use,
+            "cost" for user-facing display.
         """
         super().__init__(coordinator)
         self._hass = hass
