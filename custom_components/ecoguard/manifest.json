@@ -4,6 +4,7 @@
   "codeowners": ["@skogsmaskin"],
   "config_flow": true,
   "documentation": "https://github.com/skogsmaskin/ecoguard-home-assistant",
+  "issue_tracker": "https://github.com/skogsmaskin/ecoguard-home-assistant/issues",
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "requirements": ["aiohttp>=3.8.0", "nordpool>=0.5.0"],
