@@ -203,7 +203,7 @@ async def _async_get_translation(hass: HomeAssistant, key: str, **kwargs: Any) -
 
     default = defaults.get(key, key)
     if default == key:
-        _LOGGER.warning("Translation key %s not found in defaults dictionary, returning key as-is", key)
+        _LOGGER.debug("Translation key %s not found in defaults dictionary, returning key as-is", key)
     return default.format(**kwargs) if kwargs else default
 
 
