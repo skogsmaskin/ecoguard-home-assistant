@@ -334,18 +334,36 @@ class EcoGuardAPI:
         grouping: str = "apartment",
         utilities: Optional[list[str]] = None,
         include_sub_nodes: bool = True,
+        measuring_point_id: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """Get consumption data for a node."""
+        """Get consumption or price data for a node.
+        
+        Args:
+            node_id: Node ID
+            from_time: Start timestamp (Unix timestamp)
+            to_time: End timestamp (Unix timestamp)
+            interval: Data interval (e.g., "d" for daily)
+            grouping: Grouping type (e.g., "apartment")
+            utilities: List of utility codes (e.g., ["HW[con]", "CW[price]"])
+            include_sub_nodes: Whether to include sub-nodes
+            measuring_point_id: Optional measuring point ID to filter by specific meter
+        """
         endpoint = API_DATA.format(domaincode=self._domain)
         params = {
-            "nodeID": str(node_id),  # Note: webapp uses nodeID (capital ID)
             "from": str(from_time),
             "to": str(to_time),
             "interval": interval,
             "grouping": grouping,
         }
-        if include_sub_nodes:
-            params["includeSubNodes"] = "true"  # Note: webapp uses camelCase
+        
+        # When measuringpointid is specified, don't include nodeID or includeSubNodes
+        # The API doesn't allow multiple selection parameters together
+        if measuring_point_id is not None:
+            params["measuringpointid"] = str(measuring_point_id)
+        else:
+            params["nodeID"] = str(node_id)  # Note: webapp uses nodeID (capital ID)
+            if include_sub_nodes:
+                params["includeSubNodes"] = "true"  # Note: webapp uses camelCase
 
         # Build query string with proper URL encoding for utilities
         query_parts = []

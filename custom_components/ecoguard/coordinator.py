@@ -432,6 +432,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
             # Query data endpoint for consumption
+            # Use measuringpointid in API call if provided for efficiency
             data = await self.api.get_data(
                 node_id=self.node_id,
                 from_time=from_time,
@@ -439,7 +440,8 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 interval="d",
                 grouping="apartment",
                 utilities=[f"{utility_code}[con]"],
-                include_sub_nodes=True,
+                include_sub_nodes=measuring_point_id is None,  # Only include sub-nodes if not filtering by measuring point
+                measuring_point_id=measuring_point_id,
             )
 
             if not data or not isinstance(data, list):
@@ -447,20 +449,19 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Find the latest non-null value
             # Data structure: [{"ID": ..., "Name": ..., "Result": [{"Utl": "HW", "Func": "con", "Unit": "m3", "Values": [...]}]}]
-            # If measuring_point_id or external_key is provided, filter to that specific meter
+            # If measuringpointid was used, the API should have filtered the data already
+            # But we still check for compatibility and in case external_key filtering is needed
             for node_data in data:
-                # Filter by measuring point if specified
+                # If measuring_point_id was provided but API didn't filter correctly, do client-side filtering
                 if measuring_point_id is not None:
                     node_id = node_data.get("ID")
                     # Check if this node_data corresponds to the measuring point
-                    # The node_data ID might be the measuring point ID or we need to match via installations
                     if node_id != measuring_point_id:
-                        # Try to match via installations
+                        # Try to match via installations (fallback if API filtering didn't work)
                         matched = False
                         for inst in self._installations:
                             if inst.get("MeasuringPointID") == measuring_point_id:
                                 # Check if this node_data matches the installation
-                                # We might need to match by ExternalKey or other identifier
                                 if external_key and inst.get("ExternalKey") == external_key:
                                     matched = True
                                     break
@@ -555,6 +556,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
             # Query data endpoint for price
+            # Use measuringpointid in API call if provided for efficiency
             data = await self.api.get_data(
                 node_id=self.node_id,
                 from_time=from_time,
@@ -562,13 +564,14 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 interval="d",
                 grouping="apartment",
                 utilities=[f"{utility_code}[price]"],
-                include_sub_nodes=True,
+                include_sub_nodes=measuring_point_id is None,  # Only include sub-nodes if not filtering by measuring point
+                measuring_point_id=measuring_point_id,
             )
 
             # Find the latest non-null value from price data
             # Data structure: [{"ID": ..., "Name": ..., "Result": [{"Utl": "HW", "Func": "price", "Unit": "NOK", "Values": [...]}]}]
-            # If measuring_point_id or external_key is provided, filter to that specific meter
-            # Otherwise, aggregate across all meters
+            # If measuringpointid was used, the API should have filtered the data already
+            # But we still check for compatibility and in case external_key filtering is needed
             total_value = 0.0
             latest_time = None
             unit = ""
@@ -576,12 +579,12 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             if data and isinstance(data, list):
                 for node_data in data:
-                    # Filter by measuring point if specified
+                    # If measuring_point_id was provided but API didn't filter correctly, do client-side filtering
                     if measuring_point_id is not None:
                         node_id = node_data.get("ID")
                         # Check if this node_data corresponds to the measuring point
                         if node_id != measuring_point_id:
-                            # Try to match via installations
+                            # Try to match via installations (fallback if API filtering didn't work)
                             matched = False
                             for inst in self._installations:
                                 if inst.get("MeasuringPointID") == measuring_point_id:
@@ -1814,107 +1817,734 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             or None if no data is available.
 
         Note:
-            For price aggregates, per-meter price data is not directly available from the API.
-            This method uses proportional allocation based on consumption share: the meter's
-            monthly cost is calculated as (meter_consumption / total_utility_consumption) * total_utility_cost.
-            This provides a more accurate estimate than using the full utility-level cost, but assumes
-            all meters for the same utility have the same rate. If meters have different rates or
-            consumption patterns, the allocation may not be perfectly accurate.
+            For price aggregates, this method fetches per-meter price data directly from the API
+            using measuringpointid. The API provides accurate per-meter cost data without requiring
+            proportional allocation.
         """
-        # For price, calculate proportional allocation based on consumption share
+        # For price, fetch directly using measuringpointid
         if aggregate_type == "price":
-            _LOGGER.debug(
-                "Calculating per-meter price for meter %d using proportional allocation based on consumption share",
-                measuring_point_id,
-            )
-            
-            # Get utility-level price aggregate
-            utility_price_data = await self.get_monthly_aggregate(
-                utility_code=utility_code,
-                year=year,
-                month=month,
-                aggregate_type="price",
-                cost_type=cost_type,
-            )
-            
-            if not utility_price_data or utility_price_data.get("value") is None:
-                _LOGGER.debug(
-                    "No utility-level price data available for %s %d-%02d, cannot calculate per-meter cost",
-                    utility_code, year, month
-                )
-                return None
-            
-            utility_total_cost = utility_price_data.get("value", 0.0)
-            currency = utility_price_data.get("unit", "")
-            
-            # Get this meter's consumption for the month
-            meter_consumption_data = await self.get_monthly_aggregate_for_meter(
-                utility_code=utility_code,
-                measuring_point_id=measuring_point_id,
-                external_key=external_key,
-                year=year,
-                month=month,
-                aggregate_type="con",
-                cost_type="actual",
-            )
-            
-            if not meter_consumption_data or meter_consumption_data.get("value") is None:
-                _LOGGER.debug(
-                    "No consumption data available for meter %d, cannot calculate proportional cost",
-                    measuring_point_id
-                )
-                return None
-            
-            meter_consumption = meter_consumption_data.get("value", 0.0)
-            
-            # Get total utility-level consumption for the month
-            utility_consumption_data = await self.get_monthly_aggregate(
-                utility_code=utility_code,
-                year=year,
-                month=month,
-                aggregate_type="con",
-                cost_type="actual",
-            )
-            
-            if not utility_consumption_data or utility_consumption_data.get("value") is None:
-                _LOGGER.debug(
-                    "No utility-level consumption data available for %s %d-%02d, cannot calculate proportional cost",
-                    utility_code, year, month
-                )
-                return None
-            
-            utility_total_consumption = utility_consumption_data.get("value", 0.0)
-            
-            # Calculate proportional cost: (meter_consumption / total_consumption) * total_cost
-            if utility_total_consumption > 0:
-                consumption_share = meter_consumption / utility_total_consumption
-                meter_cost = utility_total_cost * consumption_share
-                
-                _LOGGER.debug(
-                    "Proportional cost allocation for meter %d: %.2f / %.2f = %.2f%% share, cost = %.2f * %.2f%% = %.2f",
+            try:
+                # Get timezone from settings
+                timezone_str = self.get_setting("TimeZoneIANA")
+                if not timezone_str:
+                    timezone_str = "UTC"
+
+                try:
+                    tz = zoneinfo.ZoneInfo(timezone_str)
+                except Exception:
+                    _LOGGER.warning("Invalid timezone %s, using UTC", timezone_str)
+                    tz = zoneinfo.ZoneInfo("UTC")
+
+                # Calculate month boundaries in the configured timezone
+                from_date = datetime(year, month, 1, tzinfo=tz)
+                if month == 12:
+                    to_date = datetime(year + 1, 1, 1, tzinfo=tz)
+                else:
+                    to_date = datetime(year, month + 1, 1, tzinfo=tz)
+
+                from_time = int(from_date.timestamp())
+                to_time = int(to_date.timestamp())
+
+                # Create cache key for this request
+                cache_key = f"data_meter_{self.node_id}_{measuring_point_id}_{from_time}_{to_time}_{utility_code}_{aggregate_type}"
+
+                # Check cache first
+                if cache_key in self._data_request_cache:
+                    cached_data, cache_timestamp = self._data_request_cache[cache_key]
+                    age = time.time() - cache_timestamp
+                    if age < self._data_cache_ttl:
+                        _LOGGER.debug(
+                            "Using cached price data for meter %d %s[%s] %d-%02d (age: %.1f seconds)",
+                            measuring_point_id,
+                            utility_code,
+                            aggregate_type,
+                            year,
+                            month,
+                            age,
+                        )
+                        data = cached_data
+                    else:
+                        del self._data_request_cache[cache_key]
+                        data = None
+                else:
+                    data = None
+
+                # Check if there's already a pending request
+                if data is None and cache_key in self._pending_requests:
+                    _LOGGER.debug(
+                        "Waiting for pending price request for meter %d %s[%s] %d-%02d",
+                        measuring_point_id,
+                        utility_code,
+                        aggregate_type,
+                        year,
+                        month,
+                    )
+                    try:
+                        data = await self._pending_requests[cache_key]
+                    except Exception as err:
+                        _LOGGER.warning(
+                            "Pending price request failed for meter %d %s[%s] %d-%02d: %s",
+                            measuring_point_id,
+                            utility_code,
+                            aggregate_type,
+                            year,
+                            month,
+                            err,
+                        )
+                        if cache_key in self._pending_requests:
+                            del self._pending_requests[cache_key]
+                        data = None
+
+                # If no cached data and no pending request, make the API call
+                if data is None:
+                    async def fetch_data():
+                        try:
+                            utilities = [f"{utility_code}[price]"]
+                            # When querying with measuringpointid, ensure the utility matches the measuring point
+                            # The utility_code comes from the installation's registers, so it should match
+                            _LOGGER.debug(
+                                "Fetching price data for measuring_point_id=%d with utility=%s (matching utility for this meter)",
+                                measuring_point_id,
+                                utility_code,
+                            )
+                            result = await self.api.get_data(
+                                node_id=self.node_id,
+                                from_time=from_time,
+                                to_time=to_time,
+                                interval="d",
+                                grouping="apartment",
+                                utilities=utilities,
+                                include_sub_nodes=False,  # Don't include sub-nodes when filtering by measuring point
+                                measuring_point_id=measuring_point_id,
+                            )
+                            if result:
+                                self._data_request_cache[cache_key] = (result, time.time())
+                            return result
+                        finally:
+                            if cache_key in self._pending_requests:
+                                del self._pending_requests[cache_key]
+
+                    task = asyncio.create_task(fetch_data())
+                    self._pending_requests[cache_key] = task
+                    data = await task
+
+                if not data or not isinstance(data, list):
+                    _LOGGER.debug(
+                        "No price data returned for meter %d (%s %d-%02d)",
+                        measuring_point_id,
+                        utility_code,
+                        year,
+                        month,
+                    )
+                    # For estimated costs, try to calculate from consumption × rate even if API returned no data
+                    if cost_type == "estimated":
+                        _LOGGER.debug(
+                            "No API price data for meter %d (%s %d-%02d), trying estimated cost calculation",
+                            measuring_point_id,
+                            utility_code,
+                            year,
+                            month,
+                        )
+                        # Skip data processing and go directly to estimated cost calculation
+                        has_data = False
+                    else:
+                        return None
+                else:
+                    # Extract price values from the response
+                    total_value = 0.0
+                    unit = ""
+                    has_data = False
+
+                    for node_data in data:
+                        results = node_data.get("Result", [])
+                        for result in results:
+                            if result.get("Utl") == utility_code and result.get("Func") == "price":
+                                values = result.get("Values", [])
+                                unit = result.get("Unit", "")
+                                
+                                _LOGGER.debug(
+                                    "Processing price data for meter %d (%s %d-%02d): found %d value entries",
+                                    measuring_point_id,
+                                    utility_code,
+                                    year,
+                                    month,
+                                    len(values),
+                                )
+
+                                # Sum all non-null values for the month
+                                non_null_count = 0
+                                null_count = 0
+                                zero_count = 0
+                                for value_entry in values:
+                                    value = value_entry.get("Value")
+                                    if value is not None:
+                                        total_value += value
+                                        has_data = True
+                                        non_null_count += 1
+                                        if value == 0:
+                                            zero_count += 1
+                                    else:
+                                        null_count += 1
+                                
+                                _LOGGER.debug(
+                                    "Price data summary for meter %d (%s %d-%02d): %d non-null values (%d zeros), %d null values, total=%.2f %s",
+                                    measuring_point_id,
+                                    utility_code,
+                                    year,
+                                    month,
+                                    non_null_count,
+                                    zero_count,
+                                    null_count,
+                                    total_value,
+                                    unit,
+                                )
+
+                if has_data:
+                    # If we have data but total is 0, and this is an estimated cost request,
+                    # fall back to calculation instead of returning 0
+                    if total_value == 0.0 and cost_type == "estimated":
+                        _LOGGER.debug(
+                            "Found price data for meter %d (%s %d-%02d) but total is 0.00. For estimated costs, falling back to calculation.",
+                            measuring_point_id,
+                            utility_code,
+                            year,
+                            month,
+                        )
+                        # For HW, try proportional allocation first (more accurate than spot price estimation)
+                        if utility_code == "HW":
+                            # Get this meter's consumption for the month
+                            meter_consumption_data = await self.get_monthly_aggregate_for_meter(
+                                utility_code=utility_code,
+                                measuring_point_id=measuring_point_id,
+                                external_key=external_key,
+                                year=year,
+                                month=month,
+                                aggregate_type="con",
+                                cost_type="actual",
+                            )
+                            
+                            if meter_consumption_data and meter_consumption_data.get("value") is not None:
+                                meter_consumption = meter_consumption_data.get("value", 0.0)
+                                
+                                if meter_consumption > 0:
+                                    # Get total HW consumption and estimated cost for the month
+                                    total_hw_consumption_data = await self.get_monthly_aggregate(
+                                        utility_code="HW",
+                                        year=year,
+                                        month=month,
+                                        aggregate_type="con",
+                                    )
+                                    total_hw_cost_data = await self.get_monthly_aggregate(
+                                        utility_code="HW",
+                                        year=year,
+                                        month=month,
+                                        aggregate_type="price",
+                                        cost_type="estimated",
+                                    )
+                                    
+                                    if total_hw_consumption_data and total_hw_cost_data:
+                                        total_hw_consumption = total_hw_consumption_data.get("value", 0.0)
+                                        total_hw_cost = total_hw_cost_data.get("value", 0.0)
+                                        
+                                        if total_hw_consumption > 0 and total_hw_cost > 0:
+                                            # Calculate this meter's share of total consumption
+                                            consumption_share = meter_consumption / total_hw_consumption
+                                            
+                                            # Allocate cost proportionally
+                                            allocated_cost = total_hw_cost * consumption_share
+                                            currency = total_hw_cost_data.get("unit") or self.get_setting("Currency") or "NOK"
+                                            
+                                            _LOGGER.info(
+                                                "Allocated HW cost for meter %d %d-%02d (from zero API data): %.2f %s (meter: %.2f m3 / total: %.2f m3 = %.1f%%, total cost: %.2f %s)",
+                                                measuring_point_id, year, month,
+                                                allocated_cost, currency,
+                                                meter_consumption,
+                                                total_hw_consumption,
+                                                consumption_share * 100,
+                                                total_hw_cost,
+                                                currency,
+                                            )
+                                            
+                                            return {
+                                                "value": allocated_cost,
+                                                "unit": currency,
+                                                "year": year,
+                                                "month": month,
+                                                "utility_code": utility_code,
+                                                "aggregate_type": "price",
+                                                "cost_type": "estimated",
+                                                "measuring_point_id": measuring_point_id,
+                                            }
+                        # Fall through to estimated cost calculation below
+                    else:
+                        _LOGGER.debug(
+                            "Found per-meter price data for meter %d (%s %d-%02d): %.2f %s",
+                            measuring_point_id,
+                            utility_code,
+                            year,
+                            month,
+                            total_value,
+                            unit,
+                        )
+                        return {
+                            "value": total_value,
+                            "unit": unit,
+                            "year": year,
+                            "month": month,
+                            "utility_code": utility_code,
+                            "aggregate_type": "price",
+                            "cost_type": cost_type,
+                            "measuring_point_id": measuring_point_id,
+                        }
+                else:
+                    _LOGGER.debug(
+                        "No price data found for meter %d (%s %d-%02d)",
+                        measuring_point_id,
+                        utility_code,
+                        year,
+                        month,
+                    )
+                    # For estimated costs, fall back to calculating from consumption × rate
+                    if cost_type == "estimated":
+                        _LOGGER.debug(
+                            "Calculating estimated cost for meter %d (%s %d-%02d) from consumption × rate",
+                            measuring_point_id,
+                            utility_code,
+                            year,
+                            month,
+                        )
+                        # Get this meter's consumption for the month
+                        meter_consumption_data = await self.get_monthly_aggregate_for_meter(
+                            utility_code=utility_code,
+                            measuring_point_id=measuring_point_id,
+                            external_key=external_key,
+                            year=year,
+                            month=month,
+                            aggregate_type="con",
+                            cost_type="actual",
+                        )
+                        
+                        # Check if we have consumption data
+                        if not meter_consumption_data or meter_consumption_data.get("value") is None:
+                            # For HW, still try spot price estimation even without consumption data
+                            # (it will return 0 cost if consumption is 0, which is correct)
+                            if utility_code == "HW":
+                                _LOGGER.debug(
+                                    "No consumption data for HW meter %d %d-%02d, trying spot price estimation anyway",
+                                    measuring_point_id, year, month
+                                )
+                                # Get CW price and consumption for the estimation
+                                # Use aggregate CW data (like get_monthly_aggregate does) since
+                                # the CW meter might be different from the HW meter
+                                cw_price_data = await self.get_monthly_aggregate(
+                                    utility_code="CW",
+                                    year=year,
+                                    month=month,
+                                    aggregate_type="price",
+                                    cost_type="actual",
+                                )
+                                cw_consumption_data = await self.get_monthly_aggregate(
+                                    utility_code="CW",
+                                    year=year,
+                                    month=month,
+                                    aggregate_type="con",
+                                )
+                                
+                                cw_price = cw_price_data.get("value") if cw_price_data else None
+                                cw_consumption = cw_consumption_data.get("value") if cw_consumption_data else None
+                                
+                                # Estimate HW price from spot prices (will return 0 if consumption is 0)
+                                hw_estimated_data = await self._get_hw_price_from_spot_prices(
+                                    consumption=0.0,
+                                    year=year,
+                                    month=month,
+                                    cold_water_price=cw_price,
+                                    cold_water_consumption=cw_consumption,
+                                )
+                                
+                                if hw_estimated_data:
+                                    currency = hw_estimated_data.get("unit") or self.get_setting("Currency") or "NOK"
+                                    _LOGGER.debug(
+                                        "Estimated HW cost for meter %d %d-%02d: %.2f %s (no consumption data, using 0)",
+                                        measuring_point_id, year, month,
+                                        hw_estimated_data.get("value"), currency
+                                    )
+                                    return {
+                                        "value": hw_estimated_data.get("value"),
+                                        "unit": currency,
+                                        "year": year,
+                                        "month": month,
+                                        "utility_code": utility_code,
+                                        "aggregate_type": "price",
+                                        "cost_type": "estimated",
+                                        "measuring_point_id": measuring_point_id,
+                                    }
+                                else:
+                                    _LOGGER.debug(
+                                        "Spot price estimation failed for HW meter %d %d-%02d (no consumption data)",
+                                        measuring_point_id, year, month
+                                    )
+                                    return None
+                            else:
+                                _LOGGER.debug(
+                                    "No consumption data available for meter %d (%s), cannot calculate estimated cost",
+                                    measuring_point_id, utility_code
+                                )
+                                return None
+                        
+                        meter_consumption = meter_consumption_data.get("value", 0.0)
+                        
+                        # Get rate from billing
+                        rate = await self.get_rate_from_billing(utility_code, year, month)
+                        
+                        if rate is None:
+                            # For HW, try proportional allocation from aggregate estimated cost
+                            if utility_code == "HW":
+                                _LOGGER.debug(
+                                    "No rate found for HW %d-%02d, trying proportional allocation from aggregate estimated cost",
+                                    year, month
+                                )
+                                
+                                # Get total HW consumption and estimated cost for the month
+                                total_hw_consumption_data = await self.get_monthly_aggregate(
+                                    utility_code="HW",
+                                    year=year,
+                                    month=month,
+                                    aggregate_type="con",
+                                )
+                                total_hw_cost_data = await self.get_monthly_aggregate(
+                                    utility_code="HW",
+                                    year=year,
+                                    month=month,
+                                    aggregate_type="price",
+                                    cost_type="estimated",
+                                )
+                                
+                                if total_hw_consumption_data and total_hw_cost_data:
+                                    total_hw_consumption = total_hw_consumption_data.get("value", 0.0)
+                                    total_hw_cost = total_hw_cost_data.get("value", 0.0)
+                                    
+                                    if total_hw_consumption > 0 and total_hw_cost > 0:
+                                        # Calculate this meter's share of total consumption
+                                        consumption_share = meter_consumption / total_hw_consumption
+                                        
+                                        # Allocate cost proportionally
+                                        allocated_cost = total_hw_cost * consumption_share
+                                        currency = total_hw_cost_data.get("unit") or self.get_setting("Currency") or "NOK"
+                                        
+                                        _LOGGER.info(
+                                            "Allocated HW cost for meter %d %d-%02d: %.2f %s (meter: %.2f m3 / total: %.2f m3 = %.1f%%, total cost: %.2f %s)",
+                                            measuring_point_id, year, month,
+                                            allocated_cost, currency,
+                                            meter_consumption,
+                                            total_hw_consumption,
+                                            consumption_share * 100,
+                                            total_hw_cost,
+                                            currency,
+                                        )
+                                        
+                                        return {
+                                            "value": allocated_cost,
+                                            "unit": currency,
+                                            "year": year,
+                                            "month": month,
+                                            "utility_code": utility_code,
+                                            "aggregate_type": "price",
+                                            "cost_type": "estimated",
+                                            "measuring_point_id": measuring_point_id,
+                                        }
+                                    else:
+                                        _LOGGER.debug(
+                                            "Total HW consumption (%.2f) or cost (%.2f) is 0, cannot allocate proportionally",
+                                            total_hw_consumption,
+                                            total_hw_cost,
+                                        )
+                                else:
+                                    _LOGGER.debug(
+                                        "Could not get total HW consumption or cost for proportional allocation"
+                                    )
+                                
+                                # Fallback to spot price estimation if proportional allocation didn't work
+                                _LOGGER.debug(
+                                    "Proportional allocation failed, trying spot price estimation for meter %d (HW %d-%02d)",
+                                    measuring_point_id, year, month
+                                )
+                                # Get CW price and consumption for the estimation
+                                # Use aggregate CW data (like get_monthly_aggregate does) since
+                                # the CW meter might be different from the HW meter
+                                cw_price_data = await self.get_monthly_aggregate(
+                                    utility_code="CW",
+                                    year=year,
+                                    month=month,
+                                    aggregate_type="price",
+                                    cost_type="actual",
+                                )
+                                cw_consumption_data = await self.get_monthly_aggregate(
+                                    utility_code="CW",
+                                    year=year,
+                                    month=month,
+                                    aggregate_type="con",
+                                )
+                                
+                                cw_price = cw_price_data.get("value") if cw_price_data else None
+                                cw_consumption = cw_consumption_data.get("value") if cw_consumption_data else None
+                                
+                                # Estimate HW price from spot prices
+                                _LOGGER.debug(
+                                    "Calling spot price estimation for meter %d (HW %d-%02d): consumption=%.2f m3, cw_price=%s, cw_consumption=%s",
+                                    measuring_point_id, year, month,
+                                    meter_consumption,
+                                    cw_price,
+                                    cw_consumption,
+                                )
+                                hw_estimated_data = await self._get_hw_price_from_spot_prices(
+                                    consumption=meter_consumption,
+                                    year=year,
+                                    month=month,
+                                    cold_water_price=cw_price,
+                                    cold_water_consumption=cw_consumption,
+                                )
+                                
+                                if hw_estimated_data:
+                                    currency = hw_estimated_data.get("unit") or self.get_setting("Currency") or "NOK"
+                                    estimated_value = hw_estimated_data.get("value", 0.0)
+                                    _LOGGER.info(
+                                        "Estimated HW cost for meter %d %d-%02d: %.2f %s (consumption: %.2f m3, method: %s)",
+                                        measuring_point_id, year, month,
+                                        estimated_value, currency,
+                                        meter_consumption,
+                                        hw_estimated_data.get("calculation_method", "unknown")
+                                    )
+                                    return {
+                                        "value": estimated_value,
+                                        "unit": currency,
+                                        "year": year,
+                                        "month": month,
+                                        "utility_code": utility_code,
+                                        "aggregate_type": "price",
+                                        "cost_type": "estimated",
+                                        "measuring_point_id": measuring_point_id,
+                                    }
+                                else:
+                                    _LOGGER.warning(
+                                        "Spot price estimation returned None for meter %d (HW %d-%02d) with consumption %.2f m3. Check Nord Pool configuration.",
+                                        measuring_point_id, year, month, meter_consumption
+                                    )
+                            
+                            _LOGGER.debug(
+                                "No rate found for %s %d-%02d, cannot calculate estimated cost",
+                                utility_code, year, month
+                            )
+                            return None
+                        
+                        # Calculate cost from consumption × rate
+                        calculated_cost = meter_consumption * rate
+                        currency = self.get_setting("Currency") or "NOK"
+                        
+                        _LOGGER.info(
+                            "Calculated estimated cost for meter %d (%s %d-%02d): %.2f m3 × %.2f = %.2f %s",
+                            measuring_point_id,
+                            utility_code,
+                            year,
+                            month,
+                            meter_consumption,
+                            rate,
+                            calculated_cost,
+                            currency,
+                        )
+                        
+                        # Warn if we got 0 cost but consumption > 0 (might indicate an issue)
+                        if calculated_cost == 0 and meter_consumption > 0:
+                            _LOGGER.warning(
+                                "Estimated cost is 0 for meter %d (%s %d-%02d) despite consumption %.2f m3 and rate %.2f. This might indicate a calculation issue.",
+                                measuring_point_id,
+                                utility_code,
+                                year,
+                                month,
+                                meter_consumption,
+                                rate,
+                            )
+                        
+                        return {
+                            "value": calculated_cost,
+                            "unit": currency,
+                            "year": year,
+                            "month": month,
+                            "utility_code": utility_code,
+                            "aggregate_type": "price",
+                            "cost_type": "estimated",
+                            "measuring_point_id": measuring_point_id,
+                        }
+                    return None
+            except Exception as err:
+                _LOGGER.warning(
+                    "Failed to fetch per-meter price data for meter %d %s[%s] %d-%02d: %s",
                     measuring_point_id,
-                    meter_consumption,
-                    utility_total_consumption,
-                    consumption_share * 100,
-                    utility_total_cost,
-                    consumption_share * 100,
-                    meter_cost,
+                    utility_code,
+                    aggregate_type,
+                    year,
+                    month,
+                    err,
                 )
-                
-                return {
-                    "value": meter_cost,
-                    "unit": currency,
-                    "year": year,
-                    "month": month,
-                    "utility_code": utility_code,
-                    "aggregate_type": "price",
-                    "cost_type": cost_type,
-                }
-            else:
-                _LOGGER.debug(
-                    "Total utility consumption is 0, cannot calculate proportional cost for meter %d",
-                    measuring_point_id
-                )
+                # For estimated costs, try to calculate from consumption × rate even if API call failed
+                if cost_type == "estimated":
+                    try:
+                        _LOGGER.debug(
+                            "Attempting to calculate estimated cost for meter %d (%s %d-%02d) from consumption × rate after API error",
+                            measuring_point_id,
+                            utility_code,
+                            year,
+                            month,
+                        )
+                        # Get this meter's consumption for the month
+                        meter_consumption_data = await self.get_monthly_aggregate_for_meter(
+                            utility_code=utility_code,
+                            measuring_point_id=measuring_point_id,
+                            external_key=external_key,
+                            year=year,
+                            month=month,
+                            aggregate_type="con",
+                            cost_type="actual",
+                        )
+                        
+                        if meter_consumption_data and meter_consumption_data.get("value") is not None:
+                            meter_consumption = meter_consumption_data.get("value", 0.0)
+                            rate = await self.get_rate_from_billing(utility_code, year, month)
+                            
+                            if rate is not None:
+                                calculated_cost = meter_consumption * rate
+                                currency = self.get_setting("Currency") or "NOK"
+                                
+                                _LOGGER.debug(
+                                    "Calculated estimated cost for meter %d (%s %d-%02d) after API error: %.2f m3 × %.2f = %.2f %s",
+                                    measuring_point_id,
+                                    utility_code,
+                                    year,
+                                    month,
+                                    meter_consumption,
+                                    rate,
+                                    calculated_cost,
+                                    currency,
+                                )
+                                
+                                return {
+                                    "value": calculated_cost,
+                                    "unit": currency,
+                                    "year": year,
+                                    "month": month,
+                                    "utility_code": utility_code,
+                                    "aggregate_type": "price",
+                                    "cost_type": "estimated",
+                                    "measuring_point_id": measuring_point_id,
+                                }
+                            elif utility_code == "HW":
+                                # For HW, try proportional allocation from aggregate estimated cost first
+                                _LOGGER.debug(
+                                    "No rate found for HW %d-%02d after API error, trying proportional allocation",
+                                    year, month
+                                )
+                                
+                                if meter_consumption > 0:
+                                    # Get total HW consumption and estimated cost for the month
+                                    total_hw_consumption_data = await self.get_monthly_aggregate(
+                                        utility_code="HW",
+                                        year=year,
+                                        month=month,
+                                        aggregate_type="con",
+                                    )
+                                    total_hw_cost_data = await self.get_monthly_aggregate(
+                                        utility_code="HW",
+                                        year=year,
+                                        month=month,
+                                        aggregate_type="price",
+                                        cost_type="estimated",
+                                    )
+                                    
+                                    if total_hw_consumption_data and total_hw_cost_data:
+                                        total_hw_consumption = total_hw_consumption_data.get("value", 0.0)
+                                        total_hw_cost = total_hw_cost_data.get("value", 0.0)
+                                        
+                                        if total_hw_consumption > 0 and total_hw_cost > 0:
+                                            # Calculate this meter's share of total consumption
+                                            consumption_share = meter_consumption / total_hw_consumption
+                                            
+                                            # Allocate cost proportionally
+                                            allocated_cost = total_hw_cost * consumption_share
+                                            currency = total_hw_cost_data.get("unit") or self.get_setting("Currency") or "NOK"
+                                            
+                                            _LOGGER.info(
+                                                "Allocated HW cost for meter %d %d-%02d (after API error): %.2f %s (meter: %.2f m3 / total: %.2f m3 = %.1f%%, total cost: %.2f %s)",
+                                                measuring_point_id, year, month,
+                                                allocated_cost, currency,
+                                                meter_consumption,
+                                                total_hw_consumption,
+                                                consumption_share * 100,
+                                                total_hw_cost,
+                                                currency,
+                                            )
+                                            
+                                            return {
+                                                "value": allocated_cost,
+                                                "unit": currency,
+                                                "year": year,
+                                                "month": month,
+                                                "utility_code": utility_code,
+                                                "aggregate_type": "price",
+                                                "cost_type": "estimated",
+                                                "measuring_point_id": measuring_point_id,
+                                            }
+                                
+                                # Fallback to spot price estimation if proportional allocation didn't work
+                                _LOGGER.debug(
+                                    "Proportional allocation failed, trying spot price estimation for HW %d-%02d after API error",
+                                    year, month
+                                )
+                                # Get CW price and consumption for the estimation
+                                # Use aggregate CW data (like get_monthly_aggregate does) since
+                                # the CW meter might be different from the HW meter
+                                cw_price_data = await self.get_monthly_aggregate(
+                                    utility_code="CW",
+                                    year=year,
+                                    month=month,
+                                    aggregate_type="price",
+                                    cost_type="actual",
+                                )
+                                cw_consumption_data = await self.get_monthly_aggregate(
+                                    utility_code="CW",
+                                    year=year,
+                                    month=month,
+                                    aggregate_type="con",
+                                )
+                                
+                                cw_price = cw_price_data.get("value") if cw_price_data else None
+                                cw_consumption = cw_consumption_data.get("value") if cw_consumption_data else None
+                                
+                                # Estimate HW price from spot prices
+                                hw_estimated_data = await self._get_hw_price_from_spot_prices(
+                                    consumption=meter_consumption,
+                                    year=year,
+                                    month=month,
+                                    cold_water_price=cw_price,
+                                    cold_water_consumption=cw_consumption,
+                                )
+                                
+                                if hw_estimated_data:
+                                    currency = hw_estimated_data.get("unit") or self.get_setting("Currency") or "NOK"
+                                    return {
+                                        "value": hw_estimated_data.get("value"),
+                                        "unit": currency,
+                                        "year": year,
+                                        "month": month,
+                                        "utility_code": utility_code,
+                                        "aggregate_type": "price",
+                                        "cost_type": "estimated",
+                                        "measuring_point_id": measuring_point_id,
+                                    }
+                    except Exception as calc_err:
+                        _LOGGER.debug(
+                            "Failed to calculate estimated cost from consumption × rate: %s",
+                            calc_err,
+                        )
                 return None
 
         # For consumption, we can filter by measuring point
@@ -2008,6 +2638,14 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if data is None:
                 async def fetch_data():
                     try:
+                        # When querying with measuringpointid, ensure the utility matches the measuring point
+                        # The utility_code comes from the installation's registers, so it should match
+                        _LOGGER.debug(
+                            "Fetching %s data for measuring_point_id=%d with utility=%s (matching utility for this meter)",
+                            aggregate_type,
+                            measuring_point_id,
+                            utility_code,
+                        )
                         result = await self.api.get_data(
                             node_id=self.node_id,
                             from_time=from_time,
@@ -2015,7 +2653,8 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             interval="d",
                             grouping="apartment",
                             utilities=utilities,
-                            include_sub_nodes=True,
+                            include_sub_nodes=False,  # Don't include sub-nodes when filtering by measuring point
+                            measuring_point_id=measuring_point_id,
                         )
                         if result:
                             self._data_request_cache[cache_key] = (result, time.time())
@@ -2039,7 +2678,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             for node_data in data:
                 node_id = node_data.get("ID")
-                
+
                 # Try to match this node to our measuring point
                 matched = False
                 if node_id == measuring_point_id:
@@ -2952,7 +3591,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             has_data = False
             metered_utilities = set()
             estimated_utilities = set()
-            
+
             # Get currency from settings (needed for logging)
             currency = self.get_setting("Currency") or "NOK"
 
