@@ -1,8 +1,7 @@
 """Tests for translation functionality."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import pytest
-import json
 from pathlib import Path
 
 from homeassistant.core import HomeAssistant
@@ -230,7 +229,7 @@ async def test_load_translation_file(hass: HomeAssistant):
     """Test loading translation file."""
     # This test verifies the file loading mechanism works
     # We'll mock the file system access
-    integration_dir = Path(__file__).parent.parent / "custom_components" / "ecoguard"
+    Path(__file__).parent.parent / "custom_components" / "ecoguard"
     
     # Test loading English (should try strings.json first, then en.json)
     result = await _load_translation_file(hass, "en")
