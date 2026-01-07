@@ -5,7 +5,7 @@
         "title": "EcoGuard Innstillinger",
         "description": "Skriv inn dine bruker-detaljer for EcoGuard Curves for å koble til.",
         "data": {
-          "username": "Brukernavn/Objektnummer)",
+          "username": "Brukernavn/Objektnummer",
           "password": "Passord",
           "domain": "Domenekode",
           "nord_pool_area": "Nord-Pool-område (valgfritt)"
