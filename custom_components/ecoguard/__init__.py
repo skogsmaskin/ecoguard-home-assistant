@@ -85,8 +85,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Just cancel it, don't wait - the task has its own timeout and will exit quickly
             update_task = hass.data[DOMAIN][entry.entry_id].get("entity_registry_update_task")
             if update_task and not update_task.done():
-                update_task.cancel()
-                # Don't wait - task will handle its own cleanup with timeout
+                try:
+                    update_task.cancel()
+                except Exception as e:
+                    # Task may already be cancelled or in an invalid state
+                    _LOGGER.debug("Error cancelling entity registry update task: %s", e)
             
             # Cancel pending coordinator requests
             # Just cancel them, don't wait - they'll handle their own cleanup
@@ -94,7 +97,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if coordinator and hasattr(coordinator, "_pending_requests"):
                 for cache_key, task in list(coordinator._pending_requests.items()):
                     if not task.done():
-                        task.cancel()
+                        try:
+                            task.cancel()
+                        except Exception as e:
+                            # Task may already be cancelled or in an invalid state
+                            _LOGGER.debug("Error cancelling pending request task for %s: %s", cache_key, e)
                 coordinator._pending_requests.clear()
             
             # Close API client (this will close the aiohttp session)

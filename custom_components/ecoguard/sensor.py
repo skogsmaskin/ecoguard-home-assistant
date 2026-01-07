@@ -641,9 +641,9 @@ async def async_setup_entry(
     # This allows us to only disable newly created entities, not existing ones
     entity_registry = async_get_entity_registry(hass)
     existing_unique_ids = set()
-    for entry in entity_registry.entities.values():
-        if entry.platform == DOMAIN and entry.unique_id:
-            existing_unique_ids.add(entry.unique_id)
+    for entity_entry in entity_registry.entities.values():
+        if entity_entry.platform == DOMAIN and entity_entry.unique_id:
+            existing_unique_ids.add(entity_entry.unique_id)
 
     _LOGGER.info("Creating %d EcoGuard sensors", len(sensors))
     async_add_entities(sensors, update_before_add=False)
@@ -678,6 +678,83 @@ async def async_setup_entry(
                 EcoGuardMonthlyMeterSensor,
                 EcoGuardLatestReceptionSensor,
             )
+
+            # Pre-fetch all translations we'll need to avoid repeated async calls in the loop
+            # This significantly improves performance when there are many sensors
+            translation_cache: dict[str, str] = {}
+            translation_keys_to_fetch = [
+                "name.consumption_daily",
+                "name.cost_daily",
+                "name.meter",
+                "name.estimated",
+                "name.metered",
+                "name.reception_last_update",
+                "name.consumption_monthly_aggregated",
+                "name.cost_monthly_aggregated",
+            ]
+            
+            # Collect unique utility codes and measuring point IDs
+            utility_codes = set()
+            measuring_point_ids = set()
+            for sensor in sensors:
+                if isinstance(sensor, individual_meter_sensor_classes):
+                    if hasattr(sensor, '_utility_code') and sensor._utility_code:
+                        utility_codes.add(sensor._utility_code.lower())
+                    if hasattr(sensor, '_measuring_point_id') and sensor._measuring_point_id:
+                        measuring_point_ids.add(sensor._measuring_point_id)
+            
+            # Fetch all common translation keys in parallel
+            if not hass.is_stopping:
+                translation_tasks = [
+                    _async_get_translation(hass, key) for key in translation_keys_to_fetch
+                ]
+                # Also fetch utility translations
+                for utility_code in utility_codes:
+                    translation_tasks.append(_async_get_translation(hass, f"utility.{utility_code}"))
+                
+                # Fetch all translations in parallel
+                translation_results = await asyncio.gather(*translation_tasks, return_exceptions=True)
+                
+                # Store results in cache
+                idx = 0
+                for key in translation_keys_to_fetch:
+                    if idx < len(translation_results) and not isinstance(translation_results[idx], Exception):
+                        translation_cache[key] = translation_results[idx]
+                    idx += 1
+                
+                # Store utility translations
+                for utility_code in utility_codes:
+                    if idx < len(translation_results) and not isinstance(translation_results[idx], Exception):
+                        translation_cache[f"utility.{utility_code}"] = translation_results[idx]
+                    idx += 1
+            
+            # Helper function to get translation from cache or fetch if missing
+            async def get_cached_translation(key: str, **kwargs: Any) -> str:
+                """Get translation from cache or fetch if not cached."""
+                cache_key = key
+                if kwargs:
+                    # For keys with parameters, we can't cache them generically
+                    # but we can still use the cache for the base key
+                    if key == "name.measuring_point" and "id" in kwargs:
+                        # Measuring point names are usually already set, so we'll fetch on demand
+                        # but try cache first for the base key
+                        pass
+                
+                if cache_key in translation_cache:
+                    result = translation_cache[cache_key]
+                    # Apply formatting if kwargs provided
+                    if kwargs:
+                        try:
+                            return result.format(**kwargs)
+                        except (KeyError, ValueError):
+                            # If formatting fails, fall back to async_get_translation
+                            return await _async_get_translation(hass, key, **kwargs)
+                    return result
+                
+                # Not in cache, fetch it
+                result = await _async_get_translation(hass, key, **kwargs)
+                translation_cache[cache_key] = result
+                return result
 
             for sensor in sensors:
                 # Check if Home Assistant is stopping before processing each sensor
@@ -757,67 +834,52 @@ async def async_setup_entry(
                             # This is needed because the entity might not be registered when async_added_to_hass runs
                             # Build the translated name directly here to ensure it's correct
                             # Skip translation updates if Home Assistant is stopping to avoid delays during shutdown
-                            # Translation updates are expensive (multiple async calls) so we skip them when stopping
                             if not hass.is_stopping and isinstance(sensor, (EcoGuardDailyConsumptionSensor, EcoGuardDailyCostSensor,
                                                  EcoGuardLatestReceptionSensor, EcoGuardMonthlyMeterSensor)):
                                 try:
-                                    # Check again before starting expensive translation operations
-                                    if hass.is_stopping:
-                                        return
-                                    
                                     translated_name = None
-                                    
-                                    # Add a quick check before each async translation call to exit fast if stopping
 
                                     if isinstance(sensor, EcoGuardDailyConsumptionSensor):
-                                        # Get translated components
-                                        if hass.is_stopping:
-                                            return
-                                        measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
-                                            hass, "name.measuring_point", id=sensor._measuring_point_id
+                                        # Get translated components using cached translations
+                                        measuring_point_display = sensor._measuring_point_name or await get_cached_translation(
+                                            "name.measuring_point", id=sensor._measuring_point_id
                                         )
-                                        if hass.is_stopping:
-                                            return
-                                        utility_name = await _async_get_translation(
-                                            hass, f"utility.{sensor._utility_code.lower()}"
+                                        utility_name = await get_cached_translation(
+                                            f"utility.{sensor._utility_code.lower()}"
                                         )
                                         if utility_name == f"utility.{sensor._utility_code.lower()}":
                                             utility_name = sensor._utility_code
-                                        if hass.is_stopping:
-                                            return
-                                        consumption_daily = await _async_get_translation(hass, "name.consumption_daily")
-                                        if hass.is_stopping:
-                                            return
-                                        meter = await _async_get_translation(hass, "name.meter")
+                                        consumption_daily = await get_cached_translation("name.consumption_daily")
+                                        meter = await get_cached_translation("name.meter")
                                         translated_name = f'{consumption_daily} - {meter} "{measuring_point_display}" ({utility_name})'
 
                                     elif isinstance(sensor, EcoGuardDailyCostSensor):
-                                        measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
-                                            hass, "name.measuring_point", id=sensor._measuring_point_id
+                                        measuring_point_display = sensor._measuring_point_name or await get_cached_translation(
+                                            "name.measuring_point", id=sensor._measuring_point_id
                                         )
-                                        utility_name = await _async_get_translation(
-                                            hass, f"utility.{sensor._utility_code.lower()}"
+                                        utility_name = await get_cached_translation(
+                                            f"utility.{sensor._utility_code.lower()}"
                                         )
                                         if utility_name == f"utility.{sensor._utility_code.lower()}":
                                             utility_name = sensor._utility_code
-                                        cost_daily = await _async_get_translation(hass, "name.cost_daily")
-                                        meter = await _async_get_translation(hass, "name.meter")
+                                        cost_daily = await get_cached_translation("name.cost_daily")
+                                        meter = await get_cached_translation("name.meter")
                                         if sensor._cost_type == "estimated":
-                                            estimated = await _async_get_translation(hass, "name.estimated")
+                                            estimated = await get_cached_translation("name.estimated")
                                             translated_name = f'{cost_daily} {estimated} - {meter} "{measuring_point_display}" ({utility_name})'
                                         else:
-                                            metered = await _async_get_translation(hass, "name.metered")
+                                            metered = await get_cached_translation("name.metered")
                                             translated_name = f'{cost_daily} {metered} - {meter} "{measuring_point_display}" ({utility_name})'
 
                                     elif isinstance(sensor, EcoGuardLatestReceptionSensor):
-                                        measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
-                                            hass, "name.measuring_point", id=sensor._measuring_point_id
+                                        measuring_point_display = sensor._measuring_point_name or await get_cached_translation(
+                                            "name.measuring_point", id=sensor._measuring_point_id
                                         )
-                                        reception_last_update = await _async_get_translation(hass, "name.reception_last_update")
-                                        meter = await _async_get_translation(hass, "name.meter")
+                                        reception_last_update = await get_cached_translation("name.reception_last_update")
+                                        meter = await get_cached_translation("name.meter")
                                         if sensor._utility_code:
-                                            utility_name = await _async_get_translation(
-                                                hass, f"utility.{sensor._utility_code.lower()}"
+                                            utility_name = await get_cached_translation(
+                                                f"utility.{sensor._utility_code.lower()}"
                                             )
                                             if utility_name == f"utility.{sensor._utility_code.lower()}":
                                                 utility_name = sensor._utility_code
@@ -826,25 +888,25 @@ async def async_setup_entry(
                                             translated_name = f'{reception_last_update} - {meter} "{measuring_point_display}"'
 
                                     elif isinstance(sensor, EcoGuardMonthlyMeterSensor):
-                                        measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
-                                            hass, "name.measuring_point", id=sensor._measuring_point_id
+                                        measuring_point_display = sensor._measuring_point_name or await get_cached_translation(
+                                            "name.measuring_point", id=sensor._measuring_point_id
                                         )
-                                        utility_name = await _async_get_translation(
-                                            hass, f"utility.{sensor._utility_code.lower()}"
+                                        utility_name = await get_cached_translation(
+                                            f"utility.{sensor._utility_code.lower()}"
                                         )
                                         if utility_name == f"utility.{sensor._utility_code.lower()}":
                                             utility_name = sensor._utility_code
                                         if sensor._aggregate_type == "con":
-                                            aggregate_name = await _async_get_translation(hass, "name.consumption_monthly_aggregated")
+                                            aggregate_name = await get_cached_translation("name.consumption_monthly_aggregated")
                                         else:
-                                            aggregate_name = await _async_get_translation(hass, "name.cost_monthly_aggregated")
+                                            aggregate_name = await get_cached_translation("name.cost_monthly_aggregated")
                                         if sensor._aggregate_type == "price" and sensor._cost_type == "estimated":
-                                            estimated = await _async_get_translation(hass, "name.estimated")
+                                            estimated = await get_cached_translation("name.estimated")
                                             aggregate_name = f"{aggregate_name} {estimated}"
                                         elif sensor._aggregate_type == "price" and sensor._cost_type == "actual":
-                                            metered = await _async_get_translation(hass, "name.metered")
+                                            metered = await get_cached_translation("name.metered")
                                             aggregate_name = f"{aggregate_name} {metered}"
-                                        meter = await _async_get_translation(hass, "name.meter")
+                                        meter = await get_cached_translation("name.meter")
                                         translated_name = f'{aggregate_name} - {meter} "{measuring_point_display}" ({utility_name})'
 
                                     if translated_name and entity_entry.name != translated_name:
