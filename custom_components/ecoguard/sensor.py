@@ -663,10 +663,11 @@ async def async_setup_entry(
             # No delay - proceed immediately to speed up execution
             # If entities aren't found on first try, retry mechanism will handle it
 
-            # Simplified retry mechanism: attempt to find entities with minimal retries
-            # Reduced to 1 retry to speed up execution and prevent hanging
-            max_retries = 1
-            retry_delay = 0.1  # seconds - minimal delay
+            # Retry mechanism: attempt to find entities with sufficient retries
+            # Entities may take longer to be registered, especially during system startup
+            # Using 4 retries with 0.5s delay gives up to 2 seconds total wait time
+            max_retries = 4
+            retry_delay = 0.5  # seconds - balance between reliability and performance
 
             entity_registry = async_get_entity_registry(hass)
 
@@ -887,12 +888,12 @@ async def async_setup_entry(
 
     # Schedule the update to run after setup completes
     # Store task reference so it can be cancelled during unload/shutdown
-    # Wrap in timeout to prevent hanging - max 1 second
+    # Wrap in timeout to prevent hanging - allow up to 3 seconds for retries
     async def _update_with_timeout() -> None:
         try:
-            await asyncio.wait_for(_update_entity_registry_after_setup(), timeout=1.0)
+            await asyncio.wait_for(_update_entity_registry_after_setup(), timeout=3.0)
         except asyncio.TimeoutError:
-            _LOGGER.debug("Entity registry update task timed out after 1 second")
+            _LOGGER.debug("Entity registry update task timed out after 3 seconds")
         except asyncio.CancelledError:
             _LOGGER.debug("Entity registry update task was cancelled")
             raise
