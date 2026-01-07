@@ -1334,10 +1334,10 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
         if aggregate_type == "con":
             unique_id_suffix = f"consumption_monthly_metered_{utility_slug}"
         elif aggregate_type == "price" and cost_type == "estimated":
-            unique_id_suffix = f"cost_monthly_estimated_{utility_slug}"
+            unique_id_suffix = f"cost_monthly_aggregated_estimated_{utility_slug}"
         else:
             # For "actual" cost_type, use "metered" in the ID for clarity
-            unique_id_suffix = f"cost_monthly_metered_{utility_slug}"
+            unique_id_suffix = f"cost_monthly_aggregated_metered_{utility_slug}"
 
         self._attr_unique_id = (
             f"{DOMAIN}_{unique_id_suffix}"
@@ -3038,9 +3038,9 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
         if aggregate_type == "con":
             unique_id_suffix = f"consumption_monthly_{utility_slug}_{sensor_name}"
         elif aggregate_type == "price" and cost_type == "estimated":
-            unique_id_suffix = f"cost_monthly_estimated_{utility_slug}_{sensor_name}"
+            unique_id_suffix = f"cost_monthly_aggregated_estimated_{utility_slug}_{sensor_name}"
         else:
-            unique_id_suffix = f"cost_monthly_metered_{utility_slug}_{sensor_name}"
+            unique_id_suffix = f"cost_monthly_aggregated_metered_{utility_slug}_{sensor_name}"
 
         self._attr_unique_id = f"{DOMAIN}_{unique_id_suffix}"
 
@@ -3233,9 +3233,9 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
         if aggregate_type == "con":
             unique_id_suffix = "consumption_monthly_combined_water"
         elif aggregate_type == "price" and cost_type == "estimated":
-            unique_id_suffix = "cost_monthly_estimated_combined_water"
+            unique_id_suffix = "cost_monthly_aggregated_estimated_combined_water"
         else:
-            unique_id_suffix = "cost_monthly_metered_combined_water"
+            unique_id_suffix = "cost_monthly_aggregated_metered_combined_water"
 
         self._attr_unique_id = f"{DOMAIN}_{unique_id_suffix}"
 
