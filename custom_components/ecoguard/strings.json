@@ -28,23 +28,19 @@
     }
   },
   "common": {
-    "utility": {
-      "hw": "Hot Water",
-      "cw": "Cold Water"
-    },
-    "name": {
-      "daily_consumption": "Daily Consumption",
-      "last_update": "Latest Measurement",
-      "month_to_date_consumption": "Month-to-Date Consumption",
-      "month_to_date_price": "Month-to-Date Price",
-      "estimated": "Estimated",
-      "metered": "Metered",
-      "other_items_monthly_cost": "Other Items Monthly Cost (Last Bill)",
-      "month_to_date_total_cost_estimated": "Month-to-Date Total Cost (Estimated)",
-      "month_to_date_total_cost_metered": "Month-to-Date Total Cost (Metered)",
-      "end_of_month_estimate": "End-of-Month Bill Estimate",
-      "measuring_point": "Measuring Point {id}",
-      "device_name": "EcoGuard Node {node_id}"
-    }
+    "utility_hw": "Hot Water",
+    "utility_cw": "Cold Water",
+    "name_daily_consumption": "Daily Consumption",
+    "name_last_update": "Latest Measurement",
+    "name_month_to_date_consumption": "Month-to-Date Consumption",
+    "name_month_to_date_price": "Month-to-Date Price",
+    "name_estimated": "Estimated",
+    "name_metered": "Metered",
+    "name_other_items_monthly_cost": "Other Items Monthly Cost (Last Bill)",
+    "name_month_to_date_total_cost_estimated": "Month-to-Date Total Cost (Estimated)",
+    "name_month_to_date_total_cost_metered": "Month-to-Date Total Cost (Metered)",
+    "name_end_of_month_estimate": "End-of-Month Bill Estimate",
+    "name_measuring_point": "Measuring Point {id}",
+    "name_device_name": "EcoGuard Node {node_id}"
   }
 }

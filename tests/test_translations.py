@@ -19,20 +19,16 @@ def mock_translation_data_en():
     return {
         "config": {},
         "common": {
-            "utility": {
-                "hw": "Hot Water",
-                "cw": "Cold Water",
-            },
-            "name": {
-                "daily_consumption": "Daily Consumption",
-                "last_update": "Latest Measurement",
-                "month_to_date_consumption": "Month-to-Date Consumption",
-                "month_to_date_price": "Month-to-Date Price",
-                "estimated": "Estimated",
-                "metered": "Metered",
-                "measuring_point": "Measuring Point {id}",
-                "device_name": "EcoGuard Node {node_id}",
-            },
+            "utility_hw": "Hot Water",
+            "utility_cw": "Cold Water",
+            "name_daily_consumption": "Daily Consumption",
+            "name_last_update": "Latest Measurement",
+            "name_month_to_date_consumption": "Month-to-Date Consumption",
+            "name_month_to_date_price": "Month-to-Date Price",
+            "name_estimated": "Estimated",
+            "name_metered": "Metered",
+            "name_measuring_point": "Measuring Point {id}",
+            "name_device_name": "EcoGuard Node {node_id}",
         },
     }
 
@@ -43,20 +39,16 @@ def mock_translation_data_nb():
     return {
         "config": {},
         "common": {
-            "utility": {
-                "hw": "Varmt vann",
-                "cw": "Kaldt vann",
-            },
-            "name": {
-                "daily_consumption": "Daglig forbruk",
-                "last_update": "Siste måling",
-                "month_to_date_consumption": "Månedlig forbruk til nå",
-                "month_to_date_price": "Månedlig pris til nå",
-                "estimated": "Estimert",
-                "metered": "Avlest",
-                "measuring_point": "Målepunkt {id}",
-                "device_name": "EcoGuard Node {node_id}",
-            },
+            "utility_hw": "Varmt vann",
+            "utility_cw": "Kaldt vann",
+            "name_daily_consumption": "Daglig forbruk",
+            "name_last_update": "Siste måling",
+            "name_month_to_date_consumption": "Månedlig forbruk til nå",
+            "name_month_to_date_price": "Månedlig pris til nå",
+            "name_estimated": "Estimert",
+            "name_metered": "Avlest",
+            "name_measuring_point": "Målepunkt {id}",
+            "name_device_name": "EcoGuard Node {node_id}",
         },
     }
 
@@ -153,8 +145,9 @@ async def test_async_get_translation_fallback_to_english(
             return {
                 "config": {},
                 "common": {
-                    "utility": {"hw": "Varmt vann", "cw": "Kaldt vann"},
-                    # Missing name section
+                    "utility_hw": "Varmt vann",
+                    "utility_cw": "Kaldt vann",
+                    # Missing name keys
                 },
             }
         elif lang == "en":
@@ -238,8 +231,10 @@ async def test_load_translation_file(hass: HomeAssistant):
     assert result is not None
     assert "config" in result
     assert "common" in result
-    assert "utility" in result["common"]
-    assert "name" in result["common"]
+    # Verify flattened keys exist
+    assert "utility_hw" in result["common"]
+    assert "utility_cw" in result["common"]
+    assert "name_daily_consumption" in result["common"]
 
 
 async def test_translation_key_structure(hass: HomeAssistant):
@@ -250,18 +245,16 @@ async def test_translation_key_structure(hass: HomeAssistant):
     assert "common" in result, "Translation file should have 'common' key"
     
     common_data = result["common"]
-    assert "utility" in common_data, "Should have 'utility' section"
-    assert "name" in common_data, "Should have 'name' section"
     
-    # Verify utility translations
-    assert "hw" in common_data["utility"]
-    assert "cw" in common_data["utility"]
+    # Verify utility translations (flattened keys)
+    assert "utility_hw" in common_data
+    assert "utility_cw" in common_data
     
-    # Verify name translations
-    assert "daily_consumption" in common_data["name"]
-    assert "last_update" in common_data["name"]
-    assert "measuring_point" in common_data["name"]
-    assert "device_name" in common_data["name"]
+    # Verify name translations (flattened keys)
+    assert "name_daily_consumption" in common_data
+    assert "name_last_update" in common_data
+    assert "name_measuring_point" in common_data
+    assert "name_device_name" in common_data
 
 
 async def test_translation_formatting_with_kwargs(hass: HomeAssistant):

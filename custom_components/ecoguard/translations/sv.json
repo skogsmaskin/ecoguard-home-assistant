@@ -28,23 +28,19 @@
     }
   },
   "common": {
-    "utility": {
-      "hw": "Varmvatten",
-      "cw": "Kallvatten"
-    },
-    "name": {
-      "daily_consumption": "Daglig förbrukning",
-      "last_update": "Senaste mätning",
-      "month_to_date_consumption": "Månadsförbrukning hittills",
-      "month_to_date_price": "Månadspris hittills",
-      "estimated": "Uppskattad",
-      "metered": "Avläst",
-      "other_items_monthly_cost": "Andra månadskostnader (från senaste faktura)",
-      "month_to_date_total_cost_estimated": "Total månadskostnad hittills (uppskattad)",
-      "month_to_date_total_cost_metered": "Total månadskostnad hittills (avläst)",
-      "end_of_month_estimate": "Uppskattad faktura vid månadsslut",
-      "measuring_point": "Mätpunkt {id}",
-      "device_name": "EcoGuard Node {node_id}"
-    }
+    "utility_hw": "Varmvatten",
+    "utility_cw": "Kallvatten",
+    "name_daily_consumption": "Daglig förbrukning",
+    "name_last_update": "Senaste mätning",
+    "name_month_to_date_consumption": "Månadsförbrukning hittills",
+    "name_month_to_date_price": "Månadspris hittills",
+    "name_estimated": "Uppskattad",
+    "name_metered": "Avläst",
+    "name_other_items_monthly_cost": "Andra månadskostnader (från senaste faktura)",
+    "name_month_to_date_total_cost_estimated": "Total månadskostnad hittills (uppskattad)",
+    "name_month_to_date_total_cost_metered": "Total månadskostnad hittills (avläst)",
+    "name_end_of_month_estimate": "Uppskattad faktura vid månadsslut",
+    "name_measuring_point": "Mätpunkt {id}",
+    "name_device_name": "EcoGuard Node {node_id}"
   }
 }

@@ -28,23 +28,19 @@
     }
   },
   "common": {
-    "utility": {
-      "hw": "Varmt vann",
-      "cw": "Kaldt vann"
-    },
-    "name": {
-      "daily_consumption": "Daglig forbruk",
-      "last_update": "Siste måling",
-      "month_to_date_consumption": "Månedlig forbruk til nå",
-      "month_to_date_price": "Månedlig pris til nå",
-      "estimated": "Estimert",
-      "metered": "Avlest",
-      "other_items_monthly_cost": "Andre månedlige kostnader (fra siste regning)",
-      "month_to_date_total_cost_estimated": "Total månedlig kostnad hittil (estimert)",
-      "month_to_date_total_cost_metered": "Total månedlig kostnad hittil (avlest)",
-      "end_of_month_estimate": "Estimert regning ved slutten av måneden",
-      "measuring_point": "Målepunkt {id}",
-      "device_name": "EcoGuard Node {node_id}"
-    }
+    "utility_hw": "Varmt vann",
+    "utility_cw": "Kaldt vann",
+    "name_daily_consumption": "Daglig forbruk",
+    "name_last_update": "Siste måling",
+    "name_month_to_date_consumption": "Månedlig forbruk til nå",
+    "name_month_to_date_price": "Månedlig pris til nå",
+    "name_estimated": "Estimert",
+    "name_metered": "Avlest",
+    "name_other_items_monthly_cost": "Andre månedlige kostnader (fra siste regning)",
+    "name_month_to_date_total_cost_estimated": "Total månedlig kostnad hittil (estimert)",
+    "name_month_to_date_total_cost_metered": "Total månedlig kostnad hittil (avlest)",
+    "name_end_of_month_estimate": "Estimert regning ved slutten av måneden",
+    "name_measuring_point": "Målepunkt {id}",
+    "name_device_name": "EcoGuard Node {node_id}"
   }
 }

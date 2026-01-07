@@ -98,42 +98,28 @@ async def _async_get_translation(hass: HomeAssistant, key: str, **kwargs: Any) -
         translation_data = await _load_translation_file(hass, lang)
 
         if translation_data and "common" in translation_data:
-            sensor_data = translation_data["common"]
-
-            # Navigate the nested structure: common.utility.hw or common.name.daily_consumption
-            key_parts = key.split(".")
-            current = sensor_data
-
-            for part in key_parts:
-                if isinstance(current, dict) and part in current:
-                    current = current[part]
-                else:
-                    current = None
-                    break
-
-            if current and isinstance(current, str):
-                text = current
-                _LOGGER.debug("Found translation for key %s: %s (lang=%s)", key, text, lang)
-                return text.format(**kwargs) if kwargs else text
+            common_data = translation_data["common"]
+            
+            # Convert key from "utility.hw" to "utility_hw" format
+            translation_key = key.replace(".", "_")
+            
+            if translation_key in common_data:
+                text = common_data[translation_key]
+                if isinstance(text, str):
+                    _LOGGER.debug("Found translation for key %s: %s (lang=%s)", key, text, lang)
+                    return text.format(**kwargs) if kwargs else text
 
         # Fallback to English
         if lang != "en":
             translation_data = await _load_translation_file(hass, "en")
             if translation_data and "common" in translation_data:
-                sensor_data = translation_data["common"]
-                key_parts = key.split(".")
-                current = sensor_data
-
-                for part in key_parts:
-                    if isinstance(current, dict) and part in current:
-                        current = current[part]
-                    else:
-                        current = None
-                        break
-
-                if current and isinstance(current, str):
-                    text = current
-                    return text.format(**kwargs) if kwargs else text
+                common_data = translation_data["common"]
+                translation_key = key.replace(".", "_")
+                
+                if translation_key in common_data:
+                    text = common_data[translation_key]
+                    if isinstance(text, str):
+                        return text.format(**kwargs) if kwargs else text
     except Exception as e:
         _LOGGER.warning("Translation lookup failed for key %s (lang=%s): %s", key, getattr(hass.config, 'language', 'en'), e)
 
