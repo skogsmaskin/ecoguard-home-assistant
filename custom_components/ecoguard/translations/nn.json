@@ -3,17 +3,17 @@
     "step": {
       "user": {
         "title": "EcoGuard Innstillingar",
-        "description": "Skriv inn dine EcoGuard-brukardetaljar for å kopla til.",
+        "description": "Skriv inn dine brukardetaljar for EcoGuard Curves for å kopla til.",
         "data": {
-          "username": "Brukarnamn/Objektnummer (frå EcoGuard-portalen)",
-          "password": "Passord (EcoGuard-konto)",
-          "domain": "Domenekode (t.d. SkrentenBrl - frå portalens URL)",
-          "nord_pool_area": "Nord-Pool-område (valfritt - t.d. NO1, SE3)"
+          "username": "Brukarnamn/Objektnummer",
+          "password": "Passord",
+          "domain": "Domenekode",
+          "nord_pool_area": "Nord-Pool-område (valfritt)"
         },
         "data_description": {
-          "username": "Ditt EcoGuard-brukarnamn eller objektnummer som vert brukt til å logga inn på EcoGuard-portalen.",
-          "password": "Ditt EcoGuard-kontopassord.",
-          "domain": "Din EcoGuard-domenekode (t.d. 'SkrentenBrl'). Dette finst vanlegvis i EcoGuard-portalens URL eller er oppgjeve av din energileverandør.",
+          "username": "Ditt bukarnamn eller objektnummer som vert brukt til å logga inn på EcoGuard Curves.",
+          "password": "Ditt EcoGuard Curves kontopassord.",
+          "domain": "Din EcoGuard-domenekode (t.d. 'SkrentenBrl'). Dette finst vanlegvis i EcoGuard Curves URL eller er oppgjeve av din energileverandør.",
           "nord_pool_area": "Din Nord Pool-prisområdekode (t.d. 'NO1' for Oslo, 'SE3' for Stockholm). Dette vert brukt for straumprisdata. [Finn ditt område på Nord Pool-kartet]({nord_pool_link})."
         }
       }
@@ -30,17 +30,20 @@
   "common": {
     "utility_hw": "Varmt vatn",
     "utility_cw": "Kaldt vatn",
-    "name_daily_consumption": "Dagleg forbruk",
-    "name_last_update": "Siste måling",
-    "name_month_to_date_consumption": "Månadleg forbruk til no",
-    "name_month_to_date_price": "Månadleg pris til no",
     "name_estimated": "Estimert",
     "name_metered": "Avlese",
-    "name_other_items_monthly_cost": "Andre månadlege kostnader (frå siste rekning)",
-    "name_month_to_date_total_cost_estimated": "Total månadleg kostnad hittil (estimert)",
-    "name_month_to_date_total_cost_metered": "Total månadleg kostnad hittil (avlese)",
-    "name_end_of_month_estimate": "Estimert rekning ved slutten av månaden",
     "name_measuring_point": "Målepunkt {id}",
-    "name_device_name": "EcoGuard Node {node_id}"
+    "name_meter": "Målar",
+    "name_device_name": "EcoGuard Node {node_id}",
+    "name_combined_water": "Kombinert vatn",
+    "name_consumption_daily": "Forbruk Dagleg",
+    "name_cost_daily": "Kostnad Dagleg",
+    "name_consumption_monthly_aggregated": "Forbruk Månadleg Aggregert",
+    "name_cost_monthly_aggregated": "Kostnad Månadleg Aggregert",
+    "name_cost_monthly_other_items": "Kostnad Månadleg Andre Poster",
+    "name_combined": "Kombinert",
+    "name_all_utilities": "Alle Forbrukstypar",
+    "name_cost_monthly_end_of_month_total_estimate": "Kostnad Månadleg Slutten Av Månaden Total Estimert",
+    "name_reception_last_update": "Mottak Siste Oppdatering"
   }
 }

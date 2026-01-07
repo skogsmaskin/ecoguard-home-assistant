@@ -11,17 +11,21 @@ The integration will however map out all sensors found. If you have access to se
 
 This integration provides comprehensive monitoring of your water consumption and costs:
 
-- **Daily Consumption Sensors**: Last known daily consumption (m³) for each meter (cold and hot water)
-- **Month-to-Date Consumption**: Running totals for the current month for cold and hot water
-- **Month-to-Date Price Sensors**:
+- **Daily Consumption Sensors**: Last known daily consumption (m³) for each meter and aggregated by utility type
+- **Daily Cost Sensors**: Daily cost for each meter and aggregated by utility type (metered and estimated)
+- **Monthly Consumption Sensors**: Running totals for the current month, aggregated by utility and per meter
+- **Monthly Cost Sensors**:
   - **Metered**: Actual price data from the API (when available)
   - **Estimated**: Estimated prices using Nord Pool spot prices for hot water heating costs
+- **Combined Water Sensors**: Combined hot and cold water consumption and costs
 - **Total Monthly Cost Sensors**:
-  - **Metered**: Sum of actual metered costs from the API
+  - **Metered**: Sum of actual metered costs from the API across all utilities
   - **Estimated**: Includes estimated hot water costs when actual price data is unavailable
 - **Other Items Cost**: General fees and charges from the last billing period
 - **End-of-Month Estimate**: Projected monthly bill based on current consumption patterns
 - **Latest Reception Sensors**: Timestamp of last data reception per measuring point
+
+**Note**: Individual meter sensors (daily consumption, daily cost, monthly meter, and reception) are disabled by default to reduce clutter. You can enable them in the entity registry if needed.
 
 ### Data Availability
 
@@ -91,50 +95,91 @@ The integration can estimate hot water heating costs using Nord Pool electricity
 
 ## Sensors
 
-The integration creates the following sensors:
+The integration creates the following sensors, organized by purpose (Consumption, Cost, Reception):
 
-### Daily Consumption Sensors
-- **Format**: `Daily Consumption (Utility) - "Measuring Point"`
-- **Example**: `Daily Consumption (Cold Water) - "Kaldtvann Bad"`
+### Consumption Sensors
+
+#### Daily Consumption (Individual Meters)
+- **Format**: `Consumption Daily - Meter "Measuring Point" (Utility)`
+- **Example**: `Consumption Daily - Meter "Kaldtvann Bad" (Cold Water)`
 - Shows the last known daily consumption value for each meter
 - **Note**: Data may be delayed by up to a day
+- **Status**: Disabled by default (enable in entity registry if needed)
 
-### Month-to-Date Sensors
-
-#### Consumption
-- **Format**: `Month-to-Date Consumption - Utility`
+#### Daily Consumption (Aggregated by Utility)
+- **Format**: `Consumption Daily - Utility`
 - **Examples**: 
-  - `Month-to-Date Consumption - Hot Water`
-  - `Month-to-Date Consumption - Cold Water`
-- Total consumption for the current month (m³)
+  - `Consumption Daily - Hot Water`
+  - `Consumption Daily - Cold Water`
+- Aggregated daily consumption across all meters for each utility type
 
-#### Price (Metered)
-- **Format**: `Month-to-Date Price (Metered) - Utility`
-- **Examples**:
-  - `Month-to-Date Price (Metered) - Hot Water`
-  - `Month-to-Date Price (Metered) - Cold Water`
-- Actual price from API data (when available)
+#### Daily Consumption (Combined Water)
+- **Format**: `Consumption Daily - Combined Water`
+- Combined hot and cold water daily consumption
 
-#### Price (Estimated)
-- **Format**: `Month-to-Date Price (Estimated) - Utility`
+#### Monthly Consumption (Aggregated by Utility)
+- **Format**: `Consumption Monthly Aggregated - Utility`
+- **Examples**: 
+  - `Consumption Monthly Aggregated - Hot Water`
+  - `Consumption Monthly Aggregated - Cold Water`
+- Total consumption for the current month (m³), aggregated across all meters
+
+#### Monthly Consumption (Individual Meters)
+- **Format**: `Consumption Monthly Aggregated - Meter "Measuring Point" (Utility)`
+- **Example**: `Consumption Monthly Aggregated - Meter "Kaldtvann Bad" (Cold Water)`
+- Monthly consumption for individual meters
+- **Status**: Disabled by default (enable in entity registry if needed)
+
+### Cost Sensors
+
+#### Daily Cost (Individual Meters)
+- **Format**: `Cost Daily Metered - Meter "Measuring Point" (Utility)` or `Cost Daily Estimated - Meter "Measuring Point" (Utility)`
+- **Examples**: 
+  - `Cost Daily Metered - Meter "Kaldtvann Bad" (Cold Water)`
+  - `Cost Daily Estimated - Meter "Varmtvann Bad" (Hot Water)`
+- Daily cost for each meter (metered uses actual API data, estimated uses calculations)
+- **Status**: Disabled by default (enable in entity registry if needed)
+
+#### Daily Cost (Aggregated by Utility)
+- **Format**: `Cost Daily Metered - Utility` or `Cost Daily Estimated - Utility`
+- **Examples**: 
+  - `Cost Daily Metered - Hot Water`
+  - `Cost Daily Estimated - Cold Water`
+- Aggregated daily cost across all meters for each utility type
+
+#### Daily Cost (Combined Water)
+- **Format**: `Cost Daily Metered - Combined Water` or `Cost Daily Estimated - Combined Water`
+- Combined hot and cold water daily cost
+
+#### Monthly Cost (Aggregated by Utility)
+- **Format**: `Cost Monthly Aggregated Metered - Utility` or `Cost Monthly Aggregated Estimated - Utility`
 - **Examples**:
-  - `Month-to-Date Price (Estimated) - Hot Water`
-  - `Month-to-Date Price (Estimated) - Cold Water`
-- Estimated price using Nord Pool spot prices (used when actual data is unavailable)
+  - `Cost Monthly Aggregated Metered - Hot Water`
+  - `Cost Monthly Aggregated Estimated - Cold Water`
+- Monthly cost aggregated across all meters (metered uses actual API data, estimated uses Nord Pool spot prices)
 - Note: Cold water prices are typically available from the API, so estimated and metered are usually the same
 
-### Total Cost Sensors
-- **Month-to-Date Total Cost (Metered)**: Sum of all metered costs (only actual API data)
-- **Month-to-Date Total Cost (Estimated)**: Sum including estimated hot water costs when price data is missing
+#### Monthly Cost (Individual Meters)
+- **Format**: `Cost Monthly Aggregated Metered - Meter "Measuring Point" (Utility)` or `Cost Monthly Aggregated Estimated - Meter "Measuring Point" (Utility)`
+- **Example**: `Cost Monthly Aggregated Metered - Meter "Kaldtvann Bad" (Cold Water)`
+- Monthly cost for individual meters
+- **Status**: Disabled by default (enable in entity registry if needed)
+
+#### Total Monthly Cost
+- **Format**: `Cost Monthly Aggregated Metered - All Utilities` or `Cost Monthly Aggregated Estimated - All Utilities`
+- Sum of all costs across all utilities (metered uses only actual API data, estimated includes estimated hot water costs)
 
 ### Other Sensors
-- **Other Items Monthly Cost (Last Bill)**: General fees and charges from the most recent billing period
-- **End-of-Month Bill Estimate**: Projected total monthly bill based on current consumption patterns and mean daily values
-- **Latest Measurement**: Timestamp of last data reception for each measuring point
-  - **Format**: `Latest Measurement (Utility) - "Measuring Point"` or `Latest Measurement - "Measuring Point"`
-  - **Examples**:
-    - `Latest Measurement (Cold Water) - "Kaldtvann Bad"`
-    - `Latest Measurement (Hot Water) - "Varmtvann Bad"`
+- **Cost Monthly Other Items**: General fees and charges from the most recent billing period
+- **Cost Monthly End of Month Total Estimate**: Projected total monthly bill based on current consumption patterns and mean daily values
+
+### Reception Sensors
+- **Format**: `Reception Last Update - Meter "Measuring Point" (Utility)`
+- **Examples**:
+  - `Reception Last Update - Meter "Kaldtvann Bad" (Cold Water)`
+  - `Reception Last Update - Meter "Varmtvann Bad" (Hot Water)`
+- Timestamp of last data reception for each measuring point
+- **Status**: Disabled by default (enable in entity registry if needed)
 
 
 ## Development
@@ -356,6 +401,13 @@ The integration includes automatic rate limiting and retry logic:
 - Ensure your account has measuring points configured
 - Check that installations are properly set up in EcoGuard
 - Review logs for data retrieval errors
+- **Note**: Individual meter sensors (daily consumption, daily cost, monthly meter, and reception) are disabled by default. Enable them in Settings → Devices & Services → EcoGuard → Entities if you need them
+
+### Sensor names not translating
+
+- Ensure your Home Assistant language is set correctly in Settings → General
+- Check that translation files exist in `custom_components/ecoguard/translations/`
+- Restart Home Assistant after changing language settings
 
 ## Contributing
 
@@ -381,8 +433,22 @@ The integration uses the following translation files:
 - `strings.json` - Base English translations (used by Home Assistant's config flow system)
 - `translations/en.json` - English translations (required for config flow to work properly)
 - `translations/nb.json` - Norwegian (Bokmål) translations
+- `translations/nn.json` - Norwegian (Nynorsk) translations
+- `translations/sv.json` - Swedish translations
 
 **Note**: `strings.json` and `translations/en.json` should be kept in sync. If you modify `strings.json`, run `./sync-translations.sh` to update `en.json`, or manually copy the changes.
+
+### Sensor Naming
+
+Sensor names are automatically translated based on your Home Assistant language setting. The integration uses translation keys following the pattern:
+- `name.consumption_daily` - "Consumption Daily"
+- `name.cost_daily` - "Cost Daily"
+- `name.consumption_monthly_aggregated` - "Consumption Monthly Aggregated"
+- `name.cost_monthly_aggregated` - "Cost Monthly Aggregated"
+- `name.reception_last_update` - "Reception Last Update"
+- `name.meter` - "Meter"
+- `utility.hw` - "Hot Water" / "Varmt vann"
+- `utility.cw` - "Cold Water" / "Kaldt vann"
 
 ## License
 

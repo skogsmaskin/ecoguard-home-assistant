@@ -21,10 +21,8 @@ def mock_translation_data_en():
         "common": {
             "utility_hw": "Hot Water",
             "utility_cw": "Cold Water",
-            "name_daily_consumption": "Daily Consumption",
-            "name_last_update": "Latest Measurement",
-            "name_month_to_date_consumption": "Month-to-Date Consumption",
-            "name_month_to_date_price": "Month-to-Date Price",
+            "name_consumption_daily": "Consumption Daily",
+            "name_reception_last_update": "Reception Last Update",
             "name_estimated": "Estimated",
             "name_metered": "Metered",
             "name_measuring_point": "Measuring Point {id}",
@@ -41,10 +39,8 @@ def mock_translation_data_nb():
         "common": {
             "utility_hw": "Varmt vann",
             "utility_cw": "Kaldt vann",
-            "name_daily_consumption": "Daglig forbruk",
-            "name_last_update": "Siste måling",
-            "name_month_to_date_consumption": "Månedlig forbruk til nå",
-            "name_month_to_date_price": "Månedlig pris til nå",
+            "name_consumption_daily": "Forbruk Daglig",
+            "name_reception_last_update": "Mottak Siste Oppdatering",
             "name_estimated": "Estimert",
             "name_metered": "Avlest",
             "name_measuring_point": "Målepunkt {id}",
@@ -60,8 +56,8 @@ async def test_get_translation_default():
     assert _get_translation_default("utility.cw") == "Cold Water"
     
     # Test name translations
-    assert _get_translation_default("name.daily_consumption") == "Daily Consumption"
-    assert _get_translation_default("name.last_update") == "Last Update"
+    assert _get_translation_default("name.consumption_daily") == "Consumption Daily"
+    assert _get_translation_default("name.reception_last_update") == "Reception Last Update"
     assert _get_translation_default("name.estimated") == "Estimated"
     assert _get_translation_default("name.metered") == "Metered"
     
@@ -92,11 +88,11 @@ async def test_async_get_translation_english(
         assert result == "Cold Water"
         
         # Test name translations
-        result = await _async_get_translation(hass, "name.daily_consumption")
-        assert result == "Daily Consumption"
+        result = await _async_get_translation(hass, "name.consumption_daily")
+        assert result == "Consumption Daily"
         
-        result = await _async_get_translation(hass, "name.last_update")
-        assert result == "Latest Measurement"
+        result = await _async_get_translation(hass, "name.reception_last_update")
+        assert result == "Reception Last Update"
         
         # Test with formatting
         result = await _async_get_translation(hass, "name.measuring_point", id=123)
@@ -128,11 +124,11 @@ async def test_async_get_translation_norwegian(
         assert result == "Kaldt vann"
         
         # Test name translations
-        result = await _async_get_translation(hass, "name.daily_consumption")
-        assert result == "Daglig forbruk"
+        result = await _async_get_translation(hass, "name.consumption_daily")
+        assert result == "Forbruk Daglig"
         
-        result = await _async_get_translation(hass, "name.last_update")
-        assert result == "Siste måling"
+        result = await _async_get_translation(hass, "name.reception_last_update")
+        assert result == "Mottak Siste Oppdatering"
 
 
 async def test_async_get_translation_fallback_to_english(
@@ -161,9 +157,9 @@ async def test_async_get_translation_fallback_to_english(
         # Set language to Norwegian
         hass.config.language = "nb"
         
-        # This should fallback to English since Norwegian doesn't have name.daily_consumption
-        result = await _async_get_translation(hass, "name.daily_consumption")
-        assert result == "Daily Consumption"
+        # This should fallback to English since Norwegian doesn't have name.consumption_daily
+        result = await _async_get_translation(hass, "name.consumption_daily")
+        assert result == "Consumption Daily"
 
 
 async def test_async_get_translation_missing_key_fallback(
@@ -193,8 +189,8 @@ async def test_async_get_translation_missing_file_fallback(hass: HomeAssistant):
         result = await _async_get_translation(hass, "utility.hw")
         assert result == "Hot Water"
         
-        result = await _async_get_translation(hass, "name.daily_consumption")
-        assert result == "Daily Consumption"
+        result = await _async_get_translation(hass, "name.consumption_daily")
+        assert result == "Consumption Daily"
 
 
 async def test_async_get_translation_missing_common_key(hass: HomeAssistant):
@@ -234,7 +230,7 @@ async def test_load_translation_file(hass: HomeAssistant):
     # Verify flattened keys exist
     assert "utility_hw" in result["common"]
     assert "utility_cw" in result["common"]
-    assert "name_daily_consumption" in result["common"]
+    assert "name_consumption_daily" in result["common"]
 
 
 async def test_translation_key_structure(hass: HomeAssistant):
@@ -251,8 +247,8 @@ async def test_translation_key_structure(hass: HomeAssistant):
     assert "utility_cw" in common_data
     
     # Verify name translations (flattened keys)
-    assert "name_daily_consumption" in common_data
-    assert "name_last_update" in common_data
+    assert "name_consumption_daily" in common_data
+    assert "name_reception_last_update" in common_data
     assert "name_measuring_point" in common_data
     assert "name_device_name" in common_data
 

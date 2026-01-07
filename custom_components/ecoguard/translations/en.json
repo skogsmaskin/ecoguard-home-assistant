@@ -3,12 +3,12 @@
     "step": {
       "user": {
         "title": "EcoGuard Configuration",
-        "description": "Enter your EcoGuard credentials to connect to your energy monitoring system.",
+        "description": "Enter your EcoGuard Curves credentials to connect.",
         "data": {
-          "username": "Username/Object number (from EcoGuard portal)",
-          "password": "Password (EcoGuard account)",
-          "domain": "Domain code (e.g., SkrentenBrl - from portal URL)",
-          "nord_pool_area": "Nord Pool Area (optional - e.g., NO1, SE3)"
+          "username": "Username/Object number",
+          "password": "Password",
+          "domain": "Domain code",
+          "nord_pool_area": "Nord Pool Area (optional)"
         },
         "data_description": {
           "username": "Your EcoGuard username or object number used to log in to the EcoGuard portal.",
@@ -30,17 +30,20 @@
   "common": {
     "utility_hw": "Hot Water",
     "utility_cw": "Cold Water",
-    "name_daily_consumption": "Daily Consumption",
-    "name_last_update": "Latest Measurement",
-    "name_month_to_date_consumption": "Month-to-Date Consumption",
-    "name_month_to_date_price": "Month-to-Date Price",
     "name_estimated": "Estimated",
     "name_metered": "Metered",
-    "name_other_items_monthly_cost": "Other Items Monthly Cost (Last Bill)",
-    "name_month_to_date_total_cost_estimated": "Month-to-Date Total Cost (Estimated)",
-    "name_month_to_date_total_cost_metered": "Month-to-Date Total Cost (Metered)",
-    "name_end_of_month_estimate": "End-of-Month Bill Estimate",
     "name_measuring_point": "Measuring Point {id}",
-    "name_device_name": "EcoGuard Node {node_id}"
+    "name_meter": "Meter",
+    "name_device_name": "EcoGuard Node {node_id}",
+    "name_combined_water": "Combined Water",
+    "name_consumption_daily": "Consumption Daily",
+    "name_cost_daily": "Cost Daily",
+    "name_consumption_monthly_aggregated": "Consumption Monthly Aggregated",
+    "name_cost_monthly_aggregated": "Cost Monthly Aggregated",
+    "name_cost_monthly_other_items": "Cost Monthly Other Items",
+    "name_combined": "Combined",
+    "name_all_utilities": "All Utilities",
+    "name_cost_monthly_end_of_month_total_estimate": "Cost Monthly End of Month Total Estimate",
+    "name_reception_last_update": "Reception Last Update"
   }
 }
