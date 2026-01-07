@@ -236,6 +236,37 @@ def _get_translation_default(key: str, **kwargs: Any) -> str:
     return default.format(**kwargs) if kwargs else default
 
 
+async def _async_update_entity_registry_name(
+    sensor: SensorEntity, new_name: str
+) -> None:
+    """Update the entity registry name for a sensor.
+
+    This helper function centralizes the logic for updating entity registry names
+    to reduce code duplication across sensor classes.
+
+    Args:
+        sensor: The sensor entity instance
+        new_name: The new name to set in the entity registry
+    """
+    if not hasattr(sensor, '_attr_unique_id') or not sensor._attr_unique_id:
+        return
+
+    if not hasattr(sensor, 'hass') or not sensor.hass:
+        return
+
+    try:
+        entity_registry = async_get_entity_registry(sensor.hass)
+        # Try to get entity_id by unique_id
+        entity_id = _get_entity_id_by_unique_id(entity_registry, sensor._attr_unique_id)
+        if entity_id:
+            entity_entry = entity_registry.async_get(entity_id)
+            if entity_entry and entity_entry.name != new_name:
+                entity_registry.async_update_entity(entity_id, name=new_name)
+                _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
+    except Exception as e:
+        _LOGGER.debug("Failed to update entity registry name: %s", e)
+
+
 def round_to_max_digits(value: float | None, max_digits: int = 3) -> float | None:
     """Round a value to a maximum number of significant digits.
 
@@ -937,19 +968,7 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
                 _LOGGER.info("Updated sensor name from '%s' to '%s' (lang=%s)", old_name, new_name, lang)
 
             # Always update the entity registry name so it shows correctly in modals
-            # Use unique_id to find the entity since entity_id might not be available yet
-            if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
-                try:
-                    entity_registry = async_get_entity_registry(self.hass)
-                    # Try to get entity_id by unique_id
-                    entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
-                    if entity_id:
-                        entity_entry = entity_registry.async_get(entity_id)
-                        if entity_entry and entity_entry.name != new_name:
-                            entity_registry.async_update_entity(entity_id, name=new_name)
-                            _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
-                except Exception as e:
-                    _LOGGER.debug("Failed to update entity registry name: %s", e)
+            await _async_update_entity_registry_name(self, new_name)
 
             # Also update device name
             device_name = await _async_get_translation(
@@ -1120,19 +1139,7 @@ class EcoGuardLatestReceptionSensor(CoordinatorEntity, SensorEntity):
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                # Use unique_id to find the entity since entity_id might not be available yet
-                if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
-                    try:
-                        entity_registry = async_get_entity_registry(self.hass)
-                        # Try to get entity_id by unique_id
-                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
-                        if entity_id:
-                            entity_entry = entity_registry.async_get(entity_id)
-                            if entity_entry and entity_entry.name != new_name:
-                                entity_registry.async_update_entity(entity_id, name=new_name)
-                                _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
-                    except Exception as e:
-                        _LOGGER.debug("Failed to update entity registry name: %s", e)
+                await _async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -1323,19 +1330,7 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                # Use unique_id to find the entity since entity_id might not be available yet
-                if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
-                    try:
-                        entity_registry = async_get_entity_registry(self.hass)
-                        # Try to get entity_id by unique_id
-                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
-                        if entity_id:
-                            entity_entry = entity_registry.async_get(entity_id)
-                            if entity_entry and entity_entry.name != new_name:
-                                entity_registry.async_update_entity(entity_id, name=new_name)
-                                _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
-                    except Exception as e:
-                        _LOGGER.debug("Failed to update entity registry name: %s", e)
+                await _async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -1469,19 +1464,7 @@ class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator],
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                # Use unique_id to find the entity since entity_id might not be available yet
-                if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
-                    try:
-                        entity_registry = async_get_entity_registry(self.hass)
-                        # Try to get entity_id by unique_id
-                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
-                        if entity_id:
-                            entity_entry = entity_registry.async_get(entity_id)
-                            if entity_entry and entity_entry.name != new_name:
-                                entity_registry.async_update_entity(entity_id, name=new_name)
-                                _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
-                    except Exception as e:
-                        _LOGGER.debug("Failed to update entity registry name: %s", e)
+                await _async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -1640,19 +1623,7 @@ class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                # Use unique_id to find the entity since entity_id might not be available yet
-                if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
-                    try:
-                        entity_registry = async_get_entity_registry(self.hass)
-                        # Try to get entity_id by unique_id
-                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
-                        if entity_id:
-                            entity_entry = entity_registry.async_get(entity_id)
-                            if entity_entry and entity_entry.name != new_name:
-                                entity_registry.async_update_entity(entity_id, name=new_name)
-                                _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
-                    except Exception as e:
-                        _LOGGER.debug("Failed to update entity registry name: %s", e)
+                await _async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -1864,19 +1835,7 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                # Use unique_id to find the entity since entity_id might not be available yet
-                if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
-                    try:
-                        entity_registry = async_get_entity_registry(self.hass)
-                        # Try to get entity_id by unique_id
-                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
-                        if entity_id:
-                            entity_entry = entity_registry.async_get(entity_id)
-                            if entity_entry and entity_entry.name != new_name:
-                                entity_registry.async_update_entity(entity_id, name=new_name)
-                                _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
-                    except Exception as e:
-                        _LOGGER.debug("Failed to update entity registry name: %s", e)
+                await _async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -2046,19 +2005,7 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                # Use unique_id to find the entity since entity_id might not be available yet
-                if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
-                    try:
-                        entity_registry = async_get_entity_registry(self.hass)
-                        # Try to get entity_id by unique_id
-                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
-                        if entity_id:
-                            entity_entry = entity_registry.async_get(entity_id)
-                            if entity_entry and entity_entry.name != new_name:
-                                entity_registry.async_update_entity(entity_id, name=new_name)
-                                _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
-                    except Exception as e:
-                        _LOGGER.debug("Failed to update entity registry name: %s", e)
+                await _async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -2239,19 +2186,7 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                # Use unique_id to find the entity since entity_id might not be available yet
-                if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
-                    try:
-                        entity_registry = async_get_entity_registry(self.hass)
-                        # Try to get entity_id by unique_id
-                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
-                        if entity_id:
-                            entity_entry = entity_registry.async_get(entity_id)
-                            if entity_entry and entity_entry.name != new_name:
-                                entity_registry.async_update_entity(entity_id, name=new_name)
-                                _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
-                    except Exception as e:
-                        _LOGGER.debug("Failed to update entity registry name: %s", e)
+                await _async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -2475,19 +2410,7 @@ class EcoGuardDailyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], 
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                # Use unique_id to find the entity since entity_id might not be available yet
-                if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
-                    try:
-                        entity_registry = async_get_entity_registry(self.hass)
-                        # Try to get entity_id by unique_id
-                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
-                        if entity_id:
-                            entity_entry = entity_registry.async_get(entity_id)
-                            if entity_entry and entity_entry.name != new_name:
-                                entity_registry.async_update_entity(entity_id, name=new_name)
-                                _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
-                    except Exception as e:
-                        _LOGGER.debug("Failed to update entity registry name: %s", e)
+                await _async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -2641,19 +2564,7 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                # Use unique_id to find the entity since entity_id might not be available yet
-                if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
-                    try:
-                        entity_registry = async_get_entity_registry(self.hass)
-                        # Try to get entity_id by unique_id
-                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
-                        if entity_id:
-                            entity_entry = entity_registry.async_get(entity_id)
-                            if entity_entry and entity_entry.name != new_name:
-                                entity_registry.async_update_entity(entity_id, name=new_name)
-                                _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
-                    except Exception as e:
-                        _LOGGER.debug("Failed to update entity registry name: %s", e)
+                await _async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -2853,19 +2764,7 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                # Use unique_id to find the entity since entity_id might not be available yet
-                if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
-                    try:
-                        entity_registry = async_get_entity_registry(self.hass)
-                        # Try to get entity_id by unique_id
-                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
-                        if entity_id:
-                            entity_entry = entity_registry.async_get(entity_id)
-                            if entity_entry and entity_entry.name != new_name:
-                                entity_registry.async_update_entity(entity_id, name=new_name)
-                                _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
-                    except Exception as e:
-                        _LOGGER.debug("Failed to update entity registry name: %s", e)
+                await _async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -3117,19 +3016,7 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                # Use unique_id to find the entity since entity_id might not be available yet
-                if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
-                    try:
-                        entity_registry = async_get_entity_registry(self.hass)
-                        # Try to get entity_id by unique_id
-                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
-                        if entity_id:
-                            entity_entry = entity_registry.async_get(entity_id)
-                            if entity_entry and entity_entry.name != new_name:
-                                entity_registry.async_update_entity(entity_id, name=new_name)
-                                _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
-                    except Exception as e:
-                        _LOGGER.debug("Failed to update entity registry name: %s", e)
+                await _async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -3300,19 +3187,7 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                # Use unique_id to find the entity since entity_id might not be available yet
-                if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
-                    try:
-                        entity_registry = async_get_entity_registry(self.hass)
-                        # Try to get entity_id by unique_id
-                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
-                        if entity_id:
-                            entity_entry = entity_registry.async_get(entity_id)
-                            if entity_entry and entity_entry.name != new_name:
-                                entity_registry.async_update_entity(entity_id, name=new_name)
-                                _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
-                    except Exception as e:
-                        _LOGGER.debug("Failed to update entity registry name: %s", e)
+                await _async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
