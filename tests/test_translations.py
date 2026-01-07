@@ -19,7 +19,7 @@ def mock_translation_data_en():
     """Mock English translation data."""
     return {
         "config": {},
-        "ecoguard": {
+        "common": {
             "utility": {
                 "hw": "Hot Water",
                 "cw": "Cold Water",
@@ -43,7 +43,7 @@ def mock_translation_data_nb():
     """Mock Norwegian Bokmål translation data."""
     return {
         "config": {},
-        "ecoguard": {
+        "common": {
             "utility": {
                 "hw": "Varmt vann",
                 "cw": "Kaldt vann",
@@ -153,7 +153,7 @@ async def test_async_get_translation_fallback_to_english(
             # Norwegian file exists but missing some keys
             return {
                 "config": {},
-                "ecoguard": {
+                "common": {
                     "utility": {"hw": "Varmt vann", "cw": "Kaldt vann"},
                     # Missing name section
                 },
@@ -205,14 +205,14 @@ async def test_async_get_translation_missing_file_fallback(hass: HomeAssistant):
         assert result == "Daily Consumption"
 
 
-async def test_async_get_translation_missing_ecoguard_key(hass: HomeAssistant):
-    """Test fallback when ecoguard key is missing from translation file."""
-    # Translation file exists but doesn't have ecoguard key
+async def test_async_get_translation_missing_common_key(hass: HomeAssistant):
+    """Test fallback when common key is missing from translation file."""
+    # Translation file exists but doesn't have common key
     translation_data = {
         "config": {
             "step": {"user": {"title": "Test"}},
         },
-        # Missing "ecoguard" key
+        # Missing "common" key
     }
     
     with patch(
@@ -238,9 +238,9 @@ async def test_load_translation_file(hass: HomeAssistant):
     # Should successfully load the actual translation file
     assert result is not None
     assert "config" in result
-    assert "ecoguard" in result
-    assert "utility" in result["ecoguard"]
-    assert "name" in result["ecoguard"]
+    assert "common" in result
+    assert "utility" in result["common"]
+    assert "name" in result["common"]
 
 
 async def test_translation_key_structure(hass: HomeAssistant):
@@ -248,21 +248,21 @@ async def test_translation_key_structure(hass: HomeAssistant):
     result = await _load_translation_file(hass, "en")
     
     assert result is not None
-    assert "ecoguard" in result, "Translation file should have 'ecoguard' key"
+    assert "common" in result, "Translation file should have 'common' key"
     
-    ecoguard_data = result["ecoguard"]
-    assert "utility" in ecoguard_data, "Should have 'utility' section"
-    assert "name" in ecoguard_data, "Should have 'name' section"
+    common_data = result["common"]
+    assert "utility" in common_data, "Should have 'utility' section"
+    assert "name" in common_data, "Should have 'name' section"
     
     # Verify utility translations
-    assert "hw" in ecoguard_data["utility"]
-    assert "cw" in ecoguard_data["utility"]
+    assert "hw" in common_data["utility"]
+    assert "cw" in common_data["utility"]
     
     # Verify name translations
-    assert "daily_consumption" in ecoguard_data["name"]
-    assert "last_update" in ecoguard_data["name"]
-    assert "measuring_point" in ecoguard_data["name"]
-    assert "device_name" in ecoguard_data["name"]
+    assert "daily_consumption" in common_data["name"]
+    assert "last_update" in common_data["name"]
+    assert "measuring_point" in common_data["name"]
+    assert "device_name" in common_data["name"]
 
 
 async def test_translation_formatting_with_kwargs(hass: HomeAssistant):

@@ -27,7 +27,7 @@
       "already_configured": "Dette EcoGuard-domenet er allereie sett opp."
     }
   },
-  "ecoguard": {
+  "common": {
     "utility": {
       "hw": "Varmt vatn",
       "cw": "Kaldt vatn"

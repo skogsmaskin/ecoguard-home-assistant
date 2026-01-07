@@ -93,14 +93,14 @@ async def _async_get_translation(hass: HomeAssistant, key: str, **kwargs: Any) -
         # Get the current language from hass.config.language
         lang = getattr(hass.config, 'language', 'en')
 
-        # Load translation file directly to access ecoguard section
+        # Load translation file directly to access common section
         # (The translation helper only loads config section)
         translation_data = await _load_translation_file(hass, lang)
 
-        if translation_data and "ecoguard" in translation_data:
-            sensor_data = translation_data["ecoguard"]
+        if translation_data and "common" in translation_data:
+            sensor_data = translation_data["common"]
 
-            # Navigate the nested structure: ecoguard.utility.hw or ecoguard.name.daily_consumption
+            # Navigate the nested structure: common.utility.hw or common.name.daily_consumption
             key_parts = key.split(".")
             current = sensor_data
 
@@ -119,8 +119,8 @@ async def _async_get_translation(hass: HomeAssistant, key: str, **kwargs: Any) -
         # Fallback to English
         if lang != "en":
             translation_data = await _load_translation_file(hass, "en")
-            if translation_data and "ecoguard" in translation_data:
-                sensor_data = translation_data["ecoguard"]
+            if translation_data and "common" in translation_data:
+                sensor_data = translation_data["common"]
                 key_parts = key.split(".")
                 current = sensor_data
 

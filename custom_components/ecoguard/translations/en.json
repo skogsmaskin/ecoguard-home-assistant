@@ -27,7 +27,7 @@
       "already_configured": "This EcoGuard domain is already configured."
     }
   },
-  "ecoguard": {
+  "common": {
     "utility": {
       "hw": "Hot Water",
       "cw": "Cold Water"
