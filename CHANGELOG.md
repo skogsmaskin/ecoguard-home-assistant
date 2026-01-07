@@ -125,7 +125,7 @@ released yesterday :)
   - **Metered**: Sum of actual metered costs from API
   - **Estimated**: Includes estimated hot water costs when actual data unavailable
 - **Other Items Cost Sensor**: General fees and charges from last billing period
-- **End-of-Month Estimate Sensor**: Projected monthly bill based on current consumption patterns
+- **Cost Monthly Estimated Final Settlement Sensor**: Estimated final monthly bill settlement based on current consumption patterns
 
 #### Nord Pool Integration
 - Optional Nord Pool area configuration during setup

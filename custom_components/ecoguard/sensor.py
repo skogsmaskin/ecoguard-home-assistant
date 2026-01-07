@@ -197,7 +197,7 @@ async def _async_get_translation(hass: HomeAssistant, key: str, **kwargs: Any) -
         "name.cost_monthly_other_items": "Cost Monthly Other Items",
         "name.combined": "Combined",
         "name.all_utilities": "All Utilities",
-        "name.cost_monthly_end_of_month_total_estimate": "Cost Monthly End of Month Total Estimate",
+        "name.cost_monthly_estimated_final_settlement": "Cost Monthly Estimated Final Settlement",
         "name.reception_last_update": "Reception Last Update",
     }
 
@@ -228,7 +228,7 @@ def _get_translation_default(key: str, **kwargs: Any) -> str:
         "name.cost_monthly_other_items": "Cost Monthly Other Items",
         "name.combined": "Combined",
         "name.all_utilities": "All Utilities",
-        "name.cost_monthly_end_of_month_total_estimate": "Cost Monthly End of Month Total Estimate",
+        "name.cost_monthly_estimated_final_settlement": "Cost Monthly Estimated Final Settlement",
         "name.reception_last_update": "Reception Last Update",
     }
 
@@ -1793,13 +1793,13 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         super().__init__(coordinator)
         self._hass = hass
 
-        # Use "Cost Monthly End of Month Total Estimate" format to ensure entity_id starts with "cost_monthly_end_of_month_total_estimate_"
+        # Use "Cost Monthly Estimated Final Settlement" format to ensure entity_id starts with "cost_monthly_estimated_final_settlement_"
         # This will be updated in async_added_to_hass with proper translations
-        self._attr_name = _get_translation_default("name.cost_monthly_end_of_month_total_estimate")
+        self._attr_name = _get_translation_default("name.cost_monthly_estimated_final_settlement")
         # Build unique_id following pattern: purpose_group_sensor
-        # Home Assistant strips the domain prefix, so we want: cost_monthly_end_of_month_total_estimate
+        # Home Assistant strips the domain prefix, so we want: cost_monthly_estimated_final_settlement
         self._attr_unique_id = (
-            f"{DOMAIN}_cost_monthly_end_of_month_total_estimate"
+            f"{DOMAIN}_cost_monthly_estimated_final_settlement"
         )
 
         # Sensor attributes
@@ -1915,8 +1915,8 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             return
 
         try:
-            # Keep "Cost Monthly End of Month Total Estimate" format to maintain entity_id starting with "cost_monthly_end_of_month_total_estimate"
-            new_name = await _async_get_translation(self._hass, "name.cost_monthly_end_of_month_total_estimate")
+            # Keep "Cost Monthly Estimated Final Settlement" format to maintain entity_id starting with "cost_monthly_estimated_final_settlement"
+            new_name = await _async_get_translation(self._hass, "name.cost_monthly_estimated_final_settlement")
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()

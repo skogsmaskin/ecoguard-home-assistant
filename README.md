@@ -22,7 +22,7 @@ This integration provides comprehensive monitoring of your water consumption and
   - **Metered**: Sum of actual metered costs from the API across all utilities
   - **Estimated**: Includes estimated hot water costs when actual price data is unavailable
 - **Other Items Cost**: General fees and charges from the last billing period
-- **End-of-Month Estimate**: Projected monthly bill based on current consumption patterns
+- **Cost Monthly Estimated Final Settlement**: Estimated final monthly bill settlement based on current consumption patterns
 - **Latest Reception Sensors**: Timestamp of last data reception per measuring point
 
 **Note**: Individual meter sensors (daily consumption, daily cost, monthly meter, and reception) are disabled by default to reduce clutter. You can enable them in the entity registry if needed.
@@ -171,7 +171,7 @@ The integration creates the following sensors, organized by purpose (Consumption
 
 ### Other Sensors
 - **Cost Monthly Other Items**: General fees and charges from the most recent billing period
-- **Cost Monthly End of Month Total Estimate**: Projected total monthly bill based on current consumption patterns and mean daily values
+- **Cost Monthly Estimated Final Settlement**: Estimated final monthly bill settlement based on current consumption patterns and mean daily values
 
 ### Reception Sensors
 - **Format**: `Reception Last Update - Meter "Measuring Point" (Utility)`

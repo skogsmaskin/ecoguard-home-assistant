@@ -358,7 +358,11 @@ async def test_end_of_month_estimate_sensor(hass: HomeAssistant, coordinator):
         coordinator=coordinator,
     )
 
-    assert "end of month" in sensor._attr_name.lower() or "estimate" in sensor._attr_name.lower()
+    # Check that the name contains the expected pattern
+    name_lower = sensor._attr_name.lower()
+    assert ("final settlement" in name_lower or "estimated" in name_lower) and "cost monthly" in name_lower
+    # Verify unique_id matches the new pattern
+    assert sensor._attr_unique_id == "ecoguard_cost_monthly_estimated_final_settlement"
 
 
 async def test_end_of_month_estimate_sensor_fetch_value(

@@ -43,7 +43,7 @@
     "name_cost_monthly_other_items": "Kostnad Månadsvis Övriga Poster",
     "name_combined": "Kombinerad",
     "name_all_utilities": "Alla Förbrukningstyper",
-    "name_cost_monthly_end_of_month_total_estimate": "Kostnad Månadsvis Slutet Av Månaden Total Uppskattad",
+    "name_cost_monthly_estimated_final_settlement": "Kostnad Månadsvis Uppskattad Slutlig Avräkning",
     "name_reception_last_update": "Mottagning Senaste Uppdatering"
   }
 }
