@@ -1812,24 +1812,110 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Returns:
             Dict with 'value', 'unit', 'year', 'month', 'utility_code', 'aggregate_type', 'cost_type',
             or None if no data is available.
+
+        Note:
+            For price aggregates, per-meter price data is not directly available from the API.
+            This method uses proportional allocation based on consumption share: the meter's
+            monthly cost is calculated as (meter_consumption / total_utility_consumption) * total_utility_cost.
+            This provides a more accurate estimate than using the full utility-level cost, but assumes
+            all meters for the same utility have the same rate. If meters have different rates or
+            consumption patterns, the allocation may not be perfectly accurate.
         """
-        # For price, use the same logic as get_monthly_aggregate but filter by meter
+        # For price, calculate proportional allocation based on consumption share
         if aggregate_type == "price":
-            # For now, we can't easily filter price data by meter from the API
-            # So we'll use the utility-level aggregate and estimate per-meter share
-            # This is a limitation - we'd need per-meter price data from the API
             _LOGGER.debug(
-                "Per-meter price not directly available, using utility aggregate for meter %d",
+                "Calculating per-meter price for meter %d using proportional allocation based on consumption share",
                 measuring_point_id,
             )
-            # Fall back to utility aggregate for price
-            return await self.get_monthly_aggregate(
+            
+            # Get utility-level price aggregate
+            utility_price_data = await self.get_monthly_aggregate(
                 utility_code=utility_code,
                 year=year,
                 month=month,
-                aggregate_type=aggregate_type,
+                aggregate_type="price",
                 cost_type=cost_type,
             )
+            
+            if not utility_price_data or utility_price_data.get("value") is None:
+                _LOGGER.debug(
+                    "No utility-level price data available for %s %d-%02d, cannot calculate per-meter cost",
+                    utility_code, year, month
+                )
+                return None
+            
+            utility_total_cost = utility_price_data.get("value", 0.0)
+            currency = utility_price_data.get("unit", "")
+            
+            # Get this meter's consumption for the month
+            meter_consumption_data = await self.get_monthly_aggregate_for_meter(
+                utility_code=utility_code,
+                measuring_point_id=measuring_point_id,
+                external_key=external_key,
+                year=year,
+                month=month,
+                aggregate_type="con",
+                cost_type="actual",
+            )
+            
+            if not meter_consumption_data or meter_consumption_data.get("value") is None:
+                _LOGGER.debug(
+                    "No consumption data available for meter %d, cannot calculate proportional cost",
+                    measuring_point_id
+                )
+                return None
+            
+            meter_consumption = meter_consumption_data.get("value", 0.0)
+            
+            # Get total utility-level consumption for the month
+            utility_consumption_data = await self.get_monthly_aggregate(
+                utility_code=utility_code,
+                year=year,
+                month=month,
+                aggregate_type="con",
+                cost_type="actual",
+            )
+            
+            if not utility_consumption_data or utility_consumption_data.get("value") is None:
+                _LOGGER.debug(
+                    "No utility-level consumption data available for %s %d-%02d, cannot calculate proportional cost",
+                    utility_code, year, month
+                )
+                return None
+            
+            utility_total_consumption = utility_consumption_data.get("value", 0.0)
+            
+            # Calculate proportional cost: (meter_consumption / total_consumption) * total_cost
+            if utility_total_consumption > 0:
+                consumption_share = meter_consumption / utility_total_consumption
+                meter_cost = utility_total_cost * consumption_share
+                
+                _LOGGER.debug(
+                    "Proportional cost allocation for meter %d: %.2f / %.2f = %.2f%% share, cost = %.2f * %.2f%% = %.2f",
+                    measuring_point_id,
+                    meter_consumption,
+                    utility_total_consumption,
+                    consumption_share * 100,
+                    utility_total_cost,
+                    consumption_share * 100,
+                    meter_cost,
+                )
+                
+                return {
+                    "value": meter_cost,
+                    "unit": currency,
+                    "year": year,
+                    "month": month,
+                    "utility_code": utility_code,
+                    "aggregate_type": "price",
+                    "cost_type": cost_type,
+                }
+            else:
+                _LOGGER.debug(
+                    "Total utility consumption is 0, cannot calculate proportional cost for meter %d",
+                    measuring_point_id
+                )
+                return None
 
         # For consumption, we can filter by measuring point
         try:
