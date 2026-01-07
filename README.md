@@ -207,6 +207,7 @@ The integration includes a comprehensive test suite using pytest:
    pytest tests/test_api.py           # Test API client
    pytest tests/test_coordinator.py   # Test coordinators
    pytest tests/test_sensor.py        # Test sensors
+   pytest tests/test_translations.py  # Test translation functionality
    ```
 
 See `tests/README.md` for more details on running tests.

@@ -61,6 +61,11 @@ pytest tests/test_config_flow.py::test_form
 - `test_sensor.py` - Tests for sensor entities
 - `test_init.py` - Tests for integration initialization
 - `test_translations.py` - Tests for translation functionality
+  - Translation loading from `strings.json` and language-specific files
+  - Multi-language support (English, Norwegian Bokmål, Norwegian Nynorsk, Swedish)
+  - Fallback mechanisms (missing keys, missing files, missing language)
+  - Translation key formatting with placeholders
+  - Translation file structure validation (using `common` key)
 
 ## Test Coverage Goals
 
