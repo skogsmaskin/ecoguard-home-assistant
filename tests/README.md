@@ -35,6 +35,9 @@ pytest tests/test_sensor.py
 
 # Test integration setup
 pytest tests/test_init.py
+
+# Test translations
+pytest tests/test_translations.py
 ```
 
 ### Run with Coverage
@@ -57,6 +60,7 @@ pytest tests/test_config_flow.py::test_form
 - `test_coordinator.py` - Tests for data coordinators
 - `test_sensor.py` - Tests for sensor entities
 - `test_init.py` - Tests for integration initialization
+- `test_translations.py` - Tests for translation functionality
 
 ## Test Coverage Goals
 
