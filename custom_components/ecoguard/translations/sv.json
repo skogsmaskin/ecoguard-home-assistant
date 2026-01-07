@@ -27,7 +27,7 @@
       "already_configured": "Denna EcoGuard-domän är redan konfigurerad."
     }
   },
-  "sensor": {
+  "ecoguard": {
     "utility": {
       "hw": "Varmvatten",
       "cw": "Kallvatten"
