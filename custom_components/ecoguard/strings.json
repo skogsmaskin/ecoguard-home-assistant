@@ -11,9 +11,9 @@
           "nord_pool_area": "Nord Pool Area (optional)"
         },
         "data_description": {
-          "username": "Your EcoGuard username or object number used to log in to the EcoGuard portal.",
-          "password": "Your EcoGuard account password.",
-          "domain": "Your EcoGuard domain code (e.g., 'SkrentenBrl'). This is typically found in your EcoGuard portal URL or provided by your energy provider.",
+          "username": "Your username or object number used to log in to EcoGuard Curves.",
+          "password": "Your EcoGuard Curves account password.",
+          "domain": "Your EcoGuard Curves domain code (e.g., 'SkrentenBrl'). This is typically found in your EcoGuard Curves URL or provided by your energy provider.",
           "nord_pool_area": "Your Nord Pool pricing area code (e.g., 'NO1' for Oslo, 'SE3' for Stockholm). This is used for electricity price data. [Find your area on the Nord Pool map]({nord_pool_link})."
         }
       }

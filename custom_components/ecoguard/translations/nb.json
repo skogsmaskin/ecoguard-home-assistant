@@ -12,7 +12,7 @@
         },
         "data_description": {
           "username": "Ditt brukernavn eller objektnummer som brukes til å logge inn på EcoGuard Curves.",
-          "password": "Ditt kontopassord.",
+          "password": "Ditt EcoGuard Curves kontopassord.",
           "domain": "Din EcoGuard-domenekode (f.eks. 'SkrentenBrl'). Dette finnes vanligvis i EcoGuard Curves URL eller er oppgitt av din energileverandør.",
           "nord_pool_area": "Din Nord Pool-prisområdekode (f.eks. 'NO1' for Oslo, 'SE3' for Stockholm). Dette brukes for strømprisdata. [Finn ditt område på Nord Pool-kartet]({nord_pool_link})."
         }
