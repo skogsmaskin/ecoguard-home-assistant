@@ -497,24 +497,26 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return None
 
-    async def get_latest_cost_value(
-        self, utility_code: str, days: int = 30, measuring_point_id: int | None = None, external_key: str | None = None, cost_type: str = "actual"
+    async def _get_latest_price_data(
+        self,
+        utility_code: str,
+        days: int = 30,
+        measuring_point_id: int | None = None,
+        external_key: str | None = None,
     ) -> dict[str, Any] | None:
-        """Get the latest cost value for a utility code.
+        """Get the latest price data from the API.
 
-        Since the API can be a day behind on daily measurements, looks back further
-        to find the last available day with data. If price data is not available,
-        calculates cost from consumption × rate.
+        Helper method that extracts common logic for fetching price data.
+        Returns price data if found, None otherwise.
 
         Args:
             utility_code: Utility code (e.g., "HW", "CW")
             days: Number of days to look back (default: 30 to account for API delays)
             measuring_point_id: Optional measuring point ID to filter by specific meter
             external_key: Optional external key to filter by specific meter
-            cost_type: "actual" for metered API data, "estimated" for estimated costs
 
         Returns a dict with 'value', 'time', 'unit', and 'utility_code',
-        or None if no data is available.
+        or None if no price data is available.
         """
         try:
             # Get timezone from settings
@@ -544,13 +546,12 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             from_time = int(from_start.timestamp())
 
             _LOGGER.debug(
-                "Fetching cost data for %s: from=%s (%s) to=%s (%s), cost_type=%s",
+                "Fetching price data for %s: from=%s (%s) to=%s (%s)",
                 utility_code,
                 from_time,
                 from_start.isoformat(),
                 to_time,
                 tomorrow_start.isoformat(),
-                cost_type,
             )
 
             # Query data endpoint for price
@@ -616,35 +617,117 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # If we found price data, return it
             if found_price_value:
                 _LOGGER.debug(
-                    "Found price data for %s: value=%.2f, time=%s, cost_type=%s",
+                    "Found price data for %s: value=%.2f, time=%s",
                     utility_code,
                     total_value,
                     latest_time,
-                    cost_type,
                 )
                 return {
                     "value": total_value,
                     "time": latest_time,
                     "unit": unit,
                     "utility_code": utility_code,
-                    "cost_type": cost_type,
                 }
 
-            # If no price data found, only calculate from consumption × rate for "estimated" cost type
-            # For "actual" (metered) cost type, we should only return actual metered data
-            if cost_type == "actual":
-                _LOGGER.debug(
-                    "No price data found for %s (metered), returning None",
-                    utility_code,
-                )
-                return None
+            return None
 
-            # For "estimated" cost type, calculate from consumption × rate
-            # This is common for HW where price data might not be available in daily API
-            _LOGGER.debug(
-                "No price data found for %s (estimated), calculating from consumption × rate",
+        except Exception as err:
+            _LOGGER.warning(
+                "Failed to fetch price data for utility %s: %s",
                 utility_code,
+                err,
             )
+            return None
+
+    async def get_latest_metered_cost(
+        self,
+        utility_code: str,
+        days: int = 30,
+        measuring_point_id: int | None = None,
+        external_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Get the latest metered cost value from the API.
+
+        Returns only actual metered price data from the API. If no price data is available,
+        returns None (does not calculate from consumption).
+
+        Args:
+            utility_code: Utility code (e.g., "HW", "CW")
+            days: Number of days to look back (default: 30 to account for API delays)
+            measuring_point_id: Optional measuring point ID to filter by specific meter
+            external_key: Optional external key to filter by specific meter
+
+        Returns a dict with 'value', 'time', 'unit', 'utility_code', and 'cost_type',
+        or None if no metered price data is available.
+        """
+        price_data = await self._get_latest_price_data(
+            utility_code=utility_code,
+            days=days,
+            measuring_point_id=measuring_point_id,
+            external_key=external_key,
+        )
+
+        if price_data:
+            price_data["cost_type"] = "actual"
+            return price_data
+
+        _LOGGER.debug(
+            "No metered price data found for %s, returning None",
+            utility_code,
+        )
+        return None
+
+    async def get_latest_estimated_cost(
+        self,
+        utility_code: str,
+        days: int = 30,
+        measuring_point_id: int | None = None,
+        external_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Get the latest estimated cost value.
+
+        First attempts to get actual price data from the API. If no price data is available,
+        calculates cost from consumption × rate. This is useful for utilities like HW where
+        price data might not be available in the daily API.
+
+        Args:
+            utility_code: Utility code (e.g., "HW", "CW")
+            days: Number of days to look back (default: 30 to account for API delays)
+            measuring_point_id: Optional measuring point ID to filter by specific meter
+            external_key: Optional external key to filter by specific meter
+
+        Returns a dict with 'value', 'time', 'unit', 'utility_code', and 'cost_type',
+        or None if no data is available.
+        """
+        # First try to get actual price data from API
+        price_data = await self._get_latest_price_data(
+            utility_code=utility_code,
+            days=days,
+            measuring_point_id=measuring_point_id,
+            external_key=external_key,
+        )
+
+        if price_data:
+            price_data["cost_type"] = "estimated"
+            return price_data
+
+        # If no price data found, calculate from consumption × rate
+        _LOGGER.debug(
+            "No price data found for %s (estimated), calculating from consumption × rate",
+            utility_code,
+        )
+
+        try:
+            # Get timezone from settings for rate calculation
+            timezone_str = self.get_setting("TimeZoneIANA")
+            if not timezone_str:
+                timezone_str = "UTC"
+
+            try:
+                tz = zoneinfo.ZoneInfo(timezone_str)
+            except Exception:
+                _LOGGER.warning("Invalid timezone %s, using UTC", timezone_str)
+                tz = zoneinfo.ZoneInfo("UTC")
 
             # Get latest consumption value (this already handles API delays by looking back)
             consumption_data = await self.get_latest_consumption_value(
@@ -702,7 +785,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         except Exception as err:
             _LOGGER.warning(
-                "Failed to fetch latest cost for utility %s: %s",
+                "Failed to calculate estimated cost for utility %s: %s",
                 utility_code,
                 err,
             )

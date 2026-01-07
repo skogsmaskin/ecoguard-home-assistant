@@ -2450,12 +2450,18 @@ class EcoGuardDailyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], 
 
     async def _async_fetch_value(self) -> None:
         """Fetch last known daily cost value asynchronously."""
-        cost_data = await self.coordinator.get_latest_cost_value(
-            utility_code=self._utility_code,
-            measuring_point_id=self._measuring_point_id,
-            external_key=self._installation.get("ExternalKey"),
-            cost_type=self._cost_type,
-        )
+        if self._cost_type == "estimated":
+            cost_data = await self.coordinator.get_latest_estimated_cost(
+                utility_code=self._utility_code,
+                measuring_point_id=self._measuring_point_id,
+                external_key=self._installation.get("ExternalKey"),
+            )
+        else:
+            cost_data = await self.coordinator.get_latest_metered_cost(
+                utility_code=self._utility_code,
+                measuring_point_id=self._measuring_point_id,
+                external_key=self._installation.get("ExternalKey"),
+            )
 
         if cost_data:
             raw_value = cost_data.get("value")
@@ -2631,12 +2637,18 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
                     break
 
             # Fetch cost for this meter
-            cost_data = await self.coordinator.get_latest_cost_value(
-                utility_code=self._utility_code,
-                measuring_point_id=measuring_point_id,
-                external_key=installation.get("ExternalKey"),
-                cost_type=self._cost_type,
-            )
+            if self._cost_type == "estimated":
+                cost_data = await self.coordinator.get_latest_estimated_cost(
+                    utility_code=self._utility_code,
+                    measuring_point_id=measuring_point_id,
+                    external_key=installation.get("ExternalKey"),
+                )
+            else:
+                cost_data = await self.coordinator.get_latest_metered_cost(
+                    utility_code=self._utility_code,
+                    measuring_point_id=measuring_point_id,
+                    external_key=installation.get("ExternalKey"),
+                )
 
             if cost_data and cost_data.get("value") is not None:
                 value = cost_data.get("value", 0.0)
@@ -2829,12 +2841,18 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
                     continue
 
                 # Fetch cost for this meter
-                cost_data = await self.coordinator.get_latest_cost_value(
-                    utility_code=utility_code,
-                    measuring_point_id=measuring_point_id,
-                    external_key=installation.get("ExternalKey"),
-                    cost_type=self._cost_type,
-                )
+                if self._cost_type == "estimated":
+                    cost_data = await self.coordinator.get_latest_estimated_cost(
+                        utility_code=utility_code,
+                        measuring_point_id=measuring_point_id,
+                        external_key=installation.get("ExternalKey"),
+                    )
+                else:
+                    cost_data = await self.coordinator.get_latest_metered_cost(
+                        utility_code=utility_code,
+                        measuring_point_id=measuring_point_id,
+                        external_key=installation.get("ExternalKey"),
+                    )
 
                 if cost_data and cost_data.get("value") is not None:
                     value = cost_data.get("value", 0.0)
