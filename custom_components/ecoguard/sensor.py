@@ -29,6 +29,47 @@ _LOGGER = logging.getLogger(__name__)
 _translation_cache: dict[str, dict[str, Any]] = {}
 
 
+def _get_entity_id_by_unique_id(
+    entity_registry: Any,
+    unique_id: str,
+    platform: str = "sensor",
+    domain: str = DOMAIN,
+) -> str | None:
+    """Get entity_id from entity registry by unique_id.
+
+    This helper function ensures the correct parameter order for async_get_entity_id:
+    async_get_entity_id(platform, domain, unique_id)
+
+    Args:
+        entity_registry: The entity registry instance
+        unique_id: The unique_id of the entity
+        platform: The platform name (default: "sensor")
+        domain: The integration domain (default: DOMAIN)
+
+    Returns:
+        The entity_id if found, None otherwise
+    """
+    try:
+        entity_id = entity_registry.async_get_entity_id(platform, domain, unique_id)
+        if not entity_id:
+            _LOGGER.debug(
+                "Entity not found in registry: platform=%s, domain=%s, unique_id=%s",
+                platform,
+                domain,
+                unique_id,
+            )
+        return entity_id
+    except Exception as e:
+        _LOGGER.warning(
+            "Failed to get entity_id from registry: platform=%s, domain=%s, unique_id=%s, error=%s",
+            platform,
+            domain,
+            unique_id,
+            e,
+        )
+        return None
+
+
 def _clear_translation_cache() -> None:
     """Clear the translation cache (useful for development/reloads)."""
     global _translation_cache
@@ -122,7 +163,7 @@ async def _async_get_translation(hass: HomeAssistant, key: str, **kwargs: Any) -
                     _LOGGER.debug("Found translation for key %s (as %s): %s (lang=%s)", key, translation_key, text, lang)
                     return text.format(**kwargs) if kwargs else text
             else:
-                _LOGGER.debug("Translation key %s (as %s) not found in common section (lang=%s). Available keys: %s", 
+                _LOGGER.debug("Translation key %s (as %s) not found in common section (lang=%s). Available keys: %s",
                              key, translation_key, lang, list(common_data.keys())[:10])
 
         # Fallback to English
@@ -272,7 +313,7 @@ async def async_setup_entry(
     """Set up EcoGuard sensors from a config entry."""
     # Clear translation cache to ensure fresh translations are loaded
     _clear_translation_cache()
-    
+
     coordinator: EcoGuardDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id][
         "coordinator"
     ]
@@ -456,7 +497,7 @@ async def async_setup_entry(
     for installation in active_installations:
         measuring_point_id = installation.get("MeasuringPointID")
         registers = installation.get("Registers", [])
-        
+
         # Get measuring point name
         measuring_point_name = None
         for mp in coordinator.get_measuring_points():
@@ -570,19 +611,19 @@ async def async_setup_entry(
     for entry in entity_registry.entities.values():
         if entry.platform == DOMAIN and entry.unique_id:
             existing_unique_ids.add(entry.unique_id)
-    
+
     _LOGGER.info("Creating %d EcoGuard sensors", len(sensors))
     async_add_entities(sensors, update_before_add=False)
-    
+
     # Schedule entity registry updates to run after entities are registered
     # This ensures entity_ids match our desired format and individual meter sensors are disabled
     async def _update_entity_registry_after_setup() -> None:
         """Update entity registry after entities have been added."""
         # Wait a moment for entities to be registered
         await hass.async_block_till_done()
-        
+
         entity_registry = async_get_entity_registry(hass)
-        
+
         # Define which sensor classes are individual meter sensors (should be disabled by default)
         individual_meter_sensor_classes = (
             EcoGuardDailyConsumptionSensor,
@@ -590,7 +631,7 @@ async def async_setup_entry(
             EcoGuardMonthlyMeterSensor,
             EcoGuardLatestReceptionSensor,
         )
-        
+
         for sensor in sensors:
             if hasattr(sensor, '_attr_unique_id') and sensor._attr_unique_id:
                 unique_id = sensor._attr_unique_id
@@ -598,11 +639,11 @@ async def async_setup_entry(
                 if unique_id.startswith(f"{DOMAIN}_"):
                     object_id = unique_id[len(f"{DOMAIN}_"):]
                     desired_entity_id = f"sensor.{object_id}"
-                    
+
                     # Find the entity registry entry by unique_id
                     entity_entry = None
                     # Try to get entity_id first, then get the entry
-                    entity_id = entity_registry.async_get_entity_id(DOMAIN, "sensor", unique_id)
+                    entity_id = _get_entity_id_by_unique_id(entity_registry, unique_id)
                     if entity_id:
                         entity_entry = entity_registry.async_get(entity_id)
                     else:
@@ -611,11 +652,11 @@ async def async_setup_entry(
                             if entry.unique_id == unique_id and entry.platform == DOMAIN:
                                 entity_entry = entry
                                 break
-                    
+
                     if entity_entry:
                         # Update the entity_id if it doesn't match
                         if entity_entry.entity_id != desired_entity_id:
-                            _LOGGER.info("Updating entity_id from %s to %s (unique_id=%s)", 
+                            _LOGGER.info("Updating entity_id from %s to %s (unique_id=%s)",
                                        entity_entry.entity_id, desired_entity_id, unique_id)
                             try:
                                 entity_registry.async_update_entity(
@@ -627,15 +668,15 @@ async def async_setup_entry(
                             except ValueError as e:
                                 # Entity ID might already exist, log and continue
                                 _LOGGER.warning("Could not update entity_id to %s: %s", desired_entity_id, e)
-                        
+
                         # Update entity registry name for individual meter sensors to ensure translations are applied
                         # This is needed because the entity might not be registered when async_added_to_hass runs
                         # Build the translated name directly here to ensure it's correct
-                        if isinstance(sensor, (EcoGuardDailyConsumptionSensor, EcoGuardDailyCostSensor, 
+                        if isinstance(sensor, (EcoGuardDailyConsumptionSensor, EcoGuardDailyCostSensor,
                                              EcoGuardLatestReceptionSensor, EcoGuardMonthlyMeterSensor)):
                             try:
                                 translated_name = None
-                                
+
                                 if isinstance(sensor, EcoGuardDailyConsumptionSensor):
                                     # Get translated components
                                     measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
@@ -649,7 +690,7 @@ async def async_setup_entry(
                                     consumption_daily = await _async_get_translation(hass, "name.consumption_daily")
                                     meter = await _async_get_translation(hass, "name.meter")
                                     translated_name = f'{consumption_daily} - {meter} "{measuring_point_display}" ({utility_name})'
-                                
+
                                 elif isinstance(sensor, EcoGuardDailyCostSensor):
                                     measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
                                         hass, "name.measuring_point", id=sensor._measuring_point_id
@@ -667,7 +708,7 @@ async def async_setup_entry(
                                     else:
                                         metered = await _async_get_translation(hass, "name.metered")
                                         translated_name = f'{cost_daily} {metered} - {meter} "{measuring_point_display}" ({utility_name})'
-                                
+
                                 elif isinstance(sensor, EcoGuardLatestReceptionSensor):
                                     measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
                                         hass, "name.measuring_point", id=sensor._measuring_point_id
@@ -683,7 +724,7 @@ async def async_setup_entry(
                                         translated_name = f'{reception_last_update} - {meter} "{measuring_point_display}" ({utility_name})'
                                     else:
                                         translated_name = f'{reception_last_update} - {meter} "{measuring_point_display}"'
-                                
+
                                 elif isinstance(sensor, EcoGuardMonthlyMeterSensor):
                                     measuring_point_display = sensor._measuring_point_name or await _async_get_translation(
                                         hass, "name.measuring_point", id=sensor._measuring_point_id
@@ -705,24 +746,24 @@ async def async_setup_entry(
                                         aggregate_name = f"{aggregate_name} {metered}"
                                     meter = await _async_get_translation(hass, "name.meter")
                                     translated_name = f'{aggregate_name} - {meter} "{measuring_point_display}" ({utility_name})'
-                                
+
                                 if translated_name and entity_entry.name != translated_name:
-                                    _LOGGER.debug("Updating entity registry name for %s from '%s' to '%s'", 
+                                    _LOGGER.debug("Updating entity registry name for %s from '%s' to '%s'",
                                                 entity_entry.entity_id, entity_entry.name, translated_name)
                                     entity_registry.async_update_entity(
                                         entity_entry.entity_id,
                                         name=translated_name,
                                     )
                             except Exception as e:
-                                _LOGGER.debug("Could not update entity registry name for %s: %s", 
+                                _LOGGER.debug("Could not update entity registry name for %s: %s",
                                             entity_entry.entity_id, e)
-                        
+
                         # Only disable individual meter sensors if they're newly created (not in existing_unique_ids)
                         # This preserves the state of entities that existed before
                         if isinstance(sensor, individual_meter_sensor_classes):
                             is_new_entity = unique_id not in existing_unique_ids
                             if is_new_entity and entity_entry.disabled_by is None:
-                                _LOGGER.info("Disabling newly created individual meter sensor: %s (unique_id=%s)", 
+                                _LOGGER.info("Disabling newly created individual meter sensor: %s (unique_id=%s)",
                                            entity_entry.entity_id, unique_id)
                                 try:
                                     entity_registry.async_update_entity(
@@ -732,11 +773,11 @@ async def async_setup_entry(
                                 except Exception as e:
                                     _LOGGER.warning("Could not disable entity %s: %s", entity_entry.entity_id, e)
                             elif not is_new_entity:
-                                _LOGGER.debug("Preserving existing entity state for %s (unique_id=%s, disabled_by=%s)", 
+                                _LOGGER.debug("Preserving existing entity state for %s (unique_id=%s, disabled_by=%s)",
                                             entity_entry.entity_id, unique_id, entity_entry.disabled_by)
                     else:
                         _LOGGER.debug("Entity registry entry not yet found for unique_id=%s (may be created later)", unique_id)
-    
+
     # Schedule the update to run after setup completes
     hass.async_create_task(_update_entity_registry_after_setup())
 
@@ -894,14 +935,14 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
                 self._attr_name = new_name
                 self.async_write_ha_state()
                 _LOGGER.info("Updated sensor name from '%s' to '%s' (lang=%s)", old_name, new_name, lang)
-            
+
             # Always update the entity registry name so it shows correctly in modals
             # Use unique_id to find the entity since entity_id might not be available yet
             if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
                 try:
                     entity_registry = async_get_entity_registry(self.hass)
                     # Try to get entity_id by unique_id
-                    entity_id = entity_registry.async_get_entity_id(DOMAIN, "sensor", self._attr_unique_id)
+                    entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
                     if entity_id:
                         entity_entry = entity_registry.async_get(entity_id)
                         if entity_entry and entity_entry.name != new_name:
@@ -1077,14 +1118,14 @@ class EcoGuardLatestReceptionSensor(CoordinatorEntity, SensorEntity):
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
-                
+
                 # Also update the entity registry name so it shows correctly in modals
                 # Use unique_id to find the entity since entity_id might not be available yet
                 if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
                     try:
                         entity_registry = async_get_entity_registry(self.hass)
                         # Try to get entity_id by unique_id
-                        entity_id = entity_registry.async_get_entity_id(DOMAIN, "sensor", self._attr_unique_id)
+                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
                         if entity_id:
                             entity_entry = entity_registry.async_get(entity_id)
                             if entity_entry and entity_entry.name != new_name:
@@ -1280,14 +1321,14 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
-                
+
                 # Also update the entity registry name so it shows correctly in modals
                 # Use unique_id to find the entity since entity_id might not be available yet
                 if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
                     try:
                         entity_registry = async_get_entity_registry(self.hass)
                         # Try to get entity_id by unique_id
-                        entity_id = entity_registry.async_get_entity_id(DOMAIN, "sensor", self._attr_unique_id)
+                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
                         if entity_id:
                             entity_entry = entity_registry.async_get(entity_id)
                             if entity_entry and entity_entry.name != new_name:
@@ -1426,14 +1467,14 @@ class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator],
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
-                
+
                 # Also update the entity registry name so it shows correctly in modals
                 # Use unique_id to find the entity since entity_id might not be available yet
                 if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
                     try:
                         entity_registry = async_get_entity_registry(self.hass)
                         # Try to get entity_id by unique_id
-                        entity_id = entity_registry.async_get_entity_id(DOMAIN, "sensor", self._attr_unique_id)
+                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
                         if entity_id:
                             entity_entry = entity_registry.async_get(entity_id)
                             if entity_entry and entity_entry.name != new_name:
@@ -1597,14 +1638,14 @@ class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
-                
+
                 # Also update the entity registry name so it shows correctly in modals
                 # Use unique_id to find the entity since entity_id might not be available yet
                 if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
                     try:
                         entity_registry = async_get_entity_registry(self.hass)
                         # Try to get entity_id by unique_id
-                        entity_id = entity_registry.async_get_entity_id(DOMAIN, "sensor", self._attr_unique_id)
+                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
                         if entity_id:
                             entity_entry = entity_registry.async_get(entity_id)
                             if entity_entry and entity_entry.name != new_name:
@@ -1821,14 +1862,14 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
-                
+
                 # Also update the entity registry name so it shows correctly in modals
                 # Use unique_id to find the entity since entity_id might not be available yet
                 if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
                     try:
                         entity_registry = async_get_entity_registry(self.hass)
                         # Try to get entity_id by unique_id
-                        entity_id = entity_registry.async_get_entity_id(DOMAIN, "sensor", self._attr_unique_id)
+                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
                         if entity_id:
                             entity_entry = entity_registry.async_get(entity_id)
                             if entity_entry and entity_entry.name != new_name:
@@ -2003,14 +2044,14 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
-                
+
                 # Also update the entity registry name so it shows correctly in modals
                 # Use unique_id to find the entity since entity_id might not be available yet
                 if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
                     try:
                         entity_registry = async_get_entity_registry(self.hass)
                         # Try to get entity_id by unique_id
-                        entity_id = entity_registry.async_get_entity_id(DOMAIN, "sensor", self._attr_unique_id)
+                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
                         if entity_id:
                             entity_entry = entity_registry.async_get(entity_id)
                             if entity_entry and entity_entry.name != new_name:
@@ -2037,7 +2078,7 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
         for installation in active_installations:
             registers = installation.get("Registers", [])
             measuring_point_id = installation.get("MeasuringPointID")
-            
+
             # Check if this installation has the utility we're looking for
             has_utility = False
             for register in registers:
@@ -2065,17 +2106,17 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
             if consumption_data and consumption_data.get("value") is not None:
                 value = consumption_data.get("value", 0.0)
                 total_value += value
-                
+
                 # Use unit from first meter with data
                 if unit is None:
                     unit = consumption_data.get("unit")
-                
+
                 # Track latest timestamp
                 time_stamp = consumption_data.get("time")
                 if time_stamp:
                     if latest_timestamp is None or time_stamp > latest_timestamp:
                         latest_timestamp = time_stamp
-                
+
                 meters_with_data.append({
                     "measuring_point_id": measuring_point_id,
                     "measuring_point_name": measuring_point_name,
@@ -2196,14 +2237,14 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
-                
+
                 # Also update the entity registry name so it shows correctly in modals
                 # Use unique_id to find the entity since entity_id might not be available yet
                 if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
                     try:
                         entity_registry = async_get_entity_registry(self.hass)
                         # Try to get entity_id by unique_id
-                        entity_id = entity_registry.async_get_entity_id(DOMAIN, "sensor", self._attr_unique_id)
+                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
                         if entity_id:
                             entity_entry = entity_registry.async_get(entity_id)
                             if entity_entry and entity_entry.name != new_name:
@@ -2232,7 +2273,7 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         for installation in active_installations:
             registers = installation.get("Registers", [])
             measuring_point_id = installation.get("MeasuringPointID")
-            
+
             # Get measuring point name
             measuring_point_name = None
             for mp in self.coordinator.get_measuring_points():
@@ -2255,17 +2296,17 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
 
                 if consumption_data and consumption_data.get("value") is not None:
                     value = consumption_data.get("value", 0.0)
-                    
+
                     # Use unit from first meter with data
                     if unit is None:
                         unit = consumption_data.get("unit")
-                    
+
                     # Track latest timestamp
                     time_stamp = consumption_data.get("time")
                     if time_stamp:
                         if latest_timestamp is None or time_stamp > latest_timestamp:
                             latest_timestamp = time_stamp
-                    
+
                     meter_info = {
                         "measuring_point_id": measuring_point_id,
                         "measuring_point_name": measuring_point_name,
@@ -2432,14 +2473,14 @@ class EcoGuardDailyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], 
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
-                
+
                 # Also update the entity registry name so it shows correctly in modals
                 # Use unique_id to find the entity since entity_id might not be available yet
                 if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
                     try:
                         entity_registry = async_get_entity_registry(self.hass)
                         # Try to get entity_id by unique_id
-                        entity_id = entity_registry.async_get_entity_id(DOMAIN, "sensor", self._attr_unique_id)
+                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
                         if entity_id:
                             entity_entry = entity_registry.async_get(entity_id)
                             if entity_entry and entity_entry.name != new_name:
@@ -2598,14 +2639,14 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
-                
+
                 # Also update the entity registry name so it shows correctly in modals
                 # Use unique_id to find the entity since entity_id might not be available yet
                 if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
                     try:
                         entity_registry = async_get_entity_registry(self.hass)
                         # Try to get entity_id by unique_id
-                        entity_id = entity_registry.async_get_entity_id(DOMAIN, "sensor", self._attr_unique_id)
+                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
                         if entity_id:
                             entity_entry = entity_registry.async_get(entity_id)
                             if entity_entry and entity_entry.name != new_name:
@@ -2631,7 +2672,7 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         for installation in active_installations:
             registers = installation.get("Registers", [])
             measuring_point_id = installation.get("MeasuringPointID")
-            
+
             # Check if this installation has the utility we're looking for
             has_utility = False
             for register in registers:
@@ -2660,13 +2701,13 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             if cost_data and cost_data.get("value") is not None:
                 value = cost_data.get("value", 0.0)
                 total_value += value
-                
+
                 # Track latest timestamp
                 time_stamp = cost_data.get("time")
                 if time_stamp:
                     if latest_timestamp is None or time_stamp > latest_timestamp:
                         latest_timestamp = time_stamp
-                
+
                 meters_with_data.append({
                     "measuring_point_id": measuring_point_id,
                     "measuring_point_name": measuring_point_name,
@@ -2715,7 +2756,7 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
         water_name = _get_translation_default("name.combined_water")
         if water_name == "name.combined_water":  # Fallback if not found
             water_name = "Combined Water"
-        
+
         if cost_type == "estimated":
             estimated = _get_translation_default("name.estimated")
             self._attr_name = f"{cost_daily} {estimated} - {water_name}"
@@ -2799,7 +2840,7 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
             water_name = await _async_get_translation(self._hass, "name.combined_water")
             if water_name == "name.combined_water":
                 water_name = "Combined Water"
-            
+
             if self._cost_type == "estimated":
                 estimated = await _async_get_translation(self._hass, "name.estimated")
                 new_name = f"{cost_daily} {estimated} - {water_name}"
@@ -2810,14 +2851,14 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
-                
+
                 # Also update the entity registry name so it shows correctly in modals
                 # Use unique_id to find the entity since entity_id might not be available yet
                 if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
                     try:
                         entity_registry = async_get_entity_registry(self.hass)
                         # Try to get entity_id by unique_id
-                        entity_id = entity_registry.async_get_entity_id(DOMAIN, "sensor", self._attr_unique_id)
+                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
                         if entity_id:
                             entity_entry = entity_registry.async_get(entity_id)
                             if entity_entry and entity_entry.name != new_name:
@@ -2845,7 +2886,7 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
         for installation in active_installations:
             registers = installation.get("Registers", [])
             measuring_point_id = installation.get("MeasuringPointID")
-            
+
             # Get measuring point name
             measuring_point_name = None
             for mp in self.coordinator.get_measuring_points():
@@ -2869,13 +2910,13 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
 
                 if cost_data and cost_data.get("value") is not None:
                     value = cost_data.get("value", 0.0)
-                    
+
                     # Track latest timestamp
                     time_stamp = cost_data.get("time")
                     if time_stamp:
                         if latest_timestamp is None or time_stamp > latest_timestamp:
                             latest_timestamp = time_stamp
-                    
+
                     meter_info = {
                         "measuring_point_id": measuring_point_id,
                         "measuring_point_name": measuring_point_name,
@@ -3074,14 +3115,14 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
-                
+
                 # Also update the entity registry name so it shows correctly in modals
                 # Use unique_id to find the entity since entity_id might not be available yet
                 if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
                     try:
                         entity_registry = async_get_entity_registry(self.hass)
                         # Try to get entity_id by unique_id
-                        entity_id = entity_registry.async_get_entity_id(DOMAIN, "sensor", self._attr_unique_id)
+                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
                         if entity_id:
                             entity_entry = entity_registry.async_get(entity_id)
                             if entity_entry and entity_entry.name != new_name:
@@ -3257,14 +3298,14 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
-                
+
                 # Also update the entity registry name so it shows correctly in modals
                 # Use unique_id to find the entity since entity_id might not be available yet
                 if hasattr(self, '_attr_unique_id') and self._attr_unique_id:
                     try:
                         entity_registry = async_get_entity_registry(self.hass)
                         # Try to get entity_id by unique_id
-                        entity_id = entity_registry.async_get_entity_id(DOMAIN, "sensor", self._attr_unique_id)
+                        entity_id = _get_entity_id_by_unique_id(entity_registry, self._attr_unique_id)
                         if entity_id:
                             entity_entry = entity_registry.async_get(entity_id)
                             if entity_entry and entity_entry.name != new_name:
