@@ -34,7 +34,7 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
     from .storage import save_cached_data
 
     _LOGGER.debug("Starting validation for domain: %s", data["domain"])
-    
+
     api = EcoGuardAPI(
         username=data["username"],
         password=data["password"],
@@ -69,7 +69,7 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
         primary_node = nodes[0]
         node_id = primary_node.get("ID")
         _LOGGER.debug("Found primary node with ID: %s", node_id)
-        
+
         if not node_id:
             await api.async_close()
             raise CannotConnect("Primary node has no ID")
@@ -80,7 +80,7 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
         measuring_points = []
         node_data = None
         settings = []
-        
+
         try:
             # Get node data (includes measuring points)
             try:
@@ -203,7 +203,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "node_id": info["node_id"],
                 },
             )
-            
+
             # Trigger data fetching after entry is created and setup completes
             # This happens in the background and doesn't block the config flow
             domain = user_input["domain"]  # Use domain as unique_id to find the entry
@@ -220,7 +220,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         if e.unique_id == domain:
                             entry = e
                             break
-                    
+
                     if entry:
                         from . import trigger_data_fetch_for_entry
                         await trigger_data_fetch_for_entry(self.hass, entry.entry_id)
@@ -228,10 +228,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         _LOGGER.warning("Could not find entry for domain %s after creation", domain)
                 except Exception as err:
                     _LOGGER.warning("Failed to trigger data fetch after config flow: %s", err, exc_info=True)
-            
+
             # Schedule data fetch as a background task
             self.hass.async_create_task(_trigger_data_fetch_after_setup())
-            
+
             return result
 
         return self.async_show_form(

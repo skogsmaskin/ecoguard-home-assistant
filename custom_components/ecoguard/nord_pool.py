@@ -21,17 +21,17 @@ _LOGGER = logging.getLogger(__name__)
 
 class NordPoolPriceFetcher:
     """Fetches spot prices from Nord Pool API."""
-    
+
     def __init__(self, price_cache: dict[str, float] | None = None) -> None:
         """Initialize the price fetcher.
-        
+
         Args:
             price_cache: Optional shared cache dict for prices
         """
         self._price_cache: dict[str, float] = price_cache if price_cache is not None else {}
         self._pending_requests: dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
-    
+
     async def get_spot_price(
         self,
         area_code: str,
@@ -298,7 +298,7 @@ class NordPoolPriceFetcher:
             spot_price = await task
             if spot_price is not None:
                 return spot_price
-            
+
             # If fetch failed, try fallback
             _LOGGER.debug("Nord Pool API returned no data for area %s", area_code)
             if fallback_price is not None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Callable, Awaitable
 import asyncio
 import logging
 import zoneinfo
@@ -16,31 +16,35 @@ _LOGGER = logging.getLogger(__name__)
 
 class HWPriceCalculator:
     """Calculates hot water prices using spot prices and calibration."""
-    
+
     # Default energy factor: kWh needed to heat 1 m3 of water
     # Typical: 40-50 kWh/m3 (heating from ~10°C to ~60°C, ~50°C rise)
     ENERGY_PER_M3 = 45.0  # kWh per m3
-    
+
     def __init__(
         self,
+        calculate_calibration_ratio: Callable[[int], Awaitable[float | None]],
         nord_pool_fetcher: NordPoolPriceFetcher | None = None,
         get_rate_from_billing: Any | None = None,
         get_setting: Any | None = None,
     ) -> None:
         """Initialize the HW price calculator.
-        
+
         Args:
             nord_pool_fetcher: Nord Pool price fetcher instance
             get_rate_from_billing: Function to get rate from billing
             get_setting: Function to get setting value
+            calculate_calibration_ratio: Async function to calculate calibration ratio.
+                Should accept months_back (int) and return float | None
         """
         self._nord_pool_fetcher = nord_pool_fetcher
         self._get_rate_from_billing = get_rate_from_billing
         self._get_setting = get_setting
+        self._calculate_calibration_ratio_callback = calculate_calibration_ratio
         self._calibration_ratio: float | None = None
         self._calibration_calculated: bool = False
         self._calibration_lock = asyncio.Lock()
-    
+
     async def calculate_price(
         self,
         consumption: float,
@@ -230,16 +234,40 @@ class HWPriceCalculator:
                 err,
             )
             return None
-    
+
     async def _calculate_calibration_ratio(
         self,
         months_back: int = 6,
     ) -> float | None:
         """Calculate calibration ratio by comparing historical billing data with spot prices.
-        
-        This is a placeholder - the actual implementation would need access to billing data.
-        For now, return None to use default calculation.
+
+        Uses the provided callback function to calculate the calibration ratio.
+        The calibration ratio accounts for system efficiency, fixed costs, and other factors
+        that aren't captured by simple spot price calculations.
+
+        Args:
+            months_back: Number of months to look back for historical data (default: 6)
+
+        Returns:
+            Calibration ratio (typically 1.5-2.5), or None if unavailable
         """
-        # TODO: Implement calibration ratio calculation if needed
-        # This would require access to billing results and historical spot prices
-        return None
+        try:
+            ratio = await self._calculate_calibration_ratio_callback(months_back)
+            if ratio is not None:
+                _LOGGER.debug(
+                    "Calculated calibration ratio: %.3f (from %d months of historical data)",
+                    ratio,
+                    months_back,
+                )
+            else:
+                _LOGGER.debug(
+                    "Calibration ratio calculation returned None (insufficient historical data)"
+                )
+            return ratio
+        except Exception as err:
+            _LOGGER.warning(
+                "Failed to calculate calibration ratio: %s",
+                err,
+                exc_info=True,
+            )
+            return None

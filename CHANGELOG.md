@@ -31,6 +31,9 @@ Major bump because breaking changes. Strictly following semantic versioning.
 ### Changed
 
 #### Sensor Naming Conventions
+
+Sensor names have been restructured to improve grouping and sorting in lists. While some names may now feel less natural, this change makes it easier to locate sensors by their purpose and category.
+
 - **Consumption sensors**: Renamed from "Daily Consumption" to "Consumption Daily" format
   - Individual meters: `Consumption Daily - Meter "Measuring Point" (Utility)`
   - Aggregated: `Consumption Daily - Utility`
@@ -96,18 +99,17 @@ Major bump because breaking changes. Strictly following semantic versioning.
   - Hot water estimated costs calculated using spot prices, calibration ratio, and cold water rates
 - Fixed combined water cost sensors to only show value when both hot and cold water data available
 - Fixed estimated daily cost sensors to use metered cost when available (estimated = metered when metered exists)
+- Fixed monthly combined water sensors to show "Unknown" when hot water data is missing (consistent with daily sensors)
+- Fixed `consumption_monthly_combined_water` sensor to display "m³" unit correctly
+- Fixed per-meter estimated cost sensors to be self-sufficient (fetch aggregate data directly when needed)
+  - Sensors now work independently regardless of which other sensors are enabled/disabled
+  - Proportional allocation calculated automatically when aggregate data becomes available
 
 #### Rate Limit Errors
 - **Eliminated all API rate limit errors** by implementing comprehensive request deduplication
 - Fixed race conditions in task creation that allowed duplicate API calls
 - Added atomic task creation with lock protection to ensure only one request per unique data
 - Fixed `get_end_of_month_estimate` to use daily cache first and add deduplication for API calls
-
-#### Deadlock Fix
-- **Fixed deadlock in `get_cached_billing_results`**: Moved `await` outside lock to prevent blocking
-  when multiple callers await the same pending task. This was preventing
-  `cost_monthly_estimated_final_settlement` from getting values.
-- Fixed issue where concurrent calls to `get_monthly_other_items_cost` would hang indefinitely
 
 ### Technical Improvements
 
@@ -154,14 +156,26 @@ Major bump because breaking changes. Strictly following semantic versioning.
   - `helpers.py`: Common helper functions
     - `get_timezone`: Centralized timezone handling
     - `get_month_timestamps`: Month boundary timestamp calculations
+    - `get_date_range_timestamps`: Date range timestamp calculations
+    - `format_cache_key`: Cache key formatting utility
+    - `log_static_info_summary`: Static info logging utility
+    - `round_to_max_digits`: Rounding utility for sensor values
   - `nord_pool.py`: Nord Pool spot price fetching
     - `NordPoolPriceFetcher`: Encapsulates Nord Pool API interaction with caching
   - `price_calculator.py`: Hot water price calculation logic
     - `HWPriceCalculator`: Encapsulates complex HW price calculation with calibration
   - `request_deduplicator.py`: Request deduplication pattern
     - `RequestDeduplicator`: Reusable class for deduplicating async requests
+  - `meter_aggregate_calculator.py`: Per-meter aggregate calculations
+    - `MeterAggregateCalculator`: Encapsulates per-meter monthly aggregate calculation logic
+  - `data_processor.py`: Batch sensor data processing
+    - `DataProcessor`: Handles batch fetching, processing, and caching of sensor data
 - Updated `sensor.py` to use `billing_manager` directly instead of delegation methods
 - Added call_id tracking to `get_end_of_month_estimate` for debugging concurrent calls
+- **Self-sufficient sensors**: Per-meter estimated cost sensors now fetch aggregate data directly
+  - No dependency on other sensors being enabled or finishing first
+  - Proportional allocation calculated automatically when aggregate data is available
+  - Each sensor operates independently for optimal data loading
 
 #### Entity Registry Management
 - Improved entity registry update logic to handle timing issues

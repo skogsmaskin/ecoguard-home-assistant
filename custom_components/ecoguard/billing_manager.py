@@ -37,7 +37,7 @@ class BillingManager:
         nord_pool_area: str | None = None,
     ) -> None:
         """Initialize the billing manager.
-        
+
         Args:
             api: EcoGuard API instance
             node_id: Node ID
@@ -73,7 +73,7 @@ class BillingManager:
 
         Billing data is historical and doesn't change, so we cache it for 24 hours
         to avoid unnecessary API calls and improve reliability.
-        
+
         This method also deduplicates simultaneous requests for the same cache key
         to prevent multiple API calls when multiple sensors request the same data.
 
@@ -125,7 +125,7 @@ class BillingManager:
                     # Task completed, remove it
                     del self._pending_requests[cache_key]
                     pending_task = None
-        
+
         # Await outside the lock to avoid blocking
         if pending_task is not None:
             try:
@@ -154,7 +154,7 @@ class BillingManager:
                 _LOGGER.debug("Using expired cached billing data during startup")
                 return cached_data
             return []
-        
+
         # Create async task for fetching
         async def _fetch_billing_results() -> list[dict[str, Any]]:
             try:
@@ -197,7 +197,7 @@ class BillingManager:
         async with self._pending_requests_lock:
             task = asyncio.create_task(_fetch_billing_results())
             self._pending_requests[cache_key] = task
-        
+
         try:
             return await task
         except Exception as err:

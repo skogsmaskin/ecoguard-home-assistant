@@ -29,6 +29,8 @@ from .nord_pool import NordPoolPriceFetcher, NORD_POOL_AVAILABLE
 from .price_calculator import HWPriceCalculator
 from .billing_manager import BillingManager
 from .request_deduplicator import RequestDeduplicator
+from .meter_aggregate_calculator import MeterAggregateCalculator
+from .data_processor import DataProcessor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,6 +72,9 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Initialize HW price calculator (will be set up after billing_manager is created)
         self._hw_price_calculator: HWPriceCalculator | None = None
+        
+        # Initialize data processor (will be set up after all attributes are set)
+        self._data_processor: DataProcessor | None = None
 
         self._billing_results_cache: dict[str, tuple[list[dict[str, Any]], float]] = {}  # Cache for billing results: key -> (data, timestamp)
         self._billing_cache_ttl: float = 86400.0  # Cache billing data for 24 hours (it's historical and doesn't change)
@@ -129,6 +134,36 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 get_rate_from_billing=lambda uc, y, m: self.billing_manager.get_rate_from_billing(uc, y, m),
                 get_setting=self.get_setting,
             )
+        
+        # Initialize meter aggregate calculator
+        self._meter_aggregate_calculator = MeterAggregateCalculator(
+            node_id=self.node_id,
+            request_deduplicator=self._request_deduplicator,
+            api=self.api,
+            get_setting=self.get_setting,
+            get_monthly_aggregate=lambda uc, y, m, at, ct: self.get_monthly_aggregate(uc, y, m, at, ct),
+            get_hw_price_from_spot_prices=lambda c, y, m, cwp, cwc: self._get_hw_price_from_spot_prices(c, y, m, cwp, cwc),
+            billing_manager=self.billing_manager,
+            installations=self._installations,
+        )
+        
+        # Initialize data processor
+        self._data_processor = DataProcessor(
+            api=self.api,
+            node_id=self.node_id,
+            installations=self._installations,
+            get_setting=self.get_setting,
+            latest_consumption_cache=self._latest_consumption_cache,
+            latest_cost_cache=self._latest_cost_cache,
+            daily_consumption_cache=self._daily_consumption_cache,
+            daily_price_cache=self._daily_price_cache,
+            monthly_aggregate_cache=self._monthly_aggregate_cache,
+            async_set_updated_data=self.async_set_updated_data,
+            async_update_listeners=self.async_update_listeners,
+            get_listeners=lambda: list(self._listeners) if hasattr(self, '_listeners') else [],
+            hass=self.hass,
+            data=None,  # Will be updated when data is available
+        )
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from EcoGuard API.
@@ -305,332 +340,48 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         This method fetches data for all utility codes at once, then caches it
         so individual sensors can read from the cache instead of making API calls.
         """
-        import time
-
-        try:
-            # Collect all unique utility codes from installations
-            utility_codes = set()
-            for installation in self._installations:
-                registers = installation.get("Registers", [])
-                for register in registers:
-                    utility_code = register.get("UtilityCode")
-                    if utility_code and utility_code in ("HW", "CW", "E", "HE"):
-                        utility_codes.add(utility_code)
-
-            if not utility_codes:
-                _LOGGER.debug("No utility codes found, skipping batch fetch")
-                return
-
-            _LOGGER.info("Batch fetching consumption and price data for utility codes: %s", sorted(utility_codes))
-
-            # Get timezone for date calculations
-            timezone_str = self.get_setting("TimeZoneIANA") or "UTC"
-            try:
-                tz = zoneinfo.ZoneInfo(timezone_str)
-            except Exception:
-                tz = zoneinfo.ZoneInfo("UTC")
-
-            now_tz = datetime.now(tz)
-            tomorrow_start = datetime.combine(
-                (now_tz.date() + timedelta(days=1)), datetime.min.time(), tz
-            )
-            to_time = int(tomorrow_start.timestamp())
-
-            # Fetch 30 days of data for comprehensive cache coverage
-            # Since this runs asynchronously in the background, it doesn't block startup
-            initial_days = 30
-            from_time = int((datetime.combine(now_tz.date() - timedelta(days=initial_days), datetime.min.time(), tz)).timestamp())
-
-            _LOGGER.debug("Batch fetch: Fetching %d days of data (from %s to %s)",
-                         initial_days, datetime.fromtimestamp(from_time, tz=tz).date(),
-                         datetime.fromtimestamp(to_time, tz=tz).date())
-
-            # Create a mapping of measuring_point_id -> utility_codes for this installation
-            # This helps us correctly map API responses to cache keys
-            mp_to_utilities: dict[int, set[str]] = {}
-            for installation in self._installations:
-                mp_id = installation.get("MeasuringPointID")
-                if mp_id:
-                    registers = installation.get("Registers", [])
-                    utilities = {r.get("UtilityCode") for r in registers if r.get("UtilityCode") in utility_codes}
-                    if utilities:
-                        mp_to_utilities[mp_id] = utilities
-
-            # Fetch consumption data per measuring point for accurate cache keys
-            # When include_sub_nodes=True, we get node-level aggregates, not per-meter data
-            # So we need to fetch per measuring point to get the correct cache keys
-            consumption_utilities = [f"{uc}[con]" for uc in utility_codes]
-            try:
-                # Fetch data per measuring point to get accurate cache keys
-                for measuring_point_id, utilities in mp_to_utilities.items():
-                    try:
-                        consumption_data = await self.api.get_data(
-                            node_id=self.node_id,
-                            from_time=from_time,
-                            to_time=to_time,
-                            interval="d",
-                            grouping="apartment",
-                            utilities=[f"{uc}[con]" for uc in utilities],
-                            include_sub_nodes=False,
-                            measuring_point_id=measuring_point_id,
-                        )
-
-                        # Process and cache consumption data for this measuring point
-                        if consumption_data and isinstance(consumption_data, list):
-                            for node_data in consumption_data:
-                                results = node_data.get("Result", [])
-
-                                if not results:
-                                    continue
-
-                                for result in results:
-                                    utility_code = result.get("Utl")
-                                    if result.get("Func") == "con" and utility_code:
-                                        values = result.get("Values", [])
-                                        unit = result.get("Unit", "")
-
-                                        if not values:
-                                            continue
-
-                                        # Cache ALL daily values (not just latest) for reuse
-                                        daily_values = []
-                                        latest_value = None
-                                        latest_time = None
-
-                                        for value_entry in values:
-                                            value = value_entry.get("Value")
-                                            time_stamp = value_entry.get("Time")
-                                            if value is not None and time_stamp is not None:
-                                                daily_values.append({
-                                                    "time": time_stamp,
-                                                    "value": value,
-                                                    "unit": unit,
-                                                })
-                                                # Track latest for quick access
-                                                if latest_time is None or time_stamp > latest_time:
-                                                    latest_value = value
-                                                    latest_time = time_stamp
-
-                                        if daily_values:
-                                            # Sort by time
-                                            daily_values.sort(key=lambda x: x["time"])
-
-                                            # Cache keys - use measuring_point_id from our mapping
-                                            cache_key_all = f"{utility_code}_all"
-                                            cache_key_meter = f"{utility_code}_{measuring_point_id}"
-
-                                            # Aggregate into "all" cache (sum values across all meters)
-                                            if cache_key_all not in self._daily_consumption_cache:
-                                                self._daily_consumption_cache[cache_key_all] = []
-
-                                            # Merge daily values into "all" cache (deduplicate by time)
-                                            existing_all = self._daily_consumption_cache[cache_key_all]
-                                            existing_times = {v["time"] for v in existing_all}
-
-                                            # Aggregate values by time for "all" cache
-                                            for daily_val in daily_values:
-                                                time_stamp = daily_val["time"]
-                                                if time_stamp in existing_times:
-                                                    # Sum with existing value for this time
-                                                    for existing in existing_all:
-                                                        if existing["time"] == time_stamp:
-                                                            existing["value"] += daily_val["value"]
-                                                            break
-                                                else:
-                                                    # New time, add it
-                                                    existing_all.append(daily_val.copy())
-
-                                            # Sort "all" cache by time
-                                            existing_all.sort(key=lambda x: x["time"])
-
-                                            # Store per-meter daily values
-                                            self._daily_consumption_cache[cache_key_meter] = daily_values
-
-                                            # Also store latest for quick access
-                                            if latest_value is not None:
-                                                cache_entry = {
-                                                    "value": latest_value,
-                                                    "time": latest_time,
-                                                    "unit": unit,
-                                                    "utility_code": utility_code,
-                                                    "measuring_point_id": measuring_point_id,
-                                                }
-
-                                                # Update "all" latest (sum across all meters)
-                                                if cache_key_all in self._latest_consumption_cache:
-                                                    existing_all_entry = self._latest_consumption_cache[cache_key_all]
-                                                    # Use the latest time and sum values
-                                                    if latest_time >= existing_all_entry.get("time", 0):
-                                                        existing_all_entry["value"] = existing_all_entry.get("value", 0) + latest_value
-                                                        existing_all_entry["time"] = latest_time
-                                                else:
-                                                    self._latest_consumption_cache[cache_key_all] = cache_entry.copy()
-
-                                                # Store per-meter latest
-                                                self._latest_consumption_cache[cache_key_meter] = cache_entry
-                                                _LOGGER.debug("Cached consumption: %s (meter %s) = %s %s",
-                                                             cache_key_meter, measuring_point_id, latest_value, unit)
-                    except Exception as err:
-                        _LOGGER.warning("Failed to fetch consumption data for measuring point %s: %s", measuring_point_id, err)
-                        continue
-
-                if not self._latest_consumption_cache:
-                    _LOGGER.warning("Batch fetch: No consumption data was cached")
-
-                _LOGGER.info("Cached consumption data: %d daily value sets, %d latest values",
-                            len(self._daily_consumption_cache), len(self._latest_consumption_cache))
-            except Exception as err:
-                _LOGGER.warning("Failed to batch fetch consumption data: %s", err)
-
-            # Fetch price data per measuring point for accurate cache keys
-            try:
-                # Fetch data per measuring point to get accurate cache keys
-                for measuring_point_id, utilities in mp_to_utilities.items():
-                    try:
-                        price_data = await self.api.get_data(
-                            node_id=self.node_id,
-                            from_time=from_time,
-                            to_time=to_time,
-                            interval="d",
-                            grouping="apartment",
-                            utilities=[f"{uc}[price]" for uc in utilities],
-                            include_sub_nodes=False,
-                            measuring_point_id=measuring_point_id,
-                        )
-
-                        # Process and cache price data for this measuring point
-                        if price_data and isinstance(price_data, list):
-                            for node_data in price_data:
-                                results = node_data.get("Result", [])
-
-                                for result in results:
-                                    utility_code = result.get("Utl")
-                                    if result.get("Func") == "price" and utility_code:
-                                        values = result.get("Values", [])
-                                        unit = result.get("Unit", "")
-
-                                        # Cache ALL daily price values (not just latest) for reuse
-                                        daily_prices = []
-                                        latest_price = None
-                                        latest_time = None
-
-                                        for value_entry in values:
-                                            value = value_entry.get("Value")
-                                            time_stamp = value_entry.get("Time")
-                                            if value is not None and value > 0 and time_stamp is not None:
-                                                daily_prices.append({
-                                                    "time": time_stamp,
-                                                    "value": value,
-                                                    "unit": unit,
-                                                })
-                                                # Track latest for quick access
-                                                if latest_time is None or time_stamp > latest_time:
-                                                    latest_price = value
-                                                    latest_time = time_stamp
-
-                                        if daily_prices:
-                                            # Sort by time
-                                            daily_prices.sort(key=lambda x: x["time"])
-
-                                            # Cache keys - use measuring_point_id from our mapping
-                                            cache_key = f"{utility_code}_{measuring_point_id}_metered"
-
-                                            # Store all daily prices for reuse
-                                            self._daily_price_cache[cache_key] = daily_prices
-
-                                            # Also store latest for quick access
-                                            if latest_price is not None:
-                                                cache_entry = {
-                                                    "value": latest_price,
-                                                    "time": latest_time,
-                                                    "unit": unit,
-                                                    "utility_code": utility_code,
-                                                    "cost_type": "metered",
-                                                    "measuring_point_id": measuring_point_id,
-                                                }
-                                                self._latest_cost_cache[cache_key] = cache_entry
-                                                _LOGGER.debug("Cached price: %s (meter %s) = %s %s",
-                                                             cache_key, measuring_point_id, latest_price, unit)
-                    except Exception as err:
-                        _LOGGER.warning("Failed to fetch price data for measuring point %s: %s", measuring_point_id, err)
-                        continue
-
-                _LOGGER.info("Cached price data: %d daily price sets, %d latest values",
-                            len(self._daily_price_cache), len(self._latest_cost_cache))
-            except Exception as err:
-                _LOGGER.warning("Failed to batch fetch price data: %s", err)
-
-            # Update cache timestamp
-            self._cache_timestamp = time.time()
-
-            # Log cache statistics
-            _LOGGER.info(
-                "Batch fetch complete: %d daily consumption sets, %d daily price sets, %d latest consumption, %d latest prices",
-                len(self._daily_consumption_cache),
-                len(self._daily_price_cache),
-                len(self._latest_consumption_cache),
-                len(self._latest_cost_cache)
-            )
-
-            # Sync cache to coordinator.data and notify sensors
-            # Always update data and notify listeners to ensure sensors get updates
-            if self.data:
-                # Update the existing data dict with new cache
-                # Create a completely new dict with new cache dicts to ensure change detection
-                updated_data = {
-                    "measuring_points": self.data.get("measuring_points"),
-                    "installations": self.data.get("installations"),
-                    "latest_reception": self.data.get("latest_reception"),
-                    "node_data": self.data.get("node_data"),
-                    "settings": self.data.get("settings"),
-                    "node_id": self.data.get("node_id"),
-                    "domain": self.data.get("domain"),
-                    # Create new dicts for caches to ensure change detection
-                    "latest_consumption_cache": dict(self._latest_consumption_cache),
-                    "latest_cost_cache": dict(self._latest_cost_cache),
-                    "daily_consumption_cache": {k: list(v) for k, v in self._daily_consumption_cache.items()},  # Deep copy lists
-                    "daily_price_cache": {k: list(v) for k, v in self._daily_price_cache.items()},  # Deep copy lists
-                    "monthly_aggregate_cache": dict(self._monthly_aggregate_cache),
-                }
-
-                # Use async_set_updated_data to properly notify sensors
-                # This ensures sensors get the update callback
-                # IMPORTANT: This must be called from the event loop, which we are (batch fetch runs in background task)
-                self.async_set_updated_data(updated_data)
-                # Also explicitly notify listeners to ensure all sensors get updated
-                # This is a safety net in case async_set_updated_data doesn't trigger for some reason
-                self.async_update_listeners()
-
-                # Log listener details for debugging
-                listener_count = len(self._listeners) if hasattr(self, '_listeners') else 0
-                listener_ids = [str(l) for l in (self._listeners if hasattr(self, '_listeners') else [])][:10]
-                _LOGGER.info("Notified %d listeners about cache update (consumption: %d keys, cost: %d keys). Listeners: %s",
-                             listener_count,
-                             len(self._latest_consumption_cache),
-                             len(self._latest_cost_cache),
-                             listener_ids)
-
-                # Schedule a delayed update notification to catch sensors that are added after batch fetch completes
-                # This ensures sensors get updated even if they're added after the batch fetch finishes
-                async def _delayed_notification():
-                    await asyncio.sleep(1.0)  # Wait 1 second for sensors to be added
-                    if not self.hass.is_stopping:
-                        _LOGGER.info("Delayed notification: Notifying %d listeners again (consumption: %d keys, cost: %d keys)",
-                                     len(self._listeners) if hasattr(self, '_listeners') else 0,
-                                     len(self._latest_consumption_cache),
-                                     len(self._latest_cost_cache))
-                        self.async_update_listeners()
-
-                self.hass.async_create_task(_delayed_notification())
-            else:
-                # If no data yet, just sync for when it's created
-                self._sync_cache_to_data()
-                # Notify listeners manually
-                self.async_update_listeners()
-                _LOGGER.debug("Notified listeners (no data yet, cache synced for later)")
-
-        except Exception as err:
-            _LOGGER.warning("Error in batch fetch: %s", err)
+        if not self._data_processor:
+            _LOGGER.warning("DataProcessor not initialized, cannot batch fetch sensor data.")
+            return
+        
+        # Update installations in processor (they might have been loaded from cache after processor was created)
+        self._data_processor._installations = self._installations
+        _LOGGER.debug("Batch fetch: Using %d installations", len(self._installations))
+        
+        # Update data reference in processor - use current data or create initial structure
+        if self.data:
+            self._data_processor._data = self.data
+        else:
+            # Create initial data structure if coordinator hasn't been refreshed yet
+            # This ensures the processor can update it properly
+            initial_data = {
+                "measuring_points": self._measuring_points,
+                "installations": self._installations,
+                "latest_reception": self._latest_reception,
+                "node_data": self._node_data,
+                "settings": self._settings,
+                "node_id": self.node_id,
+                "domain": self.domain,
+                "latest_consumption_cache": self._latest_consumption_cache,
+                "latest_cost_cache": self._latest_cost_cache,
+                "daily_consumption_cache": self._daily_consumption_cache,
+                "daily_price_cache": self._daily_price_cache,
+                "monthly_aggregate_cache": self._monthly_aggregate_cache,
+            }
+            self._data_processor._data = initial_data
+        
+        await self._data_processor.batch_fetch_sensor_data()
+        
+        # The processor calls async_set_updated_data which updates self.data
+        # Since we're using references to cache dictionaries, the caches are already in sync
+        # But we call _sync_cache_to_data to ensure references are correct
+        self._sync_cache_to_data()
+        
+        # Force another notification to ensure sensors get the update
+        # This is important because sensors might have been added after the processor's notification
+        self.async_update_listeners()
+        _LOGGER.debug("Coordinator data synced and listeners notified: %d consumption keys, %d cost keys",
+                     len(self._latest_consumption_cache), len(self._latest_cost_cache))
 
     async def get_latest_consumption_value(
         self, utility_code: str, days: int = 7, measuring_point_id: int | None = None, external_key: str | None = None
@@ -1821,11 +1572,19 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Use request deduplicator for calculation task (not API call, so use_cache=False)
         try:
+            # Check if data was already in cache before fetching
+            was_cached = cache_key in self._monthly_aggregate_cache
+            
             result = await self._request_deduplicator.get_or_fetch(
                 cache_key=cache_key,
                 fetch_func=_calculate_monthly_aggregate,
                 use_cache=False,  # Don't cache calculation results, only deduplicate
             )
+            
+            # Only notify listeners if new data was cached (not if it was already there)
+            if result and not was_cached and cache_key in self._monthly_aggregate_cache:
+                self._sync_cache_to_data()
+                self.async_update_listeners()
             return result
         except Exception as err:
             _LOGGER.warning(
@@ -1868,901 +1627,19 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             using measuringpointid. The API provides accurate per-meter cost data without requiring
             proportional allocation.
         """
-        # For price, fetch directly using measuringpointid
-        if aggregate_type == "price":
-            try:
-                # Get timezone from settings
-                timezone_str = self.get_setting("TimeZoneIANA")
-                if not timezone_str:
-                    timezone_str = "UTC"
-
-                try:
-                    tz = zoneinfo.ZoneInfo(timezone_str)
-                except Exception:
-                    _LOGGER.warning("Invalid timezone %s, using UTC", timezone_str)
-                    tz = zoneinfo.ZoneInfo("UTC")
-
-                # Calculate month boundaries in the configured timezone
-                from_date = datetime(year, month, 1, tzinfo=tz)
-                if month == 12:
-                    to_date = datetime(year + 1, 1, 1, tzinfo=tz)
-                else:
-                    to_date = datetime(year, month + 1, 1, tzinfo=tz)
-
-                from_time = int(from_date.timestamp())
-                to_time = int(to_date.timestamp())
-
-                # Create cache key for this request
-                cache_key = format_cache_key(
-                    "data_meter",
-                    utility_code=utility_code,
-                    measuring_point_id=measuring_point_id,
-                    from_time=from_time,
-                    to_time=to_time,
-                    node_id=self.node_id,
-                    aggregate_type=aggregate_type,
-                )
-
-                async def fetch_data() -> list[dict[str, Any]] | None:
-                    """Fetch price data for specific meter from API."""
-                    utilities = [f"{utility_code}[price]"]
-                    # When querying with measuringpointid, ensure the utility matches the measuring point
-                    # The utility_code comes from the installation's registers, so it should match
-                    _LOGGER.debug(
-                        "Fetching price data for measuring_point_id=%d with utility=%s (matching utility for this meter)",
-                        measuring_point_id,
-                        utility_code,
-                    )
-                    return await self.api.get_data(
-                        node_id=self.node_id,
-                        from_time=from_time,
-                        to_time=to_time,
-                        interval="d",
-                        grouping="apartment",
-                        utilities=utilities,
-                        include_sub_nodes=False,  # Don't include sub-nodes when filtering by measuring point
-                        measuring_point_id=measuring_point_id,
-                    )
-
-                # Use request deduplicator to handle caching and deduplication
-                data = await self._request_deduplicator.get_or_fetch(
-                    cache_key=cache_key,
-                    fetch_func=fetch_data,
-                    use_cache=True,
-                )
-
-                if not data or not isinstance(data, list):
-                    _LOGGER.debug(
-                        "No price data returned for meter %d (%s %d-%02d)",
-                        measuring_point_id,
-                        utility_code,
-                        year,
-                        month,
-                    )
-                    # For estimated costs, try to calculate from consumption × rate even if API returned no data
-                    if cost_type == "estimated":
-                        _LOGGER.debug(
-                            "No API price data for meter %d (%s %d-%02d), trying estimated cost calculation",
-                            measuring_point_id,
-                            utility_code,
-                            year,
-                            month,
-                        )
-                        # Skip data processing and go directly to estimated cost calculation
-                        has_data = False
-                    else:
-                        return None
-                else:
-                    # Extract price values from the response
-                    total_value = 0.0
-                    unit = ""
-                    has_data = False
-
-                    for node_data in data:
-                        results = node_data.get("Result", [])
-                        for result in results:
-                            if result.get("Utl") == utility_code and result.get("Func") == "price":
-                                values = result.get("Values", [])
-                                unit = result.get("Unit", "")
-
-                                _LOGGER.debug(
-                                    "Processing price data for meter %d (%s %d-%02d): found %d value entries",
-                                    measuring_point_id,
-                                    utility_code,
-                                    year,
-                                    month,
-                                    len(values),
-                                )
-
-                                # Sum all non-null values for the month
-                                non_null_count = 0
-                                null_count = 0
-                                zero_count = 0
-                                for value_entry in values:
-                                    value = value_entry.get("Value")
-                                    if value is not None:
-                                        total_value += value
-                                        has_data = True
-                                        non_null_count += 1
-                                        if value == 0:
-                                            zero_count += 1
-                                    else:
-                                        null_count += 1
-
-                                _LOGGER.debug(
-                                    "Price data summary for meter %d (%s %d-%02d): %d non-null values (%d zeros), %d null values, total=%.2f %s",
-                                    measuring_point_id,
-                                    utility_code,
-                                    year,
-                                    month,
-                                    non_null_count,
-                                    zero_count,
-                                    null_count,
-                                    total_value,
-                                    unit,
-                                )
-
-                if has_data:
-                    # If we have data but total is 0, and this is an estimated cost request,
-                    # fall back to calculation instead of returning 0
-                    if total_value == 0.0 and cost_type == "estimated":
-                        _LOGGER.debug(
-                            "Found price data for meter %d (%s %d-%02d) but total is 0.00. For estimated costs, falling back to calculation.",
-                            measuring_point_id,
-                            utility_code,
-                            year,
-                            month,
-                        )
-                        # For HW, try proportional allocation first (more accurate than spot price estimation)
-                        if utility_code == "HW":
-                            # Get this meter's consumption for the month
-                            meter_consumption_data = await self.get_monthly_aggregate_for_meter(
-                                utility_code=utility_code,
-                                measuring_point_id=measuring_point_id,
-                                external_key=external_key,
-                                year=year,
-                                month=month,
-                                aggregate_type="con",
-                                cost_type="actual",
-                            )
-
-                            if meter_consumption_data and meter_consumption_data.get("value") is not None:
-                                meter_consumption = meter_consumption_data.get("value", 0.0)
-
-                                if meter_consumption > 0:
-                                    # Get total HW consumption and estimated cost for the month
-                                    total_hw_consumption_data = await self.get_monthly_aggregate(
-                                        utility_code="HW",
-                                        year=year,
-                                        month=month,
-                                        aggregate_type="con",
-                                    )
-                                    total_hw_cost_data = await self.get_monthly_aggregate(
-                                        utility_code="HW",
-                                        year=year,
-                                        month=month,
-                                        aggregate_type="price",
-                                        cost_type="estimated",
-                                    )
-
-                                    if total_hw_consumption_data and total_hw_cost_data:
-                                        total_hw_consumption = total_hw_consumption_data.get("value", 0.0)
-                                        total_hw_cost = total_hw_cost_data.get("value", 0.0)
-
-                                        if total_hw_consumption > 0 and total_hw_cost > 0:
-                                            # Calculate this meter's share of total consumption
-                                            consumption_share = meter_consumption / total_hw_consumption
-
-                                            # Allocate cost proportionally
-                                            allocated_cost = total_hw_cost * consumption_share
-                                            currency = total_hw_cost_data.get("unit") or self.get_setting("Currency") or "NOK"
-
-                                            _LOGGER.info(
-                                                "Allocated HW cost for meter %d %d-%02d (from zero API data): %.2f %s (meter: %.2f m3 / total: %.2f m3 = %.1f%%, total cost: %.2f %s)",
-                                                measuring_point_id, year, month,
-                                                allocated_cost, currency,
-                                                meter_consumption,
-                                                total_hw_consumption,
-                                                consumption_share * 100,
-                                                total_hw_cost,
-                                                currency,
-                                            )
-
-                                            return {
-                                                "value": allocated_cost,
-                                                "unit": currency,
-                                                "year": year,
-                                                "month": month,
-                                                "utility_code": utility_code,
-                                                "aggregate_type": "price",
-                                                "cost_type": "estimated",
-                                                "measuring_point_id": measuring_point_id,
-                                            }
-                        # Fall through to estimated cost calculation below
-                    else:
-                        _LOGGER.debug(
-                            "Found per-meter price data for meter %d (%s %d-%02d): %.2f %s",
-                            measuring_point_id,
-                            utility_code,
-                            year,
-                            month,
-                            total_value,
-                            unit,
-                        )
-                        return {
-                            "value": total_value,
-                            "unit": unit,
-                            "year": year,
-                            "month": month,
-                            "utility_code": utility_code,
-                            "aggregate_type": "price",
-                            "cost_type": cost_type,
-                            "measuring_point_id": measuring_point_id,
-                        }
-                else:
-                    _LOGGER.debug(
-                        "No price data found for meter %d (%s %d-%02d)",
-                        measuring_point_id,
-                        utility_code,
-                        year,
-                        month,
-                    )
-                    # For estimated costs, fall back to calculating from consumption × rate
-                    if cost_type == "estimated":
-                        _LOGGER.debug(
-                            "Calculating estimated cost for meter %d (%s %d-%02d) from consumption × rate",
-                            measuring_point_id,
-                            utility_code,
-                            year,
-                            month,
-                        )
-                        # Get this meter's consumption for the month
-                        meter_consumption_data = await self.get_monthly_aggregate_for_meter(
-                            utility_code=utility_code,
-                            measuring_point_id=measuring_point_id,
-                            external_key=external_key,
-                            year=year,
-                            month=month,
-                            aggregate_type="con",
-                            cost_type="actual",
-                        )
-
-                        # Check if we have consumption data
-                        if not meter_consumption_data or meter_consumption_data.get("value") is None:
-                            # For HW, still try spot price estimation even without consumption data
-                            # (it will return 0 cost if consumption is 0, which is correct)
-                            if utility_code == "HW":
-                                _LOGGER.debug(
-                                    "No consumption data for HW meter %d %d-%02d, trying spot price estimation anyway",
-                                    measuring_point_id, year, month
-                                )
-                                # Get CW price and consumption for the estimation
-                                # Use aggregate CW data (like get_monthly_aggregate does) since
-                                # the CW meter might be different from the HW meter
-                                cw_price_data = await self.get_monthly_aggregate(
-                                    utility_code="CW",
-                                    year=year,
-                                    month=month,
-                                    aggregate_type="price",
-                                    cost_type="actual",
-                                )
-                                cw_consumption_data = await self.get_monthly_aggregate(
-                                    utility_code="CW",
-                                    year=year,
-                                    month=month,
-                                    aggregate_type="con",
-                                )
-
-                                cw_price = cw_price_data.get("value") if cw_price_data else None
-                                cw_consumption = cw_consumption_data.get("value") if cw_consumption_data else None
-
-                                # Estimate HW price from spot prices (will return 0 if consumption is 0)
-                                hw_estimated_data = await self._get_hw_price_from_spot_prices(
-                                    consumption=0.0,
-                                    year=year,
-                                    month=month,
-                                    cold_water_price=cw_price,
-                                    cold_water_consumption=cw_consumption,
-                                )
-
-                                if hw_estimated_data:
-                                    currency = hw_estimated_data.get("unit") or self.get_setting("Currency") or "NOK"
-                                    _LOGGER.debug(
-                                        "Estimated HW cost for meter %d %d-%02d: %.2f %s (no consumption data, using 0)",
-                                        measuring_point_id, year, month,
-                                        hw_estimated_data.get("value"), currency
-                                    )
-                                    return {
-                                        "value": hw_estimated_data.get("value"),
-                                        "unit": currency,
-                                        "year": year,
-                                        "month": month,
-                                        "utility_code": utility_code,
-                                        "aggregate_type": "price",
-                                        "cost_type": "estimated",
-                                        "measuring_point_id": measuring_point_id,
-                                    }
-                                else:
-                                    _LOGGER.debug(
-                                        "Spot price estimation failed for HW meter %d %d-%02d (no consumption data)",
-                                        measuring_point_id, year, month
-                                    )
-                                    return None
-                            else:
-                                _LOGGER.debug(
-                                    "No consumption data available for meter %d (%s), cannot calculate estimated cost",
-                                    measuring_point_id, utility_code
-                                )
-                                return None
-
-                        meter_consumption = meter_consumption_data.get("value", 0.0)
-
-                        # Get rate from billing
-                        rate = await self.billing_manager.get_rate_from_billing(utility_code, year, month)
-
-                        if rate is None:
-                            # For HW, try proportional allocation from aggregate estimated cost
-                            if utility_code == "HW":
-                                _LOGGER.debug(
-                                    "No rate found for HW %d-%02d, trying proportional allocation from aggregate estimated cost",
-                                    year, month
-                                )
-
-                                # Get total HW consumption and estimated cost for the month
-                                total_hw_consumption_data = await self.get_monthly_aggregate(
-                                    utility_code="HW",
-                                    year=year,
-                                    month=month,
-                                    aggregate_type="con",
-                                )
-                                total_hw_cost_data = await self.get_monthly_aggregate(
-                                    utility_code="HW",
-                                    year=year,
-                                    month=month,
-                                    aggregate_type="price",
-                                    cost_type="estimated",
-                                )
-
-                                if total_hw_consumption_data and total_hw_cost_data:
-                                    total_hw_consumption = total_hw_consumption_data.get("value", 0.0)
-                                    total_hw_cost = total_hw_cost_data.get("value", 0.0)
-
-                                    if total_hw_consumption > 0 and total_hw_cost > 0:
-                                        # Calculate this meter's share of total consumption
-                                        consumption_share = meter_consumption / total_hw_consumption
-
-                                        # Allocate cost proportionally
-                                        allocated_cost = total_hw_cost * consumption_share
-                                        currency = total_hw_cost_data.get("unit") or self.get_setting("Currency") or "NOK"
-
-                                        _LOGGER.info(
-                                            "Allocated HW cost for meter %d %d-%02d: %.2f %s (meter: %.2f m3 / total: %.2f m3 = %.1f%%, total cost: %.2f %s)",
-                                            measuring_point_id, year, month,
-                                            allocated_cost, currency,
-                                            meter_consumption,
-                                            total_hw_consumption,
-                                            consumption_share * 100,
-                                            total_hw_cost,
-                                            currency,
-                                        )
-
-                                        return {
-                                            "value": allocated_cost,
-                                            "unit": currency,
-                                            "year": year,
-                                            "month": month,
-                                            "utility_code": utility_code,
-                                            "aggregate_type": "price",
-                                            "cost_type": "estimated",
-                                            "measuring_point_id": measuring_point_id,
-                                        }
-                                    else:
-                                        _LOGGER.debug(
-                                            "Total HW consumption (%.2f) or cost (%.2f) is 0, cannot allocate proportionally",
-                                            total_hw_consumption,
-                                            total_hw_cost,
-                                        )
-                                else:
-                                    _LOGGER.debug(
-                                        "Could not get total HW consumption or cost for proportional allocation"
-                                    )
-
-                                # Fallback to spot price estimation if proportional allocation didn't work
-                                _LOGGER.debug(
-                                    "Proportional allocation failed, trying spot price estimation for meter %d (HW %d-%02d)",
-                                    measuring_point_id, year, month
-                                )
-                                # Get CW price and consumption for the estimation
-                                # Use aggregate CW data (like get_monthly_aggregate does) since
-                                # the CW meter might be different from the HW meter
-                                cw_price_data = await self.get_monthly_aggregate(
-                                    utility_code="CW",
-                                    year=year,
-                                    month=month,
-                                    aggregate_type="price",
-                                    cost_type="actual",
-                                )
-                                cw_consumption_data = await self.get_monthly_aggregate(
-                                    utility_code="CW",
-                                    year=year,
-                                    month=month,
-                                    aggregate_type="con",
-                                )
-
-                                cw_price = cw_price_data.get("value") if cw_price_data else None
-                                cw_consumption = cw_consumption_data.get("value") if cw_consumption_data else None
-
-                                # Estimate HW price from spot prices
-                                _LOGGER.debug(
-                                    "Calling spot price estimation for meter %d (HW %d-%02d): consumption=%.2f m3, cw_price=%s, cw_consumption=%s",
-                                    measuring_point_id, year, month,
-                                    meter_consumption,
-                                    cw_price,
-                                    cw_consumption,
-                                )
-                                hw_estimated_data = await self._get_hw_price_from_spot_prices(
-                                    consumption=meter_consumption,
-                                    year=year,
-                                    month=month,
-                                    cold_water_price=cw_price,
-                                    cold_water_consumption=cw_consumption,
-                                )
-
-                                if hw_estimated_data:
-                                    currency = hw_estimated_data.get("unit") or self.get_setting("Currency") or "NOK"
-                                    estimated_value = hw_estimated_data.get("value", 0.0)
-                                    _LOGGER.info(
-                                        "Estimated HW cost for meter %d %d-%02d: %.2f %s (consumption: %.2f m3, method: %s)",
-                                        measuring_point_id, year, month,
-                                        estimated_value, currency,
-                                        meter_consumption,
-                                        hw_estimated_data.get("calculation_method", "unknown")
-                                    )
-                                    return {
-                                        "value": estimated_value,
-                                        "unit": currency,
-                                        "year": year,
-                                        "month": month,
-                                        "utility_code": utility_code,
-                                        "aggregate_type": "price",
-                                        "cost_type": "estimated",
-                                        "measuring_point_id": measuring_point_id,
-                                    }
-                                else:
-                                    _LOGGER.warning(
-                                        "Spot price estimation returned None for meter %d (HW %d-%02d) with consumption %.2f m3. Check Nord Pool configuration.",
-                                        measuring_point_id, year, month, meter_consumption
-                                    )
-
-                            _LOGGER.debug(
-                                "No rate found for %s %d-%02d, cannot calculate estimated cost",
-                                utility_code, year, month
-                            )
-                            return None
-
-                        # Calculate cost from consumption × rate
-                        calculated_cost = meter_consumption * rate
-                        currency = self.get_setting("Currency") or "NOK"
-
-                        _LOGGER.info(
-                            "Calculated estimated cost for meter %d (%s %d-%02d): %.2f m3 × %.2f = %.2f %s",
-                            measuring_point_id,
-                            utility_code,
-                            year,
-                            month,
-                            meter_consumption,
-                            rate,
-                            calculated_cost,
-                            currency,
-                        )
-
-                        # Warn if we got 0 cost but consumption > 0 (might indicate an issue)
-                        if calculated_cost == 0 and meter_consumption > 0:
-                            _LOGGER.warning(
-                                "Estimated cost is 0 for meter %d (%s %d-%02d) despite consumption %.2f m3 and rate %.2f. This might indicate a calculation issue.",
-                                measuring_point_id,
-                                utility_code,
-                                year,
-                                month,
-                                meter_consumption,
-                                rate,
-                            )
-
-                        return {
-                            "value": calculated_cost,
-                            "unit": currency,
-                            "year": year,
-                            "month": month,
-                            "utility_code": utility_code,
-                            "aggregate_type": "price",
-                            "cost_type": "estimated",
-                            "measuring_point_id": measuring_point_id,
-                        }
-                    return None
-            except Exception as err:
-                _LOGGER.warning(
-                    "Failed to fetch per-meter price data for meter %d %s[%s] %d-%02d: %s",
-                    measuring_point_id,
-                    utility_code,
-                    aggregate_type,
-                    year,
-                    month,
-                    err,
-                )
-                # For estimated costs, try to calculate from consumption × rate even if API call failed
-                if cost_type == "estimated":
-                    try:
-                        _LOGGER.debug(
-                            "Attempting to calculate estimated cost for meter %d (%s %d-%02d) from consumption × rate after API error",
-                            measuring_point_id,
-                            utility_code,
-                            year,
-                            month,
-                        )
-                        # Get this meter's consumption for the month
-                        meter_consumption_data = await self.get_monthly_aggregate_for_meter(
-                            utility_code=utility_code,
-                            measuring_point_id=measuring_point_id,
-                            external_key=external_key,
-                            year=year,
-                            month=month,
-                            aggregate_type="con",
-                            cost_type="actual",
-                        )
-
-                        if meter_consumption_data and meter_consumption_data.get("value") is not None:
-                            meter_consumption = meter_consumption_data.get("value", 0.0)
-                            rate = await self.billing_manager.get_rate_from_billing(utility_code, year, month)
-
-                            if rate is not None:
-                                calculated_cost = meter_consumption * rate
-                                currency = self.get_setting("Currency") or "NOK"
-
-                                _LOGGER.debug(
-                                    "Calculated estimated cost for meter %d (%s %d-%02d) after API error: %.2f m3 × %.2f = %.2f %s",
-                                    measuring_point_id,
-                                    utility_code,
-                                    year,
-                                    month,
-                                    meter_consumption,
-                                    rate,
-                                    calculated_cost,
-                                    currency,
-                                )
-
-                                return {
-                                    "value": calculated_cost,
-                                    "unit": currency,
-                                    "year": year,
-                                    "month": month,
-                                    "utility_code": utility_code,
-                                    "aggregate_type": "price",
-                                    "cost_type": "estimated",
-                                    "measuring_point_id": measuring_point_id,
-                                }
-                            elif utility_code == "HW":
-                                # For HW, try proportional allocation from aggregate estimated cost first
-                                _LOGGER.debug(
-                                    "No rate found for HW %d-%02d after API error, trying proportional allocation",
-                                    year, month
-                                )
-
-                                if meter_consumption > 0:
-                                    # Get total HW consumption and estimated cost for the month
-                                    total_hw_consumption_data = await self.get_monthly_aggregate(
-                                        utility_code="HW",
-                                        year=year,
-                                        month=month,
-                                        aggregate_type="con",
-                                    )
-                                    total_hw_cost_data = await self.get_monthly_aggregate(
-                                        utility_code="HW",
-                                        year=year,
-                                        month=month,
-                                        aggregate_type="price",
-                                        cost_type="estimated",
-                                    )
-
-                                    if total_hw_consumption_data and total_hw_cost_data:
-                                        total_hw_consumption = total_hw_consumption_data.get("value", 0.0)
-                                        total_hw_cost = total_hw_cost_data.get("value", 0.0)
-
-                                        if total_hw_consumption > 0 and total_hw_cost > 0:
-                                            # Calculate this meter's share of total consumption
-                                            consumption_share = meter_consumption / total_hw_consumption
-
-                                            # Allocate cost proportionally
-                                            allocated_cost = total_hw_cost * consumption_share
-                                            currency = total_hw_cost_data.get("unit") or self.get_setting("Currency") or "NOK"
-
-                                            _LOGGER.info(
-                                                "Allocated HW cost for meter %d %d-%02d (after API error): %.2f %s (meter: %.2f m3 / total: %.2f m3 = %.1f%%, total cost: %.2f %s)",
-                                                measuring_point_id, year, month,
-                                                allocated_cost, currency,
-                                                meter_consumption,
-                                                total_hw_consumption,
-                                                consumption_share * 100,
-                                                total_hw_cost,
-                                                currency,
-                                            )
-
-                                            return {
-                                                "value": allocated_cost,
-                                                "unit": currency,
-                                                "year": year,
-                                                "month": month,
-                                                "utility_code": utility_code,
-                                                "aggregate_type": "price",
-                                                "cost_type": "estimated",
-                                                "measuring_point_id": measuring_point_id,
-                                            }
-
-                                # Fallback to spot price estimation if proportional allocation didn't work
-                                _LOGGER.debug(
-                                    "Proportional allocation failed, trying spot price estimation for HW %d-%02d after API error",
-                                    year, month
-                                )
-                                # Get CW price and consumption for the estimation
-                                # Use aggregate CW data (like get_monthly_aggregate does) since
-                                # the CW meter might be different from the HW meter
-                                cw_price_data = await self.get_monthly_aggregate(
-                                    utility_code="CW",
-                                    year=year,
-                                    month=month,
-                                    aggregate_type="price",
-                                    cost_type="actual",
-                                )
-                                cw_consumption_data = await self.get_monthly_aggregate(
-                                    utility_code="CW",
-                                    year=year,
-                                    month=month,
-                                    aggregate_type="con",
-                                )
-
-                                cw_price = cw_price_data.get("value") if cw_price_data else None
-                                cw_consumption = cw_consumption_data.get("value") if cw_consumption_data else None
-
-                                # Estimate HW price from spot prices
-                                hw_estimated_data = await self._get_hw_price_from_spot_prices(
-                                    consumption=meter_consumption,
-                                    year=year,
-                                    month=month,
-                                    cold_water_price=cw_price,
-                                    cold_water_consumption=cw_consumption,
-                                )
-
-                                if hw_estimated_data:
-                                    currency = hw_estimated_data.get("unit") or self.get_setting("Currency") or "NOK"
-                                    return {
-                                        "value": hw_estimated_data.get("value"),
-                                        "unit": currency,
-                                        "year": year,
-                                        "month": month,
-                                        "utility_code": utility_code,
-                                        "aggregate_type": "price",
-                                        "cost_type": "estimated",
-                                        "measuring_point_id": measuring_point_id,
-                                    }
-                    except Exception as calc_err:
-                        _LOGGER.debug(
-                            "Failed to calculate estimated cost from consumption × rate: %s",
-                            calc_err,
-                        )
-                return None
-
-        # For consumption, we can filter by measuring point
-        try:
-            # Get timezone from settings
-            timezone_str = self.get_setting("TimeZoneIANA")
-            if not timezone_str:
-                timezone_str = "UTC"
-
-            try:
-                tz = zoneinfo.ZoneInfo(timezone_str)
-            except Exception:
-                _LOGGER.warning("Invalid timezone %s, using UTC", timezone_str)
-                tz = zoneinfo.ZoneInfo("UTC")
-
-            # Calculate month boundaries in the configured timezone
-            from_date = datetime(year, month, 1, tzinfo=tz)
-            if month == 12:
-                to_date = datetime(year + 1, 1, 1, tzinfo=tz)
-            else:
-                to_date = datetime(year, month + 1, 1, tzinfo=tz)
-
-            from_time = int(from_date.timestamp())
-            to_time = int(to_date.timestamp())
-
-            _LOGGER.debug(
-                "Fetching monthly aggregate for meter %d (%s[%s]) %d-%02d: from=%s to=%s",
-                measuring_point_id,
-                utility_code,
-                aggregate_type,
-                year,
-                month,
-                from_time,
-                to_time,
-            )
-
-            # Query data endpoint for the month
-            utilities = [f"{utility_code}[{aggregate_type}]"]
-
-            # Create cache key for this request
-            cache_key = f"data_meter_{self.node_id}_{measuring_point_id}_{from_time}_{to_time}_{utility_code}_{aggregate_type}"
-
-            # Check cache first
-            if cache_key in self._data_request_cache:
-                cached_data, cache_timestamp = self._data_request_cache[cache_key]
-                age = time.time() - cache_timestamp
-                if age < self._data_cache_ttl:
-                    _LOGGER.debug(
-                        "Using cached data for meter %d %s[%s] %d-%02d (age: %.1f seconds)",
-                        measuring_point_id,
-                        utility_code,
-                        aggregate_type,
-                        year,
-                        month,
-                        age,
-                    )
-                    data = cached_data
-                else:
-                    del self._data_request_cache[cache_key]
-                    data = None
-            else:
-                data = None
-
-            # Check if there's already a pending request
-            if data is None and cache_key in self._pending_requests:
-                _LOGGER.debug(
-                    "Waiting for pending request for meter %d %s[%s] %d-%02d",
-                    measuring_point_id,
-                    utility_code,
-                    aggregate_type,
-                    year,
-                    month,
-                )
-                try:
-                    data = await self._pending_requests[cache_key]
-                except Exception as err:
-                    _LOGGER.warning(
-                        "Pending request failed for meter %d %s[%s] %d-%02d: %s",
-                        measuring_point_id,
-                        utility_code,
-                        aggregate_type,
-                        year,
-                        month,
-                        err,
-                    )
-                    if cache_key in self._pending_requests:
-                        del self._pending_requests[cache_key]
-                    data = None
-
-            # If no cached data and no pending request, make the API call
-            if data is None:
-                async def fetch_data():
-                    try:
-                        # When querying with measuringpointid, ensure the utility matches the measuring point
-                        # The utility_code comes from the installation's registers, so it should match
-                        _LOGGER.debug(
-                            "Fetching %s data for measuring_point_id=%d with utility=%s (matching utility for this meter)",
-                            aggregate_type,
-                            measuring_point_id,
-                            utility_code,
-                        )
-                        result = await self.api.get_data(
-                            node_id=self.node_id,
-                            from_time=from_time,
-                            to_time=to_time,
-                            interval="d",
-                            grouping="apartment",
-                            utilities=utilities,
-                            include_sub_nodes=False,  # Don't include sub-nodes when filtering by measuring point
-                            measuring_point_id=measuring_point_id,
-                        )
-                        if result:
-                            self._data_request_cache[cache_key] = (result, time.time())
-                        return result
-                    finally:
-                        if cache_key in self._pending_requests:
-                            del self._pending_requests[cache_key]
-
-                task = asyncio.create_task(fetch_data())
-                self._pending_requests[cache_key] = task
-                data = await task
-
-            if not data or not isinstance(data, list):
-                return None
-
-            # Filter data to only include this specific meter
-            # Match by measuring_point_id or external_key (similar to get_latest_consumption_value)
-            total_value = 0.0
-            unit = ""
-            has_data = False
-
-            for node_data in data:
-                node_id = node_data.get("ID")
-
-                # Try to match this node to our measuring point
-                matched = False
-                if node_id == measuring_point_id:
-                    # Direct match by node ID
-                    matched = True
-                else:
-                    # Try to match via installations
-                    # If we have an installation with this measuring_point_id, accept any node_data
-                    # (the API might return data aggregated differently)
-                    for inst in self._installations:
-                        if inst.get("MeasuringPointID") == measuring_point_id:
-                            # If external_key is provided, verify it matches
-                            if external_key:
-                                inst_external_key = inst.get("ExternalKey")
-                                if inst_external_key == external_key:
-                                    matched = True
-                                    break
-                            else:
-                                # No external_key provided, match by measuring_point_id only
-                                matched = True
-                                break
-
-                if not matched:
-                    continue
-
-                # Aggregate values for this meter
-                results = node_data.get("Result", [])
-                for result in results:
-                    if result.get("Utl") == utility_code and result.get("Func") == aggregate_type:
-                        values = result.get("Values", [])
-                        unit = result.get("Unit", "")
-
-                        # Sum all non-null values for the month
-                        for value_entry in values:
-                            value = value_entry.get("Value")
-                            if value is not None:
-                                total_value += value
-                                has_data = True
-
-            if not has_data:
-                _LOGGER.debug(
-                    "No data found for meter %d (%s[%s]) %d-%02d after filtering",
-                    measuring_point_id,
-                    utility_code,
-                    aggregate_type,
-                    year,
-                    month,
-                )
-                return None
-
-            _LOGGER.debug(
-                "Found monthly aggregate for meter %d (%s[%s]) %d-%02d: %.2f %s",
-                measuring_point_id,
-                utility_code,
-                aggregate_type,
-                year,
-                month,
-                total_value,
-                unit,
-            )
-
-            return {
-                "value": total_value,
-                "unit": unit,
-                "year": year,
-                "month": month,
-                "utility_code": utility_code,
-                "aggregate_type": aggregate_type,
-                "measuring_point_id": measuring_point_id,
-            }
-        except Exception as err:
-            _LOGGER.warning(
-                "Failed to fetch monthly aggregate for meter %d %s[%s] %d-%02d: %s",
-                measuring_point_id,
-                utility_code,
-                aggregate_type,
-                year,
-                month,
-                err,
-            )
+        if not self._meter_aggregate_calculator:
+            _LOGGER.warning("MeterAggregateCalculator not initialized, cannot calculate meter aggregate.")
             return None
+        
+        return await self._meter_aggregate_calculator.calculate(
+            utility_code=utility_code,
+            measuring_point_id=measuring_point_id,
+            external_key=external_key,
+            year=year,
+            month=month,
+            aggregate_type=aggregate_type,
+            cost_type=cost_type,
+        )
 
     async def _get_hw_price_from_spot_prices(
         self,
@@ -2798,6 +1675,25 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             cold_water_consumption=cold_water_consumption,
             nord_pool_area=self.nord_pool_area,
         )
+
+    async def get_current_month_total_cost(
+        self,
+        include_estimated: bool = True,
+    ) -> dict[str, Any] | None:
+        """Get total cost for the current month by summing all price values from data API.
+
+        This matches the approach used in the React app - fetches all price utilities
+        for the current month and sums all price values (like getSumOfDataset).
+
+        Args:
+            include_estimated: If True, includes estimated HW costs when price data is missing.
+                              If False, only includes metered costs from API.
+
+        Returns:
+            Dict with 'value', 'unit', 'year', 'month', 'currency', 'utilities',
+            'metered_utilities', 'estimated_utilities', 'is_estimated',
+            or None if no data is available.
+        """
 
     async def get_current_month_total_cost(
         self,

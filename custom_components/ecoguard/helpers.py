@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 import zoneinfo
 import logging
+import math
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -279,3 +280,27 @@ def log_static_info_summary(
         _LOGGER.debug("LATEST RECEPTION: Not available")
 
     _LOGGER.debug("=" * 80)
+
+
+def round_to_max_digits(value: float | None, max_digits: int = 3) -> float | None:
+    """Round a value to a maximum number of significant digits.
+
+    Args:
+        value: The value to round
+        max_digits: Maximum number of significant digits (default: 3)
+
+    Returns:
+        Rounded value, or None if input is None
+    """
+    if value is None:
+        return None
+
+    if value == 0:
+        return 0.0
+
+    # Calculate the number of decimal places needed for max_digits significant digits
+    magnitude = math.floor(math.log10(abs(value)))
+    decimal_places = max(0, max_digits - 1 - magnitude)
+
+    # Round to the calculated decimal places
+    return round(value, decimal_places)

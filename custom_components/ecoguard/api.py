@@ -207,12 +207,12 @@ class EcoGuardAPI:
             if time_since_last < self._min_request_interval:
                 wait_time = (self._min_request_interval - time_since_last).total_seconds()
                 await asyncio.sleep(wait_time)
-        
+
         # Use semaphore to limit concurrent requests
         async with self._request_semaphore:
             max_retries = 3
             base_delay = 1.0  # Start with 1 second delay
-            
+
             for attempt in range(max_retries):
                 try:
                     token = await self._get_token()
@@ -225,7 +225,7 @@ class EcoGuardAPI:
                     headers["content-type"] = "application/json"
 
                     self._last_request_time = datetime.now()
-                    
+
                     async with session.request(method, url, headers=headers, **kwargs) as response:
                         if response.status == 401:
                             # Token expired, try to refresh
@@ -286,7 +286,7 @@ class EcoGuardAPI:
                         await asyncio.sleep(delay)
                         continue
                     raise EcoGuardAPIError(f"Network error during API request after {max_retries} attempts: {err}")
-            
+
             # If we get here, all retries failed
             raise EcoGuardAPIError(f"API request failed after {max_retries} attempts")
 
@@ -337,7 +337,7 @@ class EcoGuardAPI:
         measuring_point_id: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """Get consumption or price data for a node.
-        
+
         Args:
             node_id: Node ID
             from_time: Start timestamp (Unix timestamp)
@@ -355,7 +355,7 @@ class EcoGuardAPI:
             "interval": interval,
             "grouping": grouping,
         }
-        
+
         # When measuringpointid is specified, don't include nodeID or includeSubNodes
         # The API doesn't allow multiple selection parameters together
         if measuring_point_id is not None:
@@ -369,7 +369,7 @@ class EcoGuardAPI:
         query_parts = []
         for key, value in params.items():
             query_parts.append(f"{key}={value}")
-        
+
         # Add utilities with proper URL encoding (e.g., HW[con] -> HW%5Bcon%5D)
         if utilities:
             for util in utilities:
@@ -397,7 +397,7 @@ class EcoGuardAPI:
         start_to: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """Get billing results for a node.
-        
+
         Args:
             node_id: Node ID
             start_from: Optional start timestamp (Unix timestamp)
