@@ -24,8 +24,12 @@ from .translations import (
     get_translation_default,
 )
 from .entity_registry_updater import (
-    get_entity_id_by_unique_id,
     update_entity_registry_with_timeout,
+)
+from .sensor_helpers import (
+    async_update_entity_registry_name,
+    slugify_name,
+    utility_code_to_slug,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -39,80 +43,6 @@ _sensor_fetch_lock = asyncio.Lock()
 
 
 
-async def _async_update_entity_registry_name(
-    sensor: SensorEntity, new_name: str
-) -> None:
-    """Update the entity registry name for a sensor.
-
-    This helper function centralizes the logic for updating entity registry names
-    to reduce code duplication across sensor classes.
-
-    Args:
-        sensor: The sensor entity instance
-        new_name: The new name to set in the entity registry
-    """
-    if not hasattr(sensor, '_attr_unique_id') or not sensor._attr_unique_id:
-        return
-
-    if not hasattr(sensor, 'hass') or not sensor.hass:
-        return
-
-    try:
-        entity_registry = async_get_entity_registry(sensor.hass)
-        # Try to get entity_id by unique_id
-        entity_id = get_entity_id_by_unique_id(entity_registry, sensor._attr_unique_id)
-        if entity_id:
-            entity_entry = entity_registry.async_get(entity_id)
-            if entity_entry and entity_entry.name != new_name:
-                entity_registry.async_update_entity(entity_id, name=new_name)
-                _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
-    except Exception as e:
-        _LOGGER.debug("Failed to update entity registry name: %s", e)
-
-
-def _slugify_name(name: str | None) -> str:
-    """Convert a name to a slug format suitable for entity IDs.
-
-    Args:
-        name: The name to slugify
-
-    Returns:
-        Slugified name (lowercase, spaces to underscores, special chars removed)
-    """
-    if not name:
-        return ""
-
-    # Convert to lowercase and replace spaces with underscores
-    slug = name.lower().strip()
-    # Replace spaces and common separators with underscores
-    slug = slug.replace(" ", "_").replace("-", "_").replace(".", "_")
-    # Remove special characters, keep only alphanumeric and underscores
-    slug = "".join(c if c.isalnum() or c == "_" else "" for c in slug)
-    # Remove multiple consecutive underscores
-    while "__" in slug:
-        slug = slug.replace("__", "_")
-    # Remove leading/trailing underscores
-    slug = slug.strip("_")
-
-    return slug
-
-
-def _utility_code_to_slug(utility_code: str) -> str:
-    """Convert utility code to slug format.
-
-    Args:
-        utility_code: Utility code (e.g., "CW", "HW")
-
-    Returns:
-        Slugified utility name (e.g., "cold_water", "hot_water")
-    """
-    utility_map = {
-        "CW": "cold_water",
-        "HW": "hot_water",
-        "E": "electricity",
-        "HE": "heat",
-    }
-    return utility_map.get(utility_code.upper(), utility_code.lower())
 
 
 async def async_setup_entry(
@@ -548,8 +478,8 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
         # Build unique_id following pattern: purpose_group_utility_sensor
         # Home Assistant strips the domain prefix, so we want: consumption_daily_metered_cold_water_kaldtvann_bad
         # Use measuring_point_id to ensure uniqueness across nodes
-        utility_slug = _utility_code_to_slug(utility_code)
-        sensor_name = _slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
+        utility_slug = utility_code_to_slug(utility_code)
+        sensor_name = slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
         unique_id = (
             f"{DOMAIN}_consumption_daily_metered_{utility_slug}_{sensor_name}"
         )
@@ -644,7 +574,7 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
                 _LOGGER.info("Updated sensor name from '%s' to '%s' (lang=%s)", old_name, new_name, lang)
 
             # Always update the entity registry name so it shows correctly in modals
-            await _async_update_entity_registry_name(self, new_name)
+            await async_update_entity_registry_name(self, new_name)
 
             # Also update device name
             device_name = await async_get_translation(
@@ -774,9 +704,9 @@ class EcoGuardLatestReceptionSensor(CoordinatorEntity, SensorEntity):
 
         # Build unique_id following pattern: purpose_group_utility_sensor
         # Home Assistant strips the domain prefix, so we want: reception_last_update_cold_water_kaldtvann_bad
-        sensor_name = _slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
+        sensor_name = slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
         if utility_code:
-            utility_slug = _utility_code_to_slug(utility_code)
+            utility_slug = utility_code_to_slug(utility_code)
             self._attr_unique_id = (
                 f"{DOMAIN}_reception_last_update_{utility_slug}_{sensor_name}"
             )
@@ -860,7 +790,7 @@ class EcoGuardLatestReceptionSensor(CoordinatorEntity, SensorEntity):
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                await _async_update_entity_registry_name(self, new_name)
+                await async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -998,7 +928,7 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
         # Build unique ID following pattern: purpose_group_utility
         # Home Assistant strips the domain prefix, so we want: consumption_monthly_aggregated_cold_water
-        utility_slug = _utility_code_to_slug(utility_code)
+        utility_slug = utility_code_to_slug(utility_code)
         if aggregate_type == "con":
             unique_id_suffix = f"consumption_monthly_aggregated_{utility_slug}"
         elif aggregate_type == "price" and cost_type == "estimated":
@@ -1100,7 +1030,7 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                await _async_update_entity_registry_name(self, new_name)
+                await async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -1432,7 +1362,7 @@ class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator],
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                await _async_update_entity_registry_name(self, new_name)
+                await async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -1656,7 +1586,7 @@ class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                await _async_update_entity_registry_name(self, new_name)
+                await async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -1936,7 +1866,7 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                await _async_update_entity_registry_name(self, new_name)
+                await async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -2093,7 +2023,7 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
         self._attr_name = f"{consumption_daily} {metered} - {utility_name}"
 
         # Build unique_id following pattern: consumption_daily_metered_utility
-        utility_slug = _utility_code_to_slug(utility_code)
+        utility_slug = utility_code_to_slug(utility_code)
         self._attr_unique_id = f"{DOMAIN}_consumption_daily_metered_{utility_slug}"
 
         # Sensor attributes
@@ -2168,7 +2098,7 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                await _async_update_entity_registry_name(self, new_name)
+                await async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -2399,7 +2329,7 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                await _async_update_entity_registry_name(self, new_name)
+                await async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -2561,8 +2491,8 @@ class EcoGuardDailyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], 
             self._attr_name = f'{cost_daily} {metered} - {meter} "{measuring_point_display}" ({utility_name})'
 
         # Build unique_id following pattern: cost_daily_metered/estimated_utility_sensor
-        utility_slug = _utility_code_to_slug(utility_code)
-        sensor_name = _slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
+        utility_slug = utility_code_to_slug(utility_code)
+        sensor_name = slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
         if cost_type == "estimated":
             unique_id_suffix = f"cost_daily_estimated_{utility_slug}_{sensor_name}"
         else:
@@ -2651,7 +2581,7 @@ class EcoGuardDailyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], 
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                await _async_update_entity_registry_name(self, new_name)
+                await async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -2810,7 +2740,7 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             self._attr_name = f"{cost_daily} {metered} - {utility_name}"
 
         # Build unique_id following pattern: cost_daily_metered/estimated_utility
-        utility_slug = _utility_code_to_slug(utility_code)
+        utility_slug = utility_code_to_slug(utility_code)
         if cost_type == "estimated":
             self._attr_unique_id = f"{DOMAIN}_cost_daily_estimated_{utility_slug}"
         else:
@@ -2895,7 +2825,7 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                await _async_update_entity_registry_name(self, new_name)
+                await async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -3217,7 +3147,7 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                await _async_update_entity_registry_name(self, new_name)
+                await async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -3526,8 +3456,8 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
         self._attr_name = f'{aggregate_name} - {meter} "{measuring_point_display}" ({utility_name})'
 
         # Build unique_id following pattern: purpose_group_utility_sensor
-        utility_slug = _utility_code_to_slug(utility_code)
-        sensor_name = _slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
+        utility_slug = utility_code_to_slug(utility_code)
+        sensor_name = slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
         if aggregate_type == "con":
             unique_id_suffix = f"consumption_monthly_metered_{utility_slug}_{sensor_name}"
         elif aggregate_type == "price" and cost_type == "estimated":
@@ -3636,7 +3566,7 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                await _async_update_entity_registry_name(self, new_name)
+                await async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -4283,7 +4213,7 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
                 self.async_write_ha_state()
 
                 # Also update the entity registry name so it shows correctly in modals
-                await _async_update_entity_registry_name(self, new_name)
+                await async_update_entity_registry_name(self, new_name)
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
