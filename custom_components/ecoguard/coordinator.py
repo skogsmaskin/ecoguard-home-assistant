@@ -494,10 +494,9 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             to_time = int(tomorrow_start.timestamp())
             
-            # Smart time range: Fetch only 7 days initially for fast startup
-            # Full 30-day fetch can happen in background later if needed
-            # This significantly reduces initial load time
-            initial_days = 7
+            # Fetch 30 days of data for comprehensive cache coverage
+            # Since this runs asynchronously in the background, it doesn't block startup
+            initial_days = 30
             from_time = int((datetime.combine(now_tz.date() - timedelta(days=initial_days), datetime.min.time(), tz)).timestamp())
             
             _LOGGER.debug("Batch fetch: Fetching %d days of data (from %s to %s)", 

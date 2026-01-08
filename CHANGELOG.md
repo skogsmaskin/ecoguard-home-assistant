@@ -7,8 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.0.0] - 2026-01-07
 
-Major bump because breaking changes. Strictly following semantic versioning, though v. 1.0.0 was
-released yesterday :)
+Major bump because breaking changes. Strictly following semantic versioning.
 
 ### Added
 
@@ -78,19 +77,49 @@ released yesterday :)
 - Fixed daily cost sensors to properly use last available day with data (accounting for API delays)
 - Fixed "Cost Daily Metered" sensors to strictly use actual price data (no fallback to estimated)
 - Improved lookback period for daily cost data (increased to 30 days)
+- Fixed estimated cost sensors to properly calculate hot water costs using Nord Pool spot prices
+  - Daily estimated cost sensors now trigger async fetch when metered data unavailable
+  - Monthly estimated aggregate sensors now trigger async fetch when cache data missing
+  - Hot water estimated costs calculated using spot prices, calibration ratio, and cold water rates
+- Fixed combined water cost sensors to only show value when both hot and cold water data available
+- Fixed estimated daily cost sensors to use metered cost when available (estimated = metered when metered exists)
 
 ### Technical Improvements
+
+#### Performance & Startup
+- **Fast startup**: Implemented cache-first approach for instant sensor creation
+  - Sensors created immediately with "Unknown" state, no API calls during startup
+  - Data fetching deferred until after Home Assistant fully starts
+  - Post-setup data fetching triggered after config flow completion
+  - Background batch fetching prevents blocking UI during startup
+- **Optimized data fetching**: 
+  - Batch fetching consolidates multiple API calls into efficient requests
+  - Smart cache reuse: monthly aggregates calculated from daily cache data
+  - Non-blocking coordinator refresh prevents startup delays
+  - Initial 30-day fetch for comprehensive data coverage (async, non-blocking)
 
 #### Code Quality
 - Standardized entity registry updates to use `unique_id` instead of `entity_id` for better reliability
 - Improved translation system with consistent fallback handling
 - Added comprehensive test coverage for new sensor types
 - Updated all tests to reflect new naming conventions and entity formats
+- Migrated to `ConfigEntry.runtime_data` for type-safe runtime data storage
+- Improved error handling with proper resource cleanup (API session closing)
 
 #### Entity Registry Management
 - Improved entity registry update logic to handle timing issues
 - Added background task scheduling for entity registry updates after entity creation
 - Better handling of existing vs. new entities when disabling individual meter sensors
+
+#### Data Layer Improvements
+- **Centralized API calls**: All HTTP requests moved to coordinator, sensors read from cache
+- **Smart caching**: Daily consumption and price data cached for reuse in monthly calculations
+- **Estimated cost calculations**: 
+  - Hot water estimated costs use Nord Pool spot prices with calibration
+  - Cold water estimated costs fall back to metered when available
+  - Combined water sensors wait for both utilities before showing value
+- **Cache management**: Deep copy data when updating coordinator to ensure HA change detection
+- **Explicit listener notifications**: Proper update mechanisms to ensure sensors receive data
 
 ### Documentation
 - Updated README.md with comprehensive sensor documentation
