@@ -29,6 +29,10 @@ _LOGGER = logging.getLogger(__name__)
 # Cache for translation files
 _translation_cache: dict[str, dict[str, Any]] = {}
 
+# Track pending translation file loads to prevent duplicate async calls
+_pending_translation_loads: dict[str, asyncio.Task] = {}
+_translation_load_lock = asyncio.Lock()
+
 # Counter for staggering sensor data fetches to avoid overwhelming the API
 _sensor_fetch_counter = 0
 _sensor_fetch_lock = asyncio.Lock()
@@ -130,20 +134,96 @@ def _load_translation_file_sync(lang: str) -> dict[str, Any] | None:
 
 
 async def _load_translation_file(hass: HomeAssistant, lang: str) -> dict[str, Any] | None:
-    """Load translation file asynchronously to access sensor section."""
+    """Load translation file asynchronously to access sensor section with request deduplication."""
     # Check cache first
     if lang in _translation_cache:
         return _translation_cache[lang]
 
-    # Run the blocking file I/O in a thread pool
+    # Check if there's already a pending load for this language
+    # Acquire lock only to check/update the pending loads dict (never await inside lock)
+    task_to_await = None
+    async with _translation_load_lock:
+        if lang in _pending_translation_loads:
+            pending_task = _pending_translation_loads[lang]
+            if not pending_task.done():
+                # There's a pending task, we'll await it outside the lock
+                task_to_await = pending_task
+            else:
+                # Task completed, remove it
+                del _pending_translation_loads[lang]
+
+    # If there's a pending task, wait for it outside the lock
+    if task_to_await is not None:
+        _LOGGER.debug("Waiting for pending translation file load for lang %s", lang)
+        try:
+            data = await task_to_await
+            return data
+        except (asyncio.CancelledError, Exception) as err:
+            _LOGGER.debug("Pending translation load failed for lang %s: %s", lang, err)
+            # Remove failed/cancelled task
+            async with _translation_load_lock:
+                if lang in _pending_translation_loads:
+                    # Check if it's the same task (might have been replaced)
+                    if _pending_translation_loads[lang] is task_to_await:
+                        del _pending_translation_loads[lang]
+            # Re-raise CancelledError, but for other exceptions, continue to create new task
+            if isinstance(err, asyncio.CancelledError):
+                raise
+
+    # Create async task for loading
+    async def _load_translation_task() -> dict[str, Any] | None:
+        try:
+            # Run the blocking file I/O in a thread pool
+            data = await asyncio.to_thread(_load_translation_file_sync, lang)
+            if data:
+                _LOGGER.debug("Loaded translation file for lang %s, keys in common: %s", lang, list(data.get("common", {}).keys()))
+            return data
+        except Exception as e:
+            _LOGGER.debug("Failed to load translation file for lang %s: %s", lang, e)
+            return None
+        finally:
+            # Clean up pending load
+            async with _translation_load_lock:
+                if lang in _pending_translation_loads:
+                    # Only remove if it's this task (might have been replaced)
+                    if _pending_translation_loads[lang].done():
+                        del _pending_translation_loads[lang]
+
+    # Create and track the task (acquire lock only for the dict update)
+    async with _translation_load_lock:
+        # Double-check in case another task started while we were waiting
+        if lang in _pending_translation_loads:
+            pending_task = _pending_translation_loads[lang]
+            if not pending_task.done():
+                # Another task started, use that one instead
+                task_to_await = pending_task
+            else:
+                del _pending_translation_loads[lang]
+                task_to_await = None
+        else:
+            task_to_await = None
+
+        if task_to_await is None:
+            # Create new task
+            task = asyncio.create_task(_load_translation_task())
+            _pending_translation_loads[lang] = task
+            task_to_await = task
+
+    # Await the task outside the lock
     try:
-        data = await asyncio.to_thread(_load_translation_file_sync, lang)
-        if data:
-            _LOGGER.debug("Loaded translation file for lang %s, keys in common: %s", lang, list(data.get("common", {}).keys()))
-        return data
-    except Exception as e:
-        _LOGGER.debug("Failed to load translation file for lang %s: %s", lang, e)
-        return None
+        return await task_to_await
+    except asyncio.CancelledError:
+        # Task was cancelled, clean up
+        async with _translation_load_lock:
+            if lang in _pending_translation_loads and _pending_translation_loads[lang] is task_to_await:
+                del _pending_translation_loads[lang]
+        raise
+    except Exception as err:
+        # Clean up on error
+        async with _translation_load_lock:
+            if lang in _pending_translation_loads and _pending_translation_loads[lang] is task_to_await and _pending_translation_loads[lang].done():
+                del _pending_translation_loads[lang]
+        raise
 
 
 async def _async_get_translation(hass: HomeAssistant, key: str, **kwargs: Any) -> str:
