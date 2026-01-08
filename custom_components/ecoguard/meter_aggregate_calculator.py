@@ -244,7 +244,7 @@ class MeterAggregateCalculator:
                         month,
                     )
                     return None
-                
+
                 # If we have data but total is 0, and this is an estimated cost request,
                 # fall back to calculation instead of returning 0
                 if total_value == 0.0 and cost_type == "estimated":

@@ -1,4 +1,4 @@
-"""Nord Pool spot price integration for EcoGuard."""
+"""Nord Pool spot price integration for Home Assistant EcoGuard."""
 
 from __future__ import annotations
 

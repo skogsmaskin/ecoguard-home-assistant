@@ -18,17 +18,17 @@ STORAGE_KEY = f"{DOMAIN}_cache"
 
 async def load_cached_data(hass: HomeAssistant, key: str) -> dict[str, Any] | None:
     """Load cached data for a config entry.
-    
+
     Args:
         hass: Home Assistant instance
         key: Storage key (can be entry_id or domain)
-        
+
     Returns:
         Cached data dict with keys: installations, measuring_points, node_data, settings
         Returns None if no cache exists or on error
     """
     store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}_{key}")
-    
+
     try:
         data = await store.async_load()
         if data:
@@ -51,7 +51,7 @@ async def save_cached_data(
     settings: list[dict[str, Any]] | None = None,
 ) -> None:
     """Save cached data for a config entry.
-    
+
     Args:
         hass: Home Assistant instance
         key: Storage key (can be entry_id or domain)
@@ -61,10 +61,10 @@ async def save_cached_data(
         settings: List of settings to cache
     """
     store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}_{key}")
-    
+
     # Load existing data first to preserve fields we're not updating
     existing_data = await load_cached_data(hass, key) or {}
-    
+
     # Update only the fields that are provided
     if installations is not None:
         existing_data["installations"] = installations
@@ -74,7 +74,7 @@ async def save_cached_data(
         existing_data["node_data"] = node_data
     if settings is not None:
         existing_data["settings"] = settings
-    
+
     try:
         await store.async_save(existing_data)
         _LOGGER.debug("Saved cached data for key %s", key)
@@ -86,7 +86,7 @@ async def migrate_cache_from_domain(
     hass: HomeAssistant, domain: str, entry_id: str
 ) -> None:
     """Migrate cached data from domain key to entry_id key.
-    
+
     Args:
         hass: Home Assistant instance
         domain: Domain name used as temporary key
