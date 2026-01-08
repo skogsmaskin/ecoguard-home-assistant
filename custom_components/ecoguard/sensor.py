@@ -6,10 +6,8 @@ from datetime import datetime, timezone
 from typing import Any
 import logging
 import math
-import json
 import asyncio
 import zoneinfo
-from pathlib import Path
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass, SensorDeviceClass
 from homeassistant.config_entries import ConfigEntry
@@ -24,15 +22,13 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import EcoGuardDataUpdateCoordinator
 from .helpers import round_to_max_digits
+from .translations import (
+    clear_translation_cache,
+    async_get_translation,
+    get_translation_default,
+)
 
 _LOGGER = logging.getLogger(__name__)
-
-# Cache for translation files
-_translation_cache: dict[str, dict[str, Any]] = {}
-
-# Track pending translation file loads to prevent duplicate async calls
-_pending_translation_loads: dict[str, asyncio.Task] = {}
-_translation_load_lock = asyncio.Lock()
 
 # Counter for staggering sensor data fetches to avoid overwhelming the API
 _sensor_fetch_counter = 0
@@ -80,246 +76,6 @@ def _get_entity_id_by_unique_id(
         return None
 
 
-def _clear_translation_cache() -> None:
-    """Clear the translation cache (useful for development/reloads)."""
-    global _translation_cache
-    _translation_cache.clear()
-    _LOGGER.debug("Translation cache cleared")
-
-
-def _load_translation_file_sync(lang: str) -> dict[str, Any] | None:
-    """Load translation file synchronously (to be run in thread)."""
-    try:
-        # Check cache first
-        if lang in _translation_cache:
-            return _translation_cache[lang]
-
-        # Get the integration directory
-        integration_dir = Path(__file__).parent
-
-        # For English, use strings.json (Home Assistant standard)
-        if lang == "en":
-            strings_file = integration_dir / "strings.json"
-            if strings_file.exists():
-                with open(strings_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    _translation_cache["en"] = data
-                    return data
-            # Fallback to en.json if strings.json doesn't exist
-            translation_file = integration_dir / "translations" / "en.json"
-            if translation_file.exists():
-                with open(translation_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    _translation_cache["en"] = data
-                    return data
-        else:
-            # For other languages, try translations/{lang}.json
-            translation_file = integration_dir / "translations" / f"{lang}.json"
-            if translation_file.exists():
-                with open(translation_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    _translation_cache[lang] = data
-                    return data
-
-            # Fallback to strings.json for English if language file doesn't exist
-            strings_file = integration_dir / "strings.json"
-            if strings_file.exists():
-                with open(strings_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    _translation_cache["en"] = data
-                    return data
-    except Exception as e:
-        _LOGGER.debug("Failed to load translation file for lang %s: %s", lang, e)
-
-    return None
-
-
-async def _load_translation_file(hass: HomeAssistant, lang: str) -> dict[str, Any] | None:
-    """Load translation file asynchronously to access sensor section with request deduplication."""
-    # Check cache first
-    if lang in _translation_cache:
-        return _translation_cache[lang]
-
-    # Check if there's already a pending load for this language
-    # Acquire lock only to check/update the pending loads dict (never await inside lock)
-    task_to_await = None
-    async with _translation_load_lock:
-        if lang in _pending_translation_loads:
-            pending_task = _pending_translation_loads[lang]
-            if not pending_task.done():
-                # There's a pending task, we'll await it outside the lock
-                task_to_await = pending_task
-            else:
-                # Task completed, remove it
-                del _pending_translation_loads[lang]
-
-    # If there's a pending task, wait for it outside the lock
-    if task_to_await is not None:
-        _LOGGER.debug("Waiting for pending translation file load for lang %s", lang)
-        try:
-            data = await task_to_await
-            return data
-        except (asyncio.CancelledError, Exception) as err:
-            _LOGGER.debug("Pending translation load failed for lang %s: %s", lang, err)
-            # Remove failed/cancelled task
-            async with _translation_load_lock:
-                if lang in _pending_translation_loads:
-                    # Check if it's the same task (might have been replaced)
-                    if _pending_translation_loads[lang] is task_to_await:
-                        del _pending_translation_loads[lang]
-            # Re-raise CancelledError, but for other exceptions, continue to create new task
-            if isinstance(err, asyncio.CancelledError):
-                raise
-
-    # Create async task for loading
-    async def _load_translation_task() -> dict[str, Any] | None:
-        try:
-            # Run the blocking file I/O in a thread pool
-            data = await asyncio.to_thread(_load_translation_file_sync, lang)
-            if data:
-                _LOGGER.debug("Loaded translation file for lang %s, keys in common: %s", lang, list(data.get("common", {}).keys()))
-            return data
-        except Exception as e:
-            _LOGGER.debug("Failed to load translation file for lang %s: %s", lang, e)
-            return None
-        finally:
-            # Clean up pending load
-            async with _translation_load_lock:
-                if lang in _pending_translation_loads:
-                    # Only remove if it's this task (might have been replaced)
-                    if _pending_translation_loads[lang].done():
-                        del _pending_translation_loads[lang]
-
-    # Create and track the task (acquire lock only for the dict update)
-    async with _translation_load_lock:
-        # Double-check in case another task started while we were waiting
-        if lang in _pending_translation_loads:
-            pending_task = _pending_translation_loads[lang]
-            if not pending_task.done():
-                # Another task started, use that one instead
-                task_to_await = pending_task
-            else:
-                del _pending_translation_loads[lang]
-                task_to_await = None
-        else:
-            task_to_await = None
-
-        if task_to_await is None:
-            # Create new task
-            task = asyncio.create_task(_load_translation_task())
-            _pending_translation_loads[lang] = task
-            task_to_await = task
-
-    # Await the task outside the lock
-    try:
-        return await task_to_await
-    except asyncio.CancelledError:
-        # Task was cancelled, clean up
-        async with _translation_load_lock:
-            if lang in _pending_translation_loads and _pending_translation_loads[lang] is task_to_await:
-                del _pending_translation_loads[lang]
-        raise
-    except Exception as err:
-        # Clean up on error
-        async with _translation_load_lock:
-            if lang in _pending_translation_loads and _pending_translation_loads[lang] is task_to_await and _pending_translation_loads[lang].done():
-                del _pending_translation_loads[lang]
-        raise
-
-
-async def _async_get_translation(hass: HomeAssistant, key: str, **kwargs: Any) -> str:
-    """Get a translated string from the integration's translation files."""
-    try:
-        # Get the current language from hass.config.language
-        lang = getattr(hass.config, 'language', 'en')
-
-        # Load translation file directly to access common section
-        # (The translation helper only loads config section)
-        translation_data = await _load_translation_file(hass, lang)
-
-        if translation_data and "common" in translation_data:
-            common_data = translation_data["common"]
-
-            # Convert key from "utility.hw" to "utility_hw" format
-            translation_key = key.replace(".", "_")
-
-            if translation_key in common_data:
-                text = common_data[translation_key]
-                if isinstance(text, str):
-                    _LOGGER.debug("Found translation for key %s (as %s): %s (lang=%s)", key, translation_key, text, lang)
-                    return text.format(**kwargs) if kwargs else text
-            else:
-                _LOGGER.debug("Translation key %s (as %s) not found in common section (lang=%s). Available keys: %s",
-                             key, translation_key, lang, list(common_data.keys())[:10])
-
-        # Fallback to English
-        if lang != "en":
-            translation_data = await _load_translation_file(hass, "en")
-            if translation_data and "common" in translation_data:
-                common_data = translation_data["common"]
-                translation_key = key.replace(".", "_")
-
-                if translation_key in common_data:
-                    text = common_data[translation_key]
-                    if isinstance(text, str):
-                        return text.format(**kwargs) if kwargs else text
-    except Exception as e:
-        _LOGGER.warning("Translation lookup failed for key %s (lang=%s): %s", key, getattr(hass.config, 'language', 'en'), e)
-
-    # Fallback to English defaults
-    defaults = {
-        "utility.hw": "Hot Water",
-        "utility.cw": "Cold Water",
-        "name.estimated": "Estimated",
-        "name.metered": "Metered",
-        "name.measuring_point": "Measuring Point {id}",
-        "name.meter": "Meter",
-        "name.device_name": "EcoGuard Node {node_id}",
-        "name.combined_water": "Combined Water",
-        "name.consumption_daily": "Consumption Daily",
-        "name.cost_daily": "Cost Daily",
-        "name.consumption_monthly_aggregated": "Consumption Monthly Aggregated",
-        "name.cost_monthly_aggregated": "Cost Monthly Aggregated",
-        "name.cost_monthly_other_items": "Cost Monthly Other Items",
-        "name.combined": "Combined",
-        "name.all_utilities": "All Utilities",
-        "name.cost_monthly_estimated_final_settlement": "Cost Monthly Estimated Final Settlement",
-        "name.reception_last_update": "Reception Last Update",
-    }
-
-    default = defaults.get(key, key)
-    if default == key:
-        _LOGGER.debug("Translation key %s not found in defaults dictionary, returning key as-is", key)
-    return default.format(**kwargs) if kwargs else default
-
-
-def _get_translation_default(key: str, **kwargs: Any) -> str:
-    """Get English default translation (for use in __init__ to avoid blocking I/O).
-
-    Actual translations will be loaded in async_added_to_hass.
-    """
-    defaults = {
-        "utility.hw": "Hot Water",
-        "utility.cw": "Cold Water",
-        "name.estimated": "Estimated",
-        "name.metered": "Metered",
-        "name.measuring_point": "Measuring Point {id}",
-        "name.meter": "Meter",
-        "name.device_name": "EcoGuard Node {node_id}",
-        "name.combined_water": "Combined Water",
-        "name.consumption_daily": "Consumption Daily",
-        "name.cost_daily": "Cost Daily",
-        "name.consumption_monthly_aggregated": "Consumption Monthly Aggregated",
-        "name.cost_monthly_aggregated": "Cost Monthly Aggregated",
-        "name.cost_monthly_other_items": "Cost Monthly Other Items",
-        "name.combined": "Combined",
-        "name.all_utilities": "All Utilities",
-        "name.cost_monthly_estimated_final_settlement": "Cost Monthly Estimated Final Settlement",
-        "name.reception_last_update": "Reception Last Update",
-    }
-
-    default = defaults.get(key, key)
-    return default.format(**kwargs) if kwargs else default
 
 
 async def _async_update_entity_registry_name(
@@ -405,7 +161,7 @@ async def async_setup_entry(
 ) -> None:
     """Set up EcoGuard sensors from a config entry."""
     # Clear translation cache to ensure fresh translations are loaded
-    _clear_translation_cache()
+    clear_translation_cache()
 
     # Reset sensor fetch counter for this setup
     global _sensor_fetch_counter
@@ -800,11 +556,11 @@ async def async_setup_entry(
             # Fetch all common translation keys in parallel
             if not hass.is_stopping:
                 translation_tasks = [
-                    _async_get_translation(hass, key) for key in translation_keys_to_fetch
+                    async_get_translation(hass, key) for key in translation_keys_to_fetch
                 ]
                 # Also fetch utility translations
                 for utility_code in utility_codes:
-                    translation_tasks.append(_async_get_translation(hass, f"utility.{utility_code}"))
+                    translation_tasks.append(async_get_translation(hass, f"utility.{utility_code}"))
 
                 # Fetch all translations in parallel
                 translation_results = await asyncio.gather(*translation_tasks, return_exceptions=True)
@@ -842,11 +598,11 @@ async def async_setup_entry(
                             return result.format(**kwargs)
                         except (KeyError, ValueError):
                             # If formatting fails, fall back to async_get_translation
-                            return await _async_get_translation(hass, key, **kwargs)
+                            return await async_get_translation(hass, key, **kwargs)
                     return result
 
                 # Not in cache, fetch it
-                result = await _async_get_translation(hass, key, **kwargs)
+                result = await async_get_translation(hass, key, **kwargs)
                 translation_cache[cache_key] = result
                 return result
 
@@ -1108,10 +864,10 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
         if measuring_point_name:
             measuring_point_display = measuring_point_name
         else:
-            measuring_point_display = _get_translation_default("name.measuring_point", id=measuring_point_id)
+            measuring_point_display = get_translation_default("name.measuring_point", id=measuring_point_id)
 
         # Use English defaults here; will be updated in async_added_to_hass with proper translations
-        utility_name = _get_translation_default(f"utility.{utility_code.lower()}")
+        utility_name = get_translation_default(f"utility.{utility_code.lower()}")
         if utility_name == f"utility.{utility_code.lower()}":  # Fallback if not found
             utility_name = utility_code
 
@@ -1119,8 +875,8 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
         # This ensures entity_id starts with "consumption_daily_" when slugified
         # The name will be updated in async_added_to_hass with proper translations
         # but the entity_id is already generated from this initial name
-        consumption_daily = _get_translation_default("name.consumption_daily")
-        meter = _get_translation_default("name.meter")
+        consumption_daily = get_translation_default("name.consumption_daily")
+        meter = get_translation_default("name.meter")
         self._attr_name = f'{consumption_daily} - {meter} "{measuring_point_display}" ({utility_name})'
 
         # Build unique_id following pattern: purpose_group_utility_sensor
@@ -1136,7 +892,7 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
-        device_name = _get_translation_default("name.device_name", node_id=coordinator.node_id)
+        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(coordinator.node_id))},
             "name": device_name,
@@ -1195,25 +951,25 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
             if self._measuring_point_name:
                 measuring_point_display = self._measuring_point_name
             else:
-                measuring_point_display = await _async_get_translation(
+                measuring_point_display = await async_get_translation(
                     self._hass, "name.measuring_point", id=self._measuring_point_id
                 )
                 _LOGGER.debug("Measuring point display: %s", measuring_point_display)
 
-            utility_name = await _async_get_translation(
+            utility_name = await async_get_translation(
                 self._hass, f"utility.{self._utility_code.lower()}"
             )
             if utility_name == f"utility.{self._utility_code.lower()}":  # Fallback if not found
                 utility_name = self._utility_code
             _LOGGER.debug("Utility name: %s", utility_name)
 
-            consumption_daily = await _async_get_translation(self._hass, "name.consumption_daily")
+            consumption_daily = await async_get_translation(self._hass, "name.consumption_daily")
             _LOGGER.debug("Consumption daily: %s", consumption_daily)
 
             # Update the name (this is the display name, not the entity_id)
             # Format: "Consumption Daily - Meter "Measuring Point" (Utility)"
             # Keep "Consumption Daily" format to maintain entity_id starting with "consumption_daily_"
-            meter = await _async_get_translation(self._hass, "name.meter")
+            meter = await async_get_translation(self._hass, "name.meter")
             new_name = f'{consumption_daily} - {meter} "{measuring_point_display}" ({utility_name})'
             if self._attr_name != new_name:
                 old_name = self._attr_name
@@ -1225,7 +981,7 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
             await _async_update_entity_registry_name(self, new_name)
 
             # Also update device name
-            device_name = await _async_get_translation(
+            device_name = await async_get_translation(
                 self._hass, "name.device_name", node_id=self.coordinator.node_id
             )
             if self._attr_device_info.get("name") != device_name:
@@ -1326,12 +1082,12 @@ class EcoGuardLatestReceptionSensor(CoordinatorEntity, SensorEntity):
         if measuring_point_name:
             measuring_point_display = measuring_point_name
         else:
-            measuring_point_display = _get_translation_default("name.measuring_point", id=measuring_point_id)
+            measuring_point_display = get_translation_default("name.measuring_point", id=measuring_point_id)
 
         # Use English defaults here; will be updated in async_added_to_hass
         utility_suffix = ""
         if utility_code:
-            utility_name = _get_translation_default(f"utility.{utility_code.lower()}")
+            utility_name = get_translation_default(f"utility.{utility_code.lower()}")
             if utility_name == f"utility.{utility_code.lower()}":  # Fallback if not found
                 utility_name = utility_code
             utility_suffix = f" ({utility_name})"
@@ -1339,11 +1095,11 @@ class EcoGuardLatestReceptionSensor(CoordinatorEntity, SensorEntity):
         # Format: "Reception Last Update - Meter "Measuring Point" (Utility)"
         # This ensures entity_id starts with "reception_last_update_" when slugified
         # This will be updated in async_added_to_hass with proper translations
-        reception_last_update = _get_translation_default("name.reception_last_update")
-        meter = _get_translation_default("name.meter")
+        reception_last_update = get_translation_default("name.reception_last_update")
+        meter = get_translation_default("name.meter")
         if utility_suffix:
             # utility_suffix already includes parentheses, so we need to extract just the utility name
-            utility_name = _get_translation_default(f"utility.{utility_code.lower()}")
+            utility_name = get_translation_default(f"utility.{utility_code.lower()}")
             if utility_name == f"utility.{utility_code.lower()}":  # Fallback if not found
                 utility_name = utility_code
             self._attr_name = f'{reception_last_update} - {meter} "{measuring_point_display}" ({utility_name})'
@@ -1365,7 +1121,7 @@ class EcoGuardLatestReceptionSensor(CoordinatorEntity, SensorEntity):
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
-        device_name = _get_translation_default("name.device_name", node_id=coordinator.node_id)
+        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(coordinator.node_id))},
             "name": device_name,
@@ -1415,17 +1171,17 @@ class EcoGuardLatestReceptionSensor(CoordinatorEntity, SensorEntity):
             if self._measuring_point_name:
                 measuring_point_display = self._measuring_point_name
             else:
-                measuring_point_display = await _async_get_translation(
+                measuring_point_display = await async_get_translation(
                     self._hass, "name.measuring_point", id=self._measuring_point_id
                 )
 
             # Keep "Reception Last Update" format to maintain entity_id starting with "reception_last_update_"
             # Format: "Reception Last Update - Meter "Measuring Point" (Utility)"
             # This groups similar sensors together when sorted alphabetically
-            reception_last_update = await _async_get_translation(self._hass, "name.reception_last_update")
-            meter = await _async_get_translation(self._hass, "name.meter")
+            reception_last_update = await async_get_translation(self._hass, "name.reception_last_update")
+            meter = await async_get_translation(self._hass, "name.meter")
             if self._utility_code:
-                utility_name = await _async_get_translation(
+                utility_name = await async_get_translation(
                     self._hass, f"utility.{self._utility_code.lower()}"
                 )
                 if utility_name == f"utility.{self._utility_code.lower()}":  # Fallback if not found
@@ -1551,23 +1307,23 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
         # Build sensor name
         # Use English defaults here; will be updated in async_added_to_hass
-        utility_name = _get_translation_default(f"utility.{utility_code.lower()}")
+        utility_name = get_translation_default(f"utility.{utility_code.lower()}")
         if utility_name == f"utility.{utility_code.lower()}":  # Fallback if not found
             utility_name = utility_code
 
         if aggregate_type == "con":
             # Use "Consumption Monthly Aggregated" format to ensure entity_id starts with "consumption_monthly_aggregated_"
-            aggregate_name = _get_translation_default("name.consumption_monthly_aggregated")
+            aggregate_name = get_translation_default("name.consumption_monthly_aggregated")
         else:
             # Use "Cost Monthly Aggregated" format to ensure entity_id starts with "cost_monthly_aggregated_"
-            aggregate_name = _get_translation_default("name.cost_monthly_aggregated")
+            aggregate_name = get_translation_default("name.cost_monthly_aggregated")
 
         # Add cost type suffix for price sensors
         if aggregate_type == "price" and cost_type == "estimated":
-            estimated = _get_translation_default("name.estimated")
+            estimated = get_translation_default("name.estimated")
             aggregate_name = f"{aggregate_name} {estimated}"
         elif aggregate_type == "price" and cost_type == "actual":
-            metered = _get_translation_default("name.metered")
+            metered = get_translation_default("name.metered")
             aggregate_name = f"{aggregate_name} {metered}"
 
         # Format: "Aggregate Name - Utility"
@@ -1591,7 +1347,7 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
-        device_name = _get_translation_default("name.device_name", node_id=coordinator.node_id)
+        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(coordinator.node_id))},
             "name": device_name,
@@ -1650,7 +1406,7 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
             return
 
         try:
-            utility_name = await _async_get_translation(
+            utility_name = await async_get_translation(
                 self._hass, f"utility.{self._utility_code.lower()}"
             )
             if utility_name == f"utility.{self._utility_code.lower()}":
@@ -1658,16 +1414,16 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
             if self._aggregate_type == "con":
                 # Keep "Consumption Monthly Aggregated" format to maintain entity_id starting with "consumption_monthly_aggregated_"
-                aggregate_name = await _async_get_translation(self._hass, "name.consumption_monthly_aggregated")
+                aggregate_name = await async_get_translation(self._hass, "name.consumption_monthly_aggregated")
             else:
                 # Keep "Cost Monthly Aggregated" format to maintain entity_id starting with "cost_monthly_aggregated_"
-                aggregate_name = await _async_get_translation(self._hass, "name.cost_monthly_aggregated")
+                aggregate_name = await async_get_translation(self._hass, "name.cost_monthly_aggregated")
 
             if self._aggregate_type == "price" and self._cost_type == "estimated":
-                estimated = await _async_get_translation(self._hass, "name.estimated")
+                estimated = await async_get_translation(self._hass, "name.estimated")
                 aggregate_name = f"{aggregate_name} {estimated}"
             elif self._aggregate_type == "price" and self._cost_type == "actual":
-                metered = await _async_get_translation(self._hass, "name.metered")
+                metered = await async_get_translation(self._hass, "name.metered")
                 aggregate_name = f"{aggregate_name} {metered}"
 
             # Format: "Aggregate Name - Utility"
@@ -1901,7 +1657,7 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
             _LOGGER.info("Updated %s (async fetch): %s %s (year=%d, month=%d, cost_type=%s)",
                         self.entity_id, self._attr_native_value, self._attr_native_unit_of_measurement,
                         self._current_year or year, self._current_month or month, cost_type_to_use)
-            
+
             # Note: We don't trigger coordinator updates here because per-meter sensors are now
             # self-sufficient - they fetch aggregate data directly when needed for proportional allocation
         else:
@@ -1935,7 +1691,7 @@ class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator],
 
         # Use "Cost Monthly Other Items" format to ensure entity_id starts with "cost_monthly_other_items"
         # This will be updated in async_added_to_hass with proper translations
-        self._attr_name = _get_translation_default("name.cost_monthly_other_items")
+        self._attr_name = get_translation_default("name.cost_monthly_other_items")
         # Build unique_id following pattern: purpose_group_sensor
         # Home Assistant strips the domain prefix, so we want: cost_monthly_other_items
         self._attr_unique_id = (
@@ -1944,7 +1700,7 @@ class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator],
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
-        device_name = _get_translation_default("name.device_name", node_id=coordinator.node_id)
+        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(coordinator.node_id))},
             "name": device_name,
@@ -2004,7 +1760,7 @@ class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator],
         try:
             # Keep "Cost Monthly Other Items" format to maintain entity_id starting with "cost_monthly_other_items"
             # The translation key might be used for display, but we keep the name format consistent
-            new_name = await _async_get_translation(self._hass, "name.cost_monthly_other_items")
+            new_name = await async_get_translation(self._hass, "name.cost_monthly_other_items")
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
@@ -2144,10 +1900,10 @@ class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
         # Use "Cost Monthly Aggregated" format with "All Utilities" suffix
         # This will be updated in async_added_to_hass with proper translations
-        cost_monthly_aggregated = _get_translation_default("name.cost_monthly_aggregated")
-        all_utilities = _get_translation_default("name.all_utilities")
+        cost_monthly_aggregated = get_translation_default("name.cost_monthly_aggregated")
+        all_utilities = get_translation_default("name.all_utilities")
         if cost_type == "estimated":
-            estimated = _get_translation_default("name.estimated")
+            estimated = get_translation_default("name.estimated")
             self._attr_name = f"{cost_monthly_aggregated} {estimated} - {all_utilities}"
             # Build unique_id following pattern: purpose_group_total_type
             # Home Assistant strips the domain prefix, so we want: cost_monthly_total_estimated
@@ -2155,7 +1911,7 @@ class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
                 f"{DOMAIN}_cost_monthly_total_estimated"
             )
         else:
-            metered = _get_translation_default("name.metered")
+            metered = get_translation_default("name.metered")
             self._attr_name = f"{cost_monthly_aggregated} {metered} - {all_utilities}"
             # Build unique_id following pattern: purpose_group_total_type
             # Home Assistant strips the domain prefix, so we want: cost_monthly_total_metered
@@ -2165,7 +1921,7 @@ class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
-        device_name = _get_translation_default("name.device_name", node_id=coordinator.node_id)
+        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(coordinator.node_id))},
             "name": device_name,
@@ -2221,13 +1977,13 @@ class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
         try:
             # Use "Cost Monthly Aggregated" format with "All Utilities" suffix
-            cost_monthly_aggregated = await _async_get_translation(self._hass, "name.cost_monthly_aggregated")
-            all_utilities = await _async_get_translation(self._hass, "name.all_utilities")
+            cost_monthly_aggregated = await async_get_translation(self._hass, "name.cost_monthly_aggregated")
+            all_utilities = await async_get_translation(self._hass, "name.all_utilities")
             if self._cost_type == "estimated":
-                estimated = await _async_get_translation(self._hass, "name.estimated")
+                estimated = await async_get_translation(self._hass, "name.estimated")
                 new_name = f"{cost_monthly_aggregated} {estimated} - {all_utilities}"
             else:
-                metered = await _async_get_translation(self._hass, "name.metered")
+                metered = await async_get_translation(self._hass, "name.metered")
                 new_name = f"{cost_monthly_aggregated} {metered} - {all_utilities}"
             if self._attr_name != new_name:
                 self._attr_name = new_name
@@ -2380,7 +2136,7 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
 
         # Use "Cost Monthly Estimated Final Settlement" format to ensure entity_id starts with "cost_monthly_estimated_final_settlement_"
         # This will be updated in async_added_to_hass with proper translations
-        self._attr_name = _get_translation_default("name.cost_monthly_estimated_final_settlement")
+        self._attr_name = get_translation_default("name.cost_monthly_estimated_final_settlement")
         # Build unique_id following pattern: purpose_group_sensor
         # Home Assistant strips the domain prefix, so we want: cost_monthly_estimated_final_settlement
         self._attr_unique_id = (
@@ -2389,7 +2145,7 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
-        device_name = _get_translation_default("name.device_name", node_id=coordinator.node_id)
+        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(coordinator.node_id))},
             "name": device_name,
@@ -2508,7 +2264,7 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
 
         try:
             # Keep "Cost Monthly Estimated Final Settlement" format to maintain entity_id starting with "cost_monthly_estimated_final_settlement"
-            new_name = await _async_get_translation(self._hass, "name.cost_monthly_estimated_final_settlement")
+            new_name = await async_get_translation(self._hass, "name.cost_monthly_estimated_final_settlement")
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
@@ -2545,7 +2301,7 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             if self._fetch_task is not None and not self._fetch_task.done():
                 _LOGGER.debug("Skipping duplicate fetch task for %s (task already pending)", self.entity_id)
                 return
-            
+
             if is_starting:
                 # Delay during startup to avoid blocking
                 async def delayed_fetch():
@@ -2661,13 +2417,13 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
         self._utility_code = utility_code
 
         # Build sensor name
-        utility_name = _get_translation_default(f"utility.{utility_code.lower()}")
+        utility_name = get_translation_default(f"utility.{utility_code.lower()}")
         if utility_name == f"utility.{utility_code.lower()}":  # Fallback if not found
             utility_name = utility_code
 
         # Format: "Consumption Daily Metered - Utility"
-        consumption_daily = _get_translation_default("name.consumption_daily")
-        metered = _get_translation_default("name.metered")
+        consumption_daily = get_translation_default("name.consumption_daily")
+        metered = get_translation_default("name.metered")
         self._attr_name = f"{consumption_daily} {metered} - {utility_name}"
 
         # Build unique_id following pattern: consumption_daily_metered_utility
@@ -2675,7 +2431,7 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
         self._attr_unique_id = f"{DOMAIN}_consumption_daily_metered_{utility_slug}"
 
         # Sensor attributes
-        device_name = _get_translation_default("name.device_name", node_id=coordinator.node_id)
+        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(coordinator.node_id))},
             "name": device_name,
@@ -2732,14 +2488,14 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
             return
 
         try:
-            utility_name = await _async_get_translation(
+            utility_name = await async_get_translation(
                 self._hass, f"utility.{self._utility_code.lower()}"
             )
             if utility_name == f"utility.{self._utility_code.lower()}":
                 utility_name = self._utility_code
 
-            consumption_daily = await _async_get_translation(self._hass, "name.consumption_daily")
-            metered = await _async_get_translation(self._hass, "name.metered")
+            consumption_daily = await async_get_translation(self._hass, "name.consumption_daily")
+            metered = await async_get_translation(self._hass, "name.metered")
             new_name = f"{consumption_daily} {metered} - {utility_name}"
             if self._attr_name != new_name:
                 self._attr_name = new_name
@@ -2886,9 +2642,9 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         self._hass = hass
 
         # Format: "Consumption Daily Metered - Combined Water"
-        consumption_daily = _get_translation_default("name.consumption_daily")
-        metered = _get_translation_default("name.metered")
-        water_name = _get_translation_default("name.combined_water")
+        consumption_daily = get_translation_default("name.consumption_daily")
+        metered = get_translation_default("name.metered")
+        water_name = get_translation_default("name.combined_water")
         if water_name == "name.combined_water":  # Fallback if not found
             water_name = "Combined Water"
         self._attr_name = f"{consumption_daily} {metered} - {water_name}"
@@ -2897,7 +2653,7 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         self._attr_unique_id = f"{DOMAIN}_consumption_daily_metered_combined_water"
 
         # Sensor attributes
-        device_name = _get_translation_default("name.device_name", node_id=coordinator.node_id)
+        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(coordinator.node_id))},
             "name": device_name,
@@ -2966,9 +2722,9 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             return
 
         try:
-            consumption_daily = await _async_get_translation(self._hass, "name.consumption_daily")
-            metered = await _async_get_translation(self._hass, "name.metered")
-            water_name = await _async_get_translation(self._hass, "name.combined_water")
+            consumption_daily = await async_get_translation(self._hass, "name.consumption_daily")
+            metered = await async_get_translation(self._hass, "name.metered")
+            water_name = await async_get_translation(self._hass, "name.combined_water")
             if water_name == "name.combined_water":
                 water_name = "Combined Water"
             new_name = f"{consumption_daily} {metered} - {water_name}"
@@ -3122,20 +2878,20 @@ class EcoGuardDailyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], 
         if measuring_point_name:
             measuring_point_display = measuring_point_name
         else:
-            measuring_point_display = _get_translation_default("name.measuring_point", id=measuring_point_id)
+            measuring_point_display = get_translation_default("name.measuring_point", id=measuring_point_id)
 
-        utility_name = _get_translation_default(f"utility.{utility_code.lower()}")
+        utility_name = get_translation_default(f"utility.{utility_code.lower()}")
         if utility_name == f"utility.{utility_code.lower()}":  # Fallback if not found
             utility_name = utility_code
 
         # Format: "Cost Daily Metered/Estimated - Meter "Measuring Point" (Utility)"
-        cost_daily = _get_translation_default("name.cost_daily")
-        meter = _get_translation_default("name.meter")
+        cost_daily = get_translation_default("name.cost_daily")
+        meter = get_translation_default("name.meter")
         if cost_type == "estimated":
-            estimated = _get_translation_default("name.estimated")
+            estimated = get_translation_default("name.estimated")
             self._attr_name = f'{cost_daily} {estimated} - {meter} "{measuring_point_display}" ({utility_name})'
         else:
-            metered = _get_translation_default("name.metered")
+            metered = get_translation_default("name.metered")
             self._attr_name = f'{cost_daily} {metered} - {meter} "{measuring_point_display}" ({utility_name})'
 
         # Build unique_id following pattern: cost_daily_metered/estimated_utility_sensor
@@ -3148,7 +2904,7 @@ class EcoGuardDailyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], 
         self._attr_unique_id = f"{DOMAIN}_{unique_id_suffix}"
 
         # Sensor attributes
-        device_name = _get_translation_default("name.device_name", node_id=coordinator.node_id)
+        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(coordinator.node_id))},
             "name": device_name,
@@ -3205,23 +2961,23 @@ class EcoGuardDailyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], 
             if self._measuring_point_name:
                 measuring_point_display = self._measuring_point_name
             else:
-                measuring_point_display = await _async_get_translation(
+                measuring_point_display = await async_get_translation(
                     self._hass, "name.measuring_point", id=self._measuring_point_id
                 )
 
-            utility_name = await _async_get_translation(
+            utility_name = await async_get_translation(
                 self._hass, f"utility.{self._utility_code.lower()}"
             )
             if utility_name == f"utility.{self._utility_code.lower()}":
                 utility_name = self._utility_code
 
-            cost_daily = await _async_get_translation(self._hass, "name.cost_daily")
-            meter = await _async_get_translation(self._hass, "name.meter")
+            cost_daily = await async_get_translation(self._hass, "name.cost_daily")
+            meter = await async_get_translation(self._hass, "name.meter")
             if self._cost_type == "estimated":
-                estimated = await _async_get_translation(self._hass, "name.estimated")
+                estimated = await async_get_translation(self._hass, "name.estimated")
                 new_name = f'{cost_daily} {estimated} - {meter} "{measuring_point_display}" ({utility_name})'
             else:
-                metered = await _async_get_translation(self._hass, "name.metered")
+                metered = await async_get_translation(self._hass, "name.metered")
                 new_name = f'{cost_daily} {metered} - {meter} "{measuring_point_display}" ({utility_name})'
 
             if self._attr_name != new_name:
@@ -3374,17 +3130,17 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         self._cost_type = cost_type
 
         # Build sensor name
-        utility_name = _get_translation_default(f"utility.{utility_code.lower()}")
+        utility_name = get_translation_default(f"utility.{utility_code.lower()}")
         if utility_name == f"utility.{utility_code.lower()}":  # Fallback if not found
             utility_name = utility_code
 
         # Format: "Cost Daily Metered/Estimated - Utility"
-        cost_daily = _get_translation_default("name.cost_daily")
+        cost_daily = get_translation_default("name.cost_daily")
         if cost_type == "estimated":
-            estimated = _get_translation_default("name.estimated")
+            estimated = get_translation_default("name.estimated")
             self._attr_name = f"{cost_daily} {estimated} - {utility_name}"
         else:
-            metered = _get_translation_default("name.metered")
+            metered = get_translation_default("name.metered")
             self._attr_name = f"{cost_daily} {metered} - {utility_name}"
 
         # Build unique_id following pattern: cost_daily_metered/estimated_utility
@@ -3395,7 +3151,7 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             self._attr_unique_id = f"{DOMAIN}_cost_daily_metered_{utility_slug}"
 
         # Sensor attributes
-        device_name = _get_translation_default("name.device_name", node_id=coordinator.node_id)
+        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(coordinator.node_id))},
             "name": device_name,
@@ -3454,18 +3210,18 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             return
 
         try:
-            utility_name = await _async_get_translation(
+            utility_name = await async_get_translation(
                 self._hass, f"utility.{self._utility_code.lower()}"
             )
             if utility_name == f"utility.{self._utility_code.lower()}":
                 utility_name = self._utility_code
 
-            cost_daily = await _async_get_translation(self._hass, "name.cost_daily")
+            cost_daily = await async_get_translation(self._hass, "name.cost_daily")
             if self._cost_type == "estimated":
-                estimated = await _async_get_translation(self._hass, "name.estimated")
+                estimated = await async_get_translation(self._hass, "name.estimated")
                 new_name = f"{cost_daily} {estimated} - {utility_name}"
             else:
-                metered = await _async_get_translation(self._hass, "name.metered")
+                metered = await async_get_translation(self._hass, "name.metered")
                 new_name = f"{cost_daily} {metered} - {utility_name}"
 
             if self._attr_name != new_name:
@@ -3688,16 +3444,16 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
         self._cost_type = cost_type
 
         # Format: "Cost Daily Metered/Estimated - Combined Water"
-        cost_daily = _get_translation_default("name.cost_daily")
-        water_name = _get_translation_default("name.combined_water")
+        cost_daily = get_translation_default("name.cost_daily")
+        water_name = get_translation_default("name.combined_water")
         if water_name == "name.combined_water":  # Fallback if not found
             water_name = "Combined Water"
 
         if cost_type == "estimated":
-            estimated = _get_translation_default("name.estimated")
+            estimated = get_translation_default("name.estimated")
             self._attr_name = f"{cost_daily} {estimated} - {water_name}"
         else:
-            metered = _get_translation_default("name.metered")
+            metered = get_translation_default("name.metered")
             self._attr_name = f"{cost_daily} {metered} - {water_name}"
 
         # Build unique_id
@@ -3707,7 +3463,7 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
             self._attr_unique_id = f"{DOMAIN}_cost_daily_metered_combined_water"
 
         # Sensor attributes
-        device_name = _get_translation_default("name.device_name", node_id=coordinator.node_id)
+        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(coordinator.node_id))},
             "name": device_name,
@@ -3778,16 +3534,16 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
             return
 
         try:
-            cost_daily = await _async_get_translation(self._hass, "name.cost_daily")
-            water_name = await _async_get_translation(self._hass, "name.combined_water")
+            cost_daily = await async_get_translation(self._hass, "name.cost_daily")
+            water_name = await async_get_translation(self._hass, "name.combined_water")
             if water_name == "name.combined_water":
                 water_name = "Combined Water"
 
             if self._cost_type == "estimated":
-                estimated = await _async_get_translation(self._hass, "name.estimated")
+                estimated = await async_get_translation(self._hass, "name.estimated")
                 new_name = f"{cost_daily} {estimated} - {water_name}"
             else:
-                metered = await _async_get_translation(self._hass, "name.metered")
+                metered = await async_get_translation(self._hass, "name.metered")
                 new_name = f"{cost_daily} {metered} - {water_name}"
 
             if self._attr_name != new_name:
@@ -4080,27 +3836,27 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
         if measuring_point_name:
             measuring_point_display = measuring_point_name
         else:
-            measuring_point_display = _get_translation_default("name.measuring_point", id=measuring_point_id)
+            measuring_point_display = get_translation_default("name.measuring_point", id=measuring_point_id)
 
-        utility_name = _get_translation_default(f"utility.{utility_code.lower()}")
+        utility_name = get_translation_default(f"utility.{utility_code.lower()}")
         if utility_name == f"utility.{utility_code.lower()}":  # Fallback if not found
             utility_name = utility_code
 
         if aggregate_type == "con":
-            aggregate_name = _get_translation_default("name.consumption_monthly_aggregated")
+            aggregate_name = get_translation_default("name.consumption_monthly_aggregated")
         else:
-            aggregate_name = _get_translation_default("name.cost_monthly_aggregated")
+            aggregate_name = get_translation_default("name.cost_monthly_aggregated")
 
         # Add cost type suffix for price sensors
         if aggregate_type == "price" and cost_type == "estimated":
-            estimated = _get_translation_default("name.estimated")
+            estimated = get_translation_default("name.estimated")
             aggregate_name = f"{aggregate_name} {estimated}"
         elif aggregate_type == "price" and cost_type == "actual":
-            metered = _get_translation_default("name.metered")
+            metered = get_translation_default("name.metered")
             aggregate_name = f"{aggregate_name} {metered}"
 
         # Format: "Aggregate Name - Meter "Measuring Point" (Utility)"
-        meter = _get_translation_default("name.meter")
+        meter = get_translation_default("name.meter")
         self._attr_name = f'{aggregate_name} - {meter} "{measuring_point_display}" ({utility_name})'
 
         # Build unique_id following pattern: purpose_group_utility_sensor
@@ -4116,7 +3872,7 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
         self._attr_unique_id = f"{DOMAIN}_{unique_id_suffix}"
 
         # Sensor attributes
-        device_name = _get_translation_default("name.device_name", node_id=coordinator.node_id)
+        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(coordinator.node_id))},
             "name": device_name,
@@ -4185,29 +3941,29 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
             if self._measuring_point_name:
                 measuring_point_display = self._measuring_point_name
             else:
-                measuring_point_display = await _async_get_translation(
+                measuring_point_display = await async_get_translation(
                     self._hass, "name.measuring_point", id=self._measuring_point_id
                 )
 
-            utility_name = await _async_get_translation(
+            utility_name = await async_get_translation(
                 self._hass, f"utility.{self._utility_code.lower()}"
             )
             if utility_name == f"utility.{self._utility_code.lower()}":
                 utility_name = self._utility_code
 
             if self._aggregate_type == "con":
-                aggregate_name = await _async_get_translation(self._hass, "name.consumption_monthly_aggregated")
+                aggregate_name = await async_get_translation(self._hass, "name.consumption_monthly_aggregated")
             else:
-                aggregate_name = await _async_get_translation(self._hass, "name.cost_monthly_aggregated")
+                aggregate_name = await async_get_translation(self._hass, "name.cost_monthly_aggregated")
 
             if self._aggregate_type == "price" and self._cost_type == "estimated":
-                estimated = await _async_get_translation(self._hass, "name.estimated")
+                estimated = await async_get_translation(self._hass, "name.estimated")
                 aggregate_name = f"{aggregate_name} {estimated}"
             elif self._aggregate_type == "price" and self._cost_type == "actual":
-                metered = await _async_get_translation(self._hass, "name.metered")
+                metered = await async_get_translation(self._hass, "name.metered")
                 aggregate_name = f"{aggregate_name} {metered}"
 
-            meter = await _async_get_translation(self._hass, "name.meter")
+            meter = await async_get_translation(self._hass, "name.meter")
             new_name = f'{aggregate_name} - {meter} "{measuring_point_display}" ({utility_name})'
             if self._attr_name != new_name:
                 self._attr_name = new_name
@@ -4252,7 +4008,7 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
         per_meter_cache_key = f"{self._utility_code}_{self._measuring_point_id}_{year}_{month}_{self._aggregate_type}_{self._cost_type if self._aggregate_type == 'price' else 'actual'}"
 
         aggregate_data = monthly_cache.get(cache_key) or monthly_cache.get(per_meter_cache_key)
-        
+
         _LOGGER.debug(
             "Per-meter sensor %s checking cache: cache_key=%s, per_meter_key=%s, found=%s, value=%s",
             self.entity_id, cache_key, per_meter_cache_key, aggregate_data is not None,
@@ -4314,18 +4070,18 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
         if self._aggregate_type == "price" and self._cost_type == "estimated":
             # Check if we already have direct per-meter data - if so, don't use proportional allocation
             has_direct_data = aggregate_data is not None
-            
+
             # Try proportional allocation if we don't have direct data
             if not has_direct_data:
                 # Get aggregate estimated cost for this utility - check cache first, then fetch if needed
                 aggregate_cost_key = f"{self._utility_code}_{year}_{month}_price_estimated"
                 aggregate_cost_data = monthly_cache.get(aggregate_cost_key)
-                
+
                 _LOGGER.debug(
                     "Checking proportional allocation for %s: aggregate_cost_key=%s, found_in_cache=%s",
                     self.entity_id, aggregate_cost_key, aggregate_cost_data is not None
                 )
-                
+
                 # If not in cache, fetch it directly (self-sufficient approach)
                 if not aggregate_cost_data:
                     from homeassistant.core import CoreState
@@ -4341,20 +4097,20 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
                                     aggregate_type="price",
                                     cost_type="estimated",
                                 )
-                                
+
                                 if aggregate_cost_data:
                                     # Calculate proportional allocation with the fetched data
                                     await self._calculate_and_update_proportional_allocation(
                                         aggregate_cost_data, year, month
                                     )
                             except Exception as err:
-                                _LOGGER.warning("Error fetching aggregate data for proportional allocation in %s: %s", 
+                                _LOGGER.warning("Error fetching aggregate data for proportional allocation in %s: %s",
                                               self.entity_id, err, exc_info=True)
-                        
+
                         self.hass.async_create_task(_fetch_aggregate_and_calculate())
                         # Return early - will update when fetch completes
                         return
-                
+
                 # If we have aggregate data in cache, calculate proportional allocation synchronously
                 if aggregate_cost_data:
                     total_estimated_cost = aggregate_cost_data.get("value")
@@ -4362,10 +4118,10 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
                         "Found aggregate cost data for %s: value=%s, unit=%s - calculating proportional allocation",
                         self.entity_id, total_estimated_cost, aggregate_cost_data.get("unit")
                     )
-                    
+
                     # Calculate proportional allocation synchronously (since we have the data)
                     per_meter_consumption = None
-                    
+
                     # Try to get from monthly consumption cache
                     per_meter_con_key = f"{self._utility_code}_{self._measuring_point_id}_{year}_{month}_con_actual"
                     per_meter_con_data = monthly_cache.get(per_meter_con_key)
@@ -4376,58 +4132,58 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
                         daily_cache = coordinator_data.get("daily_consumption_cache", {})
                         cache_key_daily = f"{self._utility_code}_{self._measuring_point_id}"
                         daily_values = daily_cache.get(cache_key_daily)
-                        
+
                         if daily_values:
                             # Get timezone for date calculations
                             timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
                             from .helpers import get_timezone
                             tz = get_timezone(timezone_str)
-                            
+
                             # Calculate month boundaries
                             from_date = datetime(year, month, 1, tzinfo=tz)
                             if month == 12:
                                 to_date = datetime(year + 1, 1, 1, tzinfo=tz)
                             else:
                                 to_date = datetime(year, month + 1, 1, tzinfo=tz)
-                            
+
                             from_time = int(from_date.timestamp())
                             to_time = int(to_date.timestamp())
-                            
+
                             # Filter daily values for this month
                             month_values = [
                                 v for v in daily_values
                                 if from_time <= v.get("time", 0) < to_time and v.get("value") is not None
                             ]
-                            
+
                             if month_values:
                                 per_meter_consumption = sum(v["value"] for v in month_values)
-                    
+
                     # Get total consumption for this utility (aggregate)
                     total_consumption_key = f"{self._utility_code}_{year}_{month}_con_actual"
                     total_consumption_data = monthly_cache.get(total_consumption_key)
-                    
+
                     if total_consumption_data:
                         total_consumption = total_consumption_data.get("value")
                     else:
                         # Calculate total consumption from daily cache
                         daily_cache = coordinator_data.get("daily_consumption_cache", {})
                         total_consumption = None
-                        
+
                         # Get timezone for date calculations
                         timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
                         from .helpers import get_timezone
                         tz = get_timezone(timezone_str)
-                        
+
                         # Calculate month boundaries
                         from_date = datetime(year, month, 1, tzinfo=tz)
                         if month == 12:
                             to_date = datetime(year + 1, 1, 1, tzinfo=tz)
                         else:
                             to_date = datetime(year, month + 1, 1, tzinfo=tz)
-                        
+
                         from_time = int(from_date.timestamp())
                         to_time = int(to_date.timestamp())
-                        
+
                         # First try the aggregate "all" key (most efficient)
                         aggregate_cache_key = f"{self._utility_code}_all"
                         if aggregate_cache_key in daily_cache:
@@ -4438,7 +4194,7 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
                             ]
                             if month_values:
                                 total_consumption = sum(v["value"] for v in month_values)
-                        
+
                         # If no aggregate key, sum all meters for this utility
                         if total_consumption is None:
                             total_consumption = 0.0
@@ -4451,16 +4207,16 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
                                     ]
                                     if month_values:
                                         total_consumption += sum(v["value"] for v in month_values)
-                    
+
                     # Calculate proportional cost
-                    if (per_meter_consumption is not None and 
-                        total_consumption is not None and 
-                        total_consumption > 0 and 
+                    if (per_meter_consumption is not None and
+                        total_consumption is not None and
+                        total_consumption > 0 and
                         total_estimated_cost is not None):
-                        
+
                         proportion = per_meter_consumption / total_consumption
                         per_meter_cost = total_estimated_cost * proportion
-                        
+
                         _LOGGER.info(
                             "Calculated per-meter estimated cost for meter %d (%s) %d-%02d: "
                             "%.3f / %.3f = %.1f%% of %.2f = %.2f (proportional allocation)",
@@ -4468,7 +4224,7 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
                             per_meter_consumption, total_consumption, proportion * 100,
                             total_estimated_cost, per_meter_cost
                         )
-                        
+
                         # Create aggregate data structure
                         aggregate_data = {
                             "value": per_meter_cost,
@@ -4499,7 +4255,7 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
             self._current_year = aggregate_data.get("year")
             self._current_month = aggregate_data.get("month")
             self._attr_available = True
-            
+
             # Log update (always log when we have data, even if value hasn't changed)
             if old_value != new_value:
                 _LOGGER.info("Updated %s: %s -> %s %s (from cache, year=%d, month=%d)",
@@ -4512,7 +4268,7 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
                              self.entity_id, new_value,
                              self._attr_native_unit_of_measurement,
                              self._current_year or year, self._current_month or month)
-            
+
             self.async_write_ha_state()
             return
 
@@ -4538,7 +4294,7 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
                             aggregate_type="price",
                             cost_type="estimated",
                         )
-                        
+
                         if aggregate_cost_data:
                             await self._calculate_and_update_proportional_allocation(
                                 aggregate_cost_data, year, month
@@ -4546,9 +4302,9 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
                         else:
                             _LOGGER.debug("No aggregate estimated cost data available for %s", self.entity_id)
                     except Exception as err:
-                        _LOGGER.warning("Error fetching aggregate data for proportional allocation in %s: %s", 
+                        _LOGGER.warning("Error fetching aggregate data for proportional allocation in %s: %s",
                                       self.entity_id, err, exc_info=True)
-                
+
                 self.hass.async_create_task(_fetch_and_calculate_proportional())
                 # For estimated costs, proportional allocation handles the update, so we don't need _async_fetch_value
                 return
@@ -4571,10 +4327,10 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
         coordinator_data = self.coordinator.data
         if not coordinator_data:
             return
-        
+
         monthly_cache = coordinator_data.get("monthly_aggregate_cache", {})
         total_estimated_cost = aggregate_cost_data.get("value")
-        
+
         # Get per-meter consumption
         per_meter_consumption = None
         per_meter_con_key = f"{self._utility_code}_{self._measuring_point_id}_{year}_{month}_con_actual"
@@ -4586,53 +4342,53 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
             daily_cache = coordinator_data.get("daily_consumption_cache", {})
             cache_key_daily = f"{self._utility_code}_{self._measuring_point_id}"
             daily_values = daily_cache.get(cache_key_daily)
-            
+
             if daily_values:
                 timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
                 from .helpers import get_timezone
                 tz = get_timezone(timezone_str)
-                
+
                 from_date = datetime(year, month, 1, tzinfo=tz)
                 if month == 12:
                     to_date = datetime(year + 1, 1, 1, tzinfo=tz)
                 else:
                     to_date = datetime(year, month + 1, 1, tzinfo=tz)
-                
+
                 from_time = int(from_date.timestamp())
                 to_time = int(to_date.timestamp())
-                
+
                 month_values = [
                     v for v in daily_values
                     if from_time <= v.get("time", 0) < to_time and v.get("value") is not None
                 ]
-                
+
                 if month_values:
                     per_meter_consumption = sum(v["value"] for v in month_values)
-        
+
         # Get total consumption for this utility
         total_consumption_key = f"{self._utility_code}_{year}_{month}_con_actual"
         total_consumption_data = monthly_cache.get(total_consumption_key)
-        
+
         if total_consumption_data:
             total_consumption = total_consumption_data.get("value")
         else:
             # Calculate total consumption from daily cache
             daily_cache = coordinator_data.get("daily_consumption_cache", {})
             total_consumption = None
-            
+
             timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
             from .helpers import get_timezone
             tz = get_timezone(timezone_str)
-            
+
             from_date = datetime(year, month, 1, tzinfo=tz)
             if month == 12:
                 to_date = datetime(year + 1, 1, 1, tzinfo=tz)
             else:
                 to_date = datetime(year, month + 1, 1, tzinfo=tz)
-            
+
             from_time = int(from_date.timestamp())
             to_time = int(to_date.timestamp())
-            
+
             aggregate_cache_key = f"{self._utility_code}_all"
             if aggregate_cache_key in daily_cache:
                 daily_values = daily_cache[aggregate_cache_key]
@@ -4642,7 +4398,7 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
                 ]
                 if month_values:
                     total_consumption = sum(v["value"] for v in month_values)
-            
+
             if total_consumption is None:
                 total_consumption = 0.0
                 for cache_key, daily_values in daily_cache.items():
@@ -4653,16 +4409,16 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
                         ]
                         if month_values:
                             total_consumption += sum(v["value"] for v in month_values)
-        
+
         # Calculate proportional cost
-        if (per_meter_consumption is not None and 
-            total_consumption is not None and 
-            total_consumption > 0 and 
+        if (per_meter_consumption is not None and
+            total_consumption is not None and
+            total_consumption > 0 and
             total_estimated_cost is not None):
-            
+
             proportion = per_meter_consumption / total_consumption
             per_meter_cost = total_estimated_cost * proportion
-            
+
             _LOGGER.debug(
                 "Calculated per-meter estimated cost for meter %d (%s) %d-%02d: "
                 "%.3f / %.3f = %.1f%% of %.2f = %.2f (proportional allocation)",
@@ -4670,7 +4426,7 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
                 per_meter_consumption, total_consumption, proportion * 100,
                 total_estimated_cost, per_meter_cost
             )
-            
+
             # Update sensor state
             default_unit = self.coordinator.get_setting("Currency") or "NOK"
             self._attr_native_value = round_to_max_digits(per_meter_cost)
@@ -4751,19 +4507,19 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
         self._cost_type = cost_type
 
         if aggregate_type == "con":
-            aggregate_name = _get_translation_default("name.consumption_monthly_aggregated")
+            aggregate_name = get_translation_default("name.consumption_monthly_aggregated")
         else:
-            aggregate_name = _get_translation_default("name.cost_monthly_aggregated")
+            aggregate_name = get_translation_default("name.cost_monthly_aggregated")
 
         if aggregate_type == "price" and cost_type == "estimated":
-            estimated = _get_translation_default("name.estimated")
+            estimated = get_translation_default("name.estimated")
             aggregate_name = f"{aggregate_name} {estimated}"
         elif aggregate_type == "price" and cost_type == "actual":
-            metered = _get_translation_default("name.metered")
+            metered = get_translation_default("name.metered")
             aggregate_name = f"{aggregate_name} {metered}"
 
         # Format: "Aggregate Name - Combined Water"
-        water_name = _get_translation_default("name.combined_water")
+        water_name = get_translation_default("name.combined_water")
         if water_name == "name.combined_water":  # Fallback if not found
             water_name = "Combined Water"
         self._attr_name = f"{aggregate_name} - {water_name}"
@@ -4779,7 +4535,7 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
         self._attr_unique_id = f"{DOMAIN}_{unique_id_suffix}"
 
         # Sensor attributes
-        device_name = _get_translation_default("name.device_name", node_id=coordinator.node_id)
+        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(coordinator.node_id))},
             "name": device_name,
@@ -4840,18 +4596,18 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
 
         try:
             if self._aggregate_type == "con":
-                aggregate_name = await _async_get_translation(self._hass, "name.consumption_monthly_aggregated")
+                aggregate_name = await async_get_translation(self._hass, "name.consumption_monthly_aggregated")
             else:
-                aggregate_name = await _async_get_translation(self._hass, "name.cost_monthly_aggregated")
+                aggregate_name = await async_get_translation(self._hass, "name.cost_monthly_aggregated")
 
             if self._aggregate_type == "price" and self._cost_type == "estimated":
-                estimated = await _async_get_translation(self._hass, "name.estimated")
+                estimated = await async_get_translation(self._hass, "name.estimated")
                 aggregate_name = f"{aggregate_name} {estimated}"
             elif self._aggregate_type == "price" and self._cost_type == "actual":
-                metered = await _async_get_translation(self._hass, "name.metered")
+                metered = await async_get_translation(self._hass, "name.metered")
                 aggregate_name = f"{aggregate_name} {metered}"
 
-            water_name = await _async_get_translation(self._hass, "name.combined_water")
+            water_name = await async_get_translation(self._hass, "name.combined_water")
             if water_name == "name.combined_water":
                 water_name = "Combined Water"
 
@@ -4909,7 +4665,7 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
                 else:
                     # For consumption, use "m³" as default
                     default_unit = "m³"
-                
+
                 # Use unit from one of the data sources, or fall back to default
                 unit = (hw_data.get("unit") if hw_data else None) or (cw_data.get("unit") if cw_data else None) or default_unit
 
