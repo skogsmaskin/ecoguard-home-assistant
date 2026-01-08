@@ -28,6 +28,10 @@ _LOGGER = logging.getLogger(__name__)
 # Cache for translation files
 _translation_cache: dict[str, dict[str, Any]] = {}
 
+# Counter for staggering sensor data fetches to avoid overwhelming the API
+_sensor_fetch_counter = 0
+_sensor_fetch_lock = asyncio.Lock()
+
 
 def _get_entity_id_by_unique_id(
     entity_registry: Any,
@@ -344,16 +348,23 @@ async def async_setup_entry(
     """Set up EcoGuard sensors from a config entry."""
     # Clear translation cache to ensure fresh translations are loaded
     _clear_translation_cache()
+    
+    # Reset sensor fetch counter for this setup
+    global _sensor_fetch_counter
+    _sensor_fetch_counter = 0
 
-    coordinator: EcoGuardDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id][
-        "coordinator"
-    ]
-    latest_reception_coordinator = hass.data[DOMAIN][entry.entry_id].get(
-        "latest_reception_coordinator"
-    )
+    # Use ConfigEntry.runtime_data (recommended pattern)
+    from . import EcoGuardRuntimeData
+    
+    runtime_data: EcoGuardRuntimeData = entry.runtime_data
+    coordinator: EcoGuardDataUpdateCoordinator = runtime_data.coordinator
+    latest_reception_coordinator = runtime_data.latest_reception_coordinator
 
-    # Wait for initial data
+    # IMPORTANT: We need to wait for coordinator to load cached data before creating sensors
+    # Otherwise get_active_installations() will return empty list
+    # The coordinator loads from cache synchronously in _async_update_data, so we need to trigger it
     try:
+        # Trigger coordinator refresh to load cached data (this is fast, just loads from cache)
         await coordinator.async_config_entry_first_refresh()
         if latest_reception_coordinator:
             await latest_reception_coordinator.async_config_entry_first_refresh()
@@ -363,6 +374,12 @@ async def async_setup_entry(
     # Create sensors for each active installation
     sensors: list[SensorEntity] = []
     active_installations = coordinator.get_active_installations()
+    _LOGGER.info("Found %d active installations for sensor creation (coordinator data available: %s)", 
+                 len(active_installations), coordinator.data is not None)
+    if not active_installations:
+        _LOGGER.warning("No active installations found! Coordinator data: %s, installations: %s", 
+                       coordinator.data is not None,
+                       len(coordinator._installations) if hasattr(coordinator, '_installations') else 0)
 
     # Track unique utility codes across all installations
     utility_codes = set()
@@ -646,7 +663,26 @@ async def async_setup_entry(
             existing_unique_ids.add(entity_entry.unique_id)
 
     _LOGGER.info("Creating %d EcoGuard sensors", len(sensors))
+    if len(sensors) < 10:
+        _LOGGER.warning("Only %d sensors created, expected many more! Sensor types: %s", 
+                       len(sensors), 
+                       [type(s).__name__ for s in sensors[:10]])
+    
+    # Log sensor details for debugging
+    for i, sensor in enumerate(sensors[:5]):  # Log first 5 sensors
+        _LOGGER.debug("Sensor %d: %s (unique_id: %s)", i+1, type(sensor).__name__, 
+                     getattr(sensor, '_attr_unique_id', 'N/A'))
+    
     async_add_entities(sensors, update_before_add=False)
+    
+    # Schedule deferred updates after HA is fully started
+    # This prevents API calls during startup
+    # DISABLED: Deferred sensor updates - no API calls during startup
+    # Sensors will show as "Unknown" state initially
+    # async def _deferred_sensor_updates():
+    #     """Defer sensor updates until after HA is fully started."""
+    #     ...
+    # hass.async_create_task(_deferred_sensor_updates())
 
     # Schedule entity registry updates to run after entities are registered
     # This ensures entity_ids match our desired format and individual meter sensors are disabled
@@ -961,8 +997,11 @@ async def async_setup_entry(
             raise
     
     update_task = hass.async_create_task(_update_with_timeout())
-    if entry.entry_id in hass.data[DOMAIN]:
-        hass.data[DOMAIN][entry.entry_id]["entity_registry_update_task"] = update_task
+    # Store update task in runtime_data
+    if hasattr(entry, "runtime_data"):
+        from . import EcoGuardRuntimeData
+        runtime_data: EcoGuardRuntimeData = entry.runtime_data
+        runtime_data.entity_registry_update_task = update_task
 
 
 class EcoGuardSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
@@ -1074,11 +1113,16 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
         return attrs
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, fetch initial value and update translations."""
+        """When entity is added to hass, update translations and set Unknown state."""
         await super().async_added_to_hass()
         # Update sensor name with translations now that we're in hass
         await self._async_update_translated_name()
-        await self._async_fetch_value()
+        # Set sensor to Unknown state (available=True, native_value=None)
+        # No API calls during startup - sensors will show as "Unknown"
+        self._attr_native_value = None
+        self._attr_available = True
+        self.async_write_ha_state()
+        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -1133,31 +1177,70 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
             _LOGGER.warning("Failed to update translated name: %s", e, exc_info=True)
 
     def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by fetching latest daily consumption value."""
-        if self.hass and not self.hass.is_stopping:
-            self.hass.async_create_task(self._async_fetch_value())
+        """Handle coordinator update by reading from cached data."""
+        _LOGGER.info("Coordinator update received for %s (data available: %s)", 
+                     self.entity_id, self.coordinator.data is not None)
+        self._update_from_coordinator_data()
 
-    async def _async_fetch_value(self) -> None:
-        """Fetch last known daily consumption value asynchronously."""
-        consumption_data = await self.coordinator.get_latest_consumption_value(
-            utility_code=self._utility_code,
-            measuring_point_id=self._measuring_point_id,
-            external_key=self._installation.get("ExternalKey"),
-        )
+    def _update_from_coordinator_data(self) -> None:
+        """Update sensor state from coordinator's cached data (no API calls)."""
+        # Read from coordinator.data cache (populated by batch fetch)
+        coordinator_data = self.coordinator.data
+        if not coordinator_data:
+            _LOGGER.debug("No coordinator data for %s", self.entity_id)
+            self._attr_native_value = None
+            self._attr_native_unit_of_measurement = None
+            self._last_data_date = None
+            self._attr_available = True
+            self.async_write_ha_state()
+            return
 
+        # Get consumption cache from coordinator data
+        consumption_cache = coordinator_data.get("latest_consumption_cache", {})
+        
+        # Build cache key
+        if self._measuring_point_id:
+            cache_key = f"{self._utility_code}_{self._measuring_point_id}"
+        else:
+            cache_key = f"{self._utility_code}_all"
+        
+        consumption_data = consumption_cache.get(cache_key)
+        
         if consumption_data:
             raw_value = consumption_data.get("value")
-            self._attr_native_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            new_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            old_value = self._attr_native_value
+            
+            self._attr_native_value = new_value
             self._attr_native_unit_of_measurement = consumption_data.get("unit")
 
             # Update last data date
             time_stamp = consumption_data.get("time")
             if time_stamp:
                 self._last_data_date = datetime.fromtimestamp(time_stamp)
+            
+            # Mark sensor as available when we have data
+            self._attr_available = True
+            
+            # Log update for debugging
+            if old_value != new_value:
+                _LOGGER.info("Updated %s: %s -> %s %s (cache key: %s)", 
+                             self.entity_id, old_value, new_value, 
+                             self._attr_native_unit_of_measurement, cache_key)
         else:
+            # Log missing cache key for debugging (only once to avoid spam)
+            if not hasattr(self, '_cache_miss_logged') or not self._cache_miss_logged:
+                available_keys = sorted(consumption_cache.keys())
+                _LOGGER.warning("Cache miss for %s: Looking for key '%s', available keys: %s", 
+                             self.entity_id, cache_key, available_keys[:10] if len(available_keys) > 10 else available_keys)
+                self._cache_miss_logged = True
+            
+            # Keep sensor available even if no data (shows as "unknown" not "unavailable")
+            # This allows sensors to appear in UI immediately
             self._attr_native_value = None
             self._attr_native_unit_of_measurement = None
             self._last_data_date = None
+            self._attr_available = True  # Keep available, just show None/unknown
 
         # Notify Home Assistant that the state has changed
         self.async_write_ha_state()
@@ -1254,10 +1337,16 @@ class EcoGuardLatestReceptionSensor(CoordinatorEntity, SensorEntity):
         return attrs
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, fetch initial value and update translations."""
+        """When entity is added to hass, update translations and set Unknown state."""
         await super().async_added_to_hass()
+        # Update sensor name with translations now that we're in hass
         await self._async_update_translated_name()
-        await self._async_fetch_value()
+        # Set sensor to Unknown state (available=True, native_value=None)
+        # No API calls during startup - sensors will show as "Unknown"
+        self._attr_native_value = None
+        self._attr_available = True
+        self.async_write_ha_state()
+        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -1296,9 +1385,45 @@ class EcoGuardLatestReceptionSensor(CoordinatorEntity, SensorEntity):
             _LOGGER.debug("Failed to update translated name: %s", e)
 
     def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by fetching latest reception."""
-        if self.hass and not self.hass.is_stopping:
-            self.hass.async_create_task(self._async_fetch_value())
+        """Handle coordinator update by reading from cached data."""
+        _LOGGER.info("Coordinator update received for %s (data available: %s)", 
+                     self.entity_id, self.coordinator.data is not None)
+        self._update_from_coordinator_data()
+
+    def _update_from_coordinator_data(self) -> None:
+        """Update sensor state from coordinator's cached data (no API calls)."""
+        # Read from coordinator.data cache (populated by batch fetch)
+        # The coordinator data is a list of reception entries
+        latest_reception_data = self.coordinator.data
+
+        if not latest_reception_data:
+            self._attr_native_value = None
+            self._attr_available = True
+            self.async_write_ha_state()
+            return
+
+        # Find the latest reception entry for this measuring point
+        # PositionID in latest_reception corresponds to MeasuringPointID
+        latest_timestamp = None
+        for reception in latest_reception_data:
+            position_id = reception.get("PositionID")
+            if position_id == self._measuring_point_id:
+                latest_timestamp = reception.get("LatestReception")
+                if latest_timestamp:
+                    # Convert Unix timestamp to timezone-aware datetime (UTC)
+                    # Unix timestamps are always in UTC
+                    self._attr_native_value = datetime.fromtimestamp(latest_timestamp, tz=timezone.utc)
+                else:
+                    self._attr_native_value = None
+                break
+
+        if latest_timestamp is None:
+            # No reception data found for this measuring point
+            self._attr_native_value = None
+
+        self._attr_available = True
+        # Notify Home Assistant that the state has changed
+        self.async_write_ha_state()
 
     async def _async_fetch_value(self) -> None:
         """Fetch latest reception timestamp for this measuring point."""
@@ -1450,10 +1575,16 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
         return attrs
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, fetch initial value and update translations."""
+        """When entity is added to hass, update translations and set Unknown state."""
         await super().async_added_to_hass()
+        # Update sensor name with translations now that we're in hass
         await self._async_update_translated_name()
-        await self._async_fetch_value()
+        # Set sensor to Unknown state (available=True, native_value=None)
+        # No API calls during startup - sensors will show as "Unknown"
+        self._attr_native_value = None
+        self._attr_available = True
+        self.async_write_ha_state()
+        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -1494,9 +1625,67 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
             _LOGGER.debug("Failed to update translated name: %s", e)
 
     def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by fetching monthly aggregate."""
-        if self.hass and not self.hass.is_stopping:
-            self.hass.async_create_task(self._async_fetch_value())
+        """Handle coordinator update by reading from cached data."""
+        _LOGGER.info("Coordinator update received for %s (data available: %s)", 
+                     self.entity_id, self.coordinator.data is not None)
+        self._update_from_coordinator_data()
+
+    def _update_from_coordinator_data(self) -> None:
+        """Update sensor state from coordinator's cached data (no API calls)."""
+        # Read from coordinator.data cache (populated by batch fetch)
+        coordinator_data = self.coordinator.data
+        if not coordinator_data:
+            _LOGGER.debug("No coordinator data for %s", self.entity_id)
+            self._attr_native_value = None
+            default_unit = ""
+            if self._aggregate_type == "price":
+                default_unit = self.coordinator.get_setting("Currency") or "NOK"
+            self._attr_native_unit_of_measurement = default_unit
+            self._attr_available = True
+            self.async_write_ha_state()
+            return
+
+        # Get current month
+        now = datetime.now()
+        year = now.year
+        month = now.month
+
+        # Check monthly aggregate cache
+        monthly_cache = coordinator_data.get("monthly_aggregate_cache", {})
+        cache_key = f"{self._utility_code}_{year}_{month}_{self._aggregate_type}_{self._cost_type if self._aggregate_type == 'price' else 'actual'}"
+        
+        aggregate_data = monthly_cache.get(cache_key)
+        
+        # Always set a default unit to prevent statistics issues
+        default_unit = ""
+        if self._aggregate_type == "price":
+            default_unit = self.coordinator.get_setting("Currency") or "NOK"
+
+        if aggregate_data:
+            raw_value = aggregate_data.get("value")
+            self._attr_native_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            # Use unit from data, or fall back to default
+            self._attr_native_unit_of_measurement = aggregate_data.get("unit") or default_unit
+            self._current_year = aggregate_data.get("year")
+            self._current_month = aggregate_data.get("month")
+            self._attr_available = True
+            
+            _LOGGER.info("Updated %s: %s %s (from cache, year=%d, month=%d)", 
+                         self.entity_id, self._attr_native_value, self._attr_native_unit_of_measurement,
+                         self._current_year or year, self._current_month or month)
+        else:
+            # No data available yet, but keep sensor available
+            self._attr_native_value = None
+            # Always set unit even when no data to maintain consistency for statistics
+            self._attr_native_unit_of_measurement = default_unit
+            self._current_year = None
+            self._current_month = None
+            self._attr_available = True
+            
+            _LOGGER.debug("No cached monthly aggregate for %s (cache_key: %s, available keys: %s)", 
+                          self.entity_id, cache_key, list(monthly_cache.keys())[:5])
+
+        self.async_write_ha_state()
 
     async def _async_fetch_value(self) -> None:
         """Fetch current month's aggregate value."""
@@ -1604,10 +1793,16 @@ class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator],
         return attrs
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, fetch initial value and update translations."""
+        """When entity is added to hass, update translations and set Unknown state."""
         await super().async_added_to_hass()
+        # Update sensor name with translations now that we're in hass
         await self._async_update_translated_name()
-        await self._async_fetch_value()
+        # Set sensor to Unknown state (available=True, native_value=None)
+        # No API calls during startup - sensors will show as "Unknown"
+        self._attr_native_value = None
+        self._attr_available = True
+        self.async_write_ha_state()
+        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -1628,9 +1823,68 @@ class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator],
             _LOGGER.debug("Failed to update translated name: %s", e)
 
     def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by fetching other items cost."""
-        if self.hass and not self.hass.is_stopping:
-            self.hass.async_create_task(self._async_fetch_value())
+        """Handle coordinator update by reading from cached data."""
+        _LOGGER.info("Coordinator update received for %s (data available: %s)", 
+                     self.entity_id, self.coordinator.data is not None)
+        self._update_from_coordinator_data()
+
+    def _update_from_coordinator_data(self) -> None:
+        """Update sensor state from coordinator's cached data (no API calls)."""
+        # Read from coordinator.data cache
+        coordinator_data = self.coordinator.data
+        if not coordinator_data:
+            _LOGGER.debug("No coordinator data for %s", self.entity_id)
+            self._attr_native_value = None
+            currency = self.coordinator.get_setting("Currency") or ""
+            self._attr_native_unit_of_measurement = currency
+            self._attr_available = True
+            self.async_write_ha_state()
+            return
+
+        # Try to get from billing results cache (coordinator has this cached)
+        # Check if we have cached billing results first
+        from homeassistant.core import CoreState
+        is_starting = self.hass.state == CoreState.starting
+        
+        # Try to read from cache first
+        now = datetime.now()
+        year = now.year
+        month = now.month
+        billing_cache = coordinator_data.get("billing_results_cache", {})
+        cache_key = f"monthly_other_items_{year}_{month}"
+        cached_result = billing_cache.get(cache_key)
+        
+        if cached_result:
+            # Use cached data
+            cost_data = cached_result.get("cost_data")
+            if cost_data and cost_data.get("value") is not None:
+                self._attr_native_value = round_to_max_digits(cost_data.get("value", 0.0))
+                currency = self.coordinator.get_setting("Currency") or ""
+                self._attr_native_unit_of_measurement = currency
+                self._current_year = cost_data.get("year")
+                self._current_month = cost_data.get("month")
+                self._item_count = cost_data.get("item_count")
+                self._items = cost_data.get("items", [])
+                self._attr_available = True
+                self.async_write_ha_state()
+                return
+        
+        # No cached data - set placeholder and defer async fetch until after startup
+        self._attr_native_value = None
+        currency = self.coordinator.get_setting("Currency") or ""
+        self._attr_native_unit_of_measurement = currency
+        self._attr_available = True
+        self.async_write_ha_state()
+        
+        # Only trigger async fetch if HA is fully started (not during startup)
+        from homeassistant.core import CoreState
+        if self.hass and not self.hass.is_stopping and self.hass.state != CoreState.starting:
+            # Add a small delay to avoid immediate API calls during sensor creation
+            async def _deferred_fetch():
+                await asyncio.sleep(5.0)  # Wait 5 seconds after HA starts
+                if not self.hass.is_stopping:
+                    await self._async_fetch_value()
+            self.hass.async_create_task(_deferred_fetch())
 
     async def _async_fetch_value(self) -> None:
         """Fetch current month's other items cost."""
@@ -1757,10 +2011,16 @@ class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
         return attrs
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, fetch initial value and update translations."""
+        """When entity is added to hass, update translations and set Unknown state."""
         await super().async_added_to_hass()
+        # Update sensor name with translations now that we're in hass
         await self._async_update_translated_name()
-        await self._async_fetch_value()
+        # Set sensor to Unknown state (available=True, native_value=None)
+        # No API calls during startup - sensors will show as "Unknown"
+        self._attr_native_value = None
+        self._attr_available = True
+        self.async_write_ha_state()
+        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -1787,9 +2047,70 @@ class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
             _LOGGER.debug("Failed to update translated name: %s", e)
 
     def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by fetching total monthly cost."""
-        if self.hass and not self.hass.is_stopping:
-            self.hass.async_create_task(self._async_fetch_value())
+        """Handle coordinator update by reading from cached data."""
+        _LOGGER.info("Coordinator update received for %s (data available: %s)", 
+                     self.entity_id, self.coordinator.data is not None)
+        self._update_from_coordinator_data()
+
+    def _update_from_coordinator_data(self) -> None:
+        """Update sensor state from coordinator's cached data (no API calls)."""
+        # This sensor sums costs from multiple utilities, which requires async operations
+        from homeassistant.core import CoreState
+        is_starting = self.hass.state == CoreState.starting
+        
+        # Try to read from monthly aggregate cache first
+        coordinator_data = self.coordinator.data
+        if coordinator_data:
+            now = datetime.now()
+            year = now.year
+            month = now.month
+            monthly_cache = coordinator_data.get("monthly_aggregate_cache", {})
+            
+            # Sum costs from all utilities
+            total_cost = 0.0
+            utilities_with_data = []
+            utility_codes = set()
+            active_installations = self.coordinator.get_active_installations()
+            for installation in active_installations:
+                registers = installation.get("Registers", [])
+                for register in registers:
+                    utility_code = register.get("UtilityCode")
+                    if utility_code and utility_code in ("HW", "CW", "E", "HE"):
+                        utility_codes.add(utility_code)
+            
+            for utility_code in sorted(utility_codes):
+                if utility_code in ("CW", "HW"):
+                    cache_key = f"{utility_code}_{year}_{month}_price_{self._cost_type}"
+                    price_data = monthly_cache.get(cache_key)
+                    if price_data and price_data.get("value") is not None:
+                        cost = price_data.get("value", 0.0)
+                        total_cost += cost
+                        utilities_with_data.append(utility_code)
+            
+            if utilities_with_data:
+                currency = self.coordinator.get_setting("Currency") or ""
+                self._attr_native_value = round_to_max_digits(total_cost)
+                self._attr_native_unit_of_measurement = currency
+                self._attr_available = True
+                self.async_write_ha_state()
+                return
+        
+        # No cached data - set placeholder and defer async fetch until after startup
+        self._attr_native_value = None
+        currency = self.coordinator.get_setting("Currency") or ""
+        self._attr_native_unit_of_measurement = currency
+        self._attr_available = True
+        self.async_write_ha_state()
+        
+        # Only trigger async fetch if HA is fully started (not during startup)
+        from homeassistant.core import CoreState
+        if self.hass and not self.hass.is_stopping and self.hass.state != CoreState.starting:
+            # Add a small delay to avoid immediate API calls during sensor creation
+            async def _deferred_fetch():
+                await asyncio.sleep(5.0)  # Wait 5 seconds after HA starts
+                if not self.hass.is_stopping:
+                    await self._async_fetch_value()
+            self.hass.async_create_task(_deferred_fetch())
 
     async def _async_fetch_value(self) -> None:
         """Fetch current month's total cost by summing individual utility costs."""
@@ -1976,10 +2297,16 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         return attrs
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, fetch initial value and update translations."""
+        """When entity is added to hass, update translations and set Unknown state."""
         await super().async_added_to_hass()
+        # Update sensor name with translations now that we're in hass
         await self._async_update_translated_name()
-        await self._async_fetch_value()
+        # Set sensor to Unknown state (available=True, native_value=None)
+        # No API calls during startup - sensors will show as "Unknown"
+        self._attr_native_value = None
+        self._attr_available = True
+        self.async_write_ha_state()
+        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -1999,8 +2326,27 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             _LOGGER.debug("Failed to update translated name: %s", e)
 
     def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by fetching end-of-month estimate."""
-        if self.hass and not self.hass.is_stopping:
+        """Handle coordinator update by reading from cached data."""
+        _LOGGER.info("Coordinator update received for %s (data available: %s)", 
+                     self.entity_id, self.coordinator.data is not None)
+        self._update_from_coordinator_data()
+
+    def _update_from_coordinator_data(self) -> None:
+        """Update sensor state from coordinator's cached data (no API calls)."""
+        # This sensor calculates end-of-month estimate, which requires async operations
+        from homeassistant.core import CoreState
+        is_starting = self.hass.state == CoreState.starting
+        
+        # Try to read from cache if available (coordinator may cache this)
+        # For now, just set placeholder and defer async fetch until after startup
+        self._attr_native_value = None
+        currency = self.coordinator.get_setting("Currency") or ""
+        self._attr_native_unit_of_measurement = currency
+        self._attr_available = True
+        self.async_write_ha_state()
+        
+        # Only trigger async fetch if HA is fully started (not during startup)
+        if self.hass and not self.hass.is_stopping and not is_starting:
             self.hass.async_create_task(self._async_fetch_value())
 
     async def _async_fetch_value(self) -> None:
@@ -2140,10 +2486,16 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
         return attrs
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, fetch initial value and update translations."""
+        """When entity is added to hass, update translations and set Unknown state."""
         await super().async_added_to_hass()
+        # Update sensor name with translations now that we're in hass
         await self._async_update_translated_name()
-        await self._async_fetch_value()
+        # Set sensor to Unknown state (available=True, native_value=None)
+        # No API calls during startup - sensors will show as "Unknown"
+        self._attr_native_value = None
+        self._attr_available = True
+        self.async_write_ha_state()
+        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -2169,12 +2521,57 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
             _LOGGER.debug("Failed to update translated name: %s", e)
 
     def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by fetching aggregated daily consumption."""
-        if self.hass and not self.hass.is_stopping:
-            self.hass.async_create_task(self._async_fetch_value())
+        """Handle coordinator update by reading from cached data."""
+        _LOGGER.info("Coordinator update received for %s (data available: %s)", 
+                     self.entity_id, self.coordinator.data is not None)
+        self._update_from_coordinator_data()
 
-    async def _async_fetch_value(self) -> None:
-        """Fetch aggregated daily consumption across all meters of this utility type."""
+    def _update_from_coordinator_data(self) -> None:
+        """Update sensor state from coordinator's cached data (no API calls)."""
+        # Read from coordinator.data cache (populated by batch fetch)
+        coordinator_data = self.coordinator.data
+        if not coordinator_data:
+            _LOGGER.debug("No coordinator data for %s", self.entity_id)
+            self._attr_native_value = None
+            self._attr_native_unit_of_measurement = None
+            self._attr_available = True
+            self.async_write_ha_state()
+            return
+
+        # Get consumption cache from coordinator data
+        consumption_cache = coordinator_data.get("latest_consumption_cache", {})
+        
+        # Try to read from "all" cache first (aggregated across all meters)
+        cache_key_all = f"{self._utility_code}_all"
+        consumption_data = consumption_cache.get(cache_key_all)
+        
+        if consumption_data:
+            # Use aggregated data directly
+            raw_value = consumption_data.get("value")
+            new_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            old_value = self._attr_native_value
+            
+            self._attr_native_value = new_value
+            self._attr_native_unit_of_measurement = consumption_data.get("unit")
+            
+            # Update last data date
+            time_stamp = consumption_data.get("time")
+            if time_stamp:
+                self._last_data_date = datetime.fromtimestamp(time_stamp)
+            
+            # Mark sensor as available when we have data
+            self._attr_available = True
+            
+            # Log update for debugging
+            if old_value != new_value:
+                _LOGGER.info("Updated %s: %s -> %s %s (cache key: %s)", 
+                             self.entity_id, old_value, new_value, 
+                             self._attr_native_unit_of_measurement, cache_key_all)
+            
+            self.async_write_ha_state()
+            return
+        
+        # Fallback: Sum consumption across all meters for this utility
         active_installations = self.coordinator.get_active_installations()
         total_value = 0.0
         unit = None
@@ -2202,12 +2599,9 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
                     measuring_point_name = mp.get("Name")
                     break
 
-            # Fetch consumption for this meter
-            consumption_data = await self.coordinator.get_latest_consumption_value(
-                utility_code=self._utility_code,
-                measuring_point_id=measuring_point_id,
-                external_key=installation.get("ExternalKey"),
-            )
+            # Read consumption from cache (no API call)
+            cache_key = f"{self._utility_code}_{measuring_point_id}"
+            consumption_data = consumption_cache.get(cache_key)
 
             if consumption_data and consumption_data.get("value") is not None:
                 value = consumption_data.get("value", 0.0)
@@ -2324,10 +2718,16 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         return attrs
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, fetch initial value and update translations."""
+        """When entity is added to hass, update translations and set Unknown state."""
         await super().async_added_to_hass()
+        # Update sensor name with translations now that we're in hass
         await self._async_update_translated_name()
-        await self._async_fetch_value()
+        # Set sensor to Unknown state (available=True, native_value=None)
+        # No API calls during startup - sensors will show as "Unknown"
+        self._attr_native_value = None
+        self._attr_available = True
+        self.async_write_ha_state()
+        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -2350,12 +2750,24 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             _LOGGER.debug("Failed to update translated name: %s", e)
 
     def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by fetching combined daily consumption."""
-        if self.hass and not self.hass.is_stopping:
-            self.hass.async_create_task(self._async_fetch_value())
+        """Handle coordinator update by reading from cached data."""
+        _LOGGER.debug("Coordinator update received for %s", self.entity_id)
+        self._update_from_coordinator_data()
 
-    async def _async_fetch_value(self) -> None:
-        """Fetch combined daily consumption (HW + CW) across all meters."""
+    def _update_from_coordinator_data(self) -> None:
+        """Update sensor state from coordinator's cached data (no API calls)."""
+        # Read from coordinator.data cache (populated by batch fetch)
+        coordinator_data = self.coordinator.data
+        if not coordinator_data:
+            self._attr_native_value = None
+            self._attr_native_unit_of_measurement = None
+            self._attr_available = True  # Keep available even if no data
+            self.async_write_ha_state()
+            return
+
+        # Get consumption cache from coordinator data
+        consumption_cache = coordinator_data.get("latest_consumption_cache", {})
+        
         active_installations = self.coordinator.get_active_installations()
         hw_total = 0.0
         cw_total = 0.0
@@ -2381,12 +2793,9 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
                 if utility_code not in ("HW", "CW"):
                     continue
 
-                # Fetch consumption for this meter
-                consumption_data = await self.coordinator.get_latest_consumption_value(
-                    utility_code=utility_code,
-                    measuring_point_id=measuring_point_id,
-                    external_key=installation.get("ExternalKey"),
-                )
+                # Read consumption from cache (no API call)
+                cache_key = f"{utility_code}_{measuring_point_id}"
+                consumption_data = consumption_cache.get(cache_key)
 
                 if consumption_data and consumption_data.get("value") is not None:
                     value = consumption_data.get("value", 0.0)
@@ -2415,6 +2824,8 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
                         cw_meters_with_data.append(meter_info)
 
         total_value = hw_total + cw_total
+        old_value = self._attr_native_value
+        
         if total_value > 0:
             self._attr_native_value = round_to_max_digits(total_value)
             self._attr_native_unit_of_measurement = unit
@@ -2422,12 +2833,23 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
                 self._last_data_date = datetime.fromtimestamp(latest_timestamp)
             self._hw_meters_with_data = hw_meters_with_data
             self._cw_meters_with_data = cw_meters_with_data
+            self._attr_available = True
+            
+            # Log update for debugging
+            if old_value != self._attr_native_value:
+                _LOGGER.debug("Updated %s: %s -> %s %s (HW: %s, CW: %s)", 
+                             self.entity_id, old_value, self._attr_native_value, 
+                             unit, hw_total, cw_total)
         else:
             self._attr_native_value = None
             self._attr_native_unit_of_measurement = unit
             self._last_data_date = None
             self._hw_meters_with_data = []
             self._cw_meters_with_data = []
+            # Keep sensor available even if no data (shows as "unknown" not "unavailable")
+            self._attr_available = True
+            if old_value is not None:
+                _LOGGER.debug("Updated %s: %s -> None (no data found)", self.entity_id, old_value)
 
         self.async_write_ha_state()
 
@@ -2531,10 +2953,16 @@ class EcoGuardDailyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], 
         return attrs
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, fetch initial value and update translations."""
+        """When entity is added to hass, update translations and set Unknown state."""
         await super().async_added_to_hass()
+        # Update sensor name with translations now that we're in hass
         await self._async_update_translated_name()
-        await self._async_fetch_value()
+        # Set sensor to Unknown state (available=True, native_value=None)
+        # No API calls during startup - sensors will show as "Unknown"
+        self._attr_native_value = None
+        self._attr_available = True
+        self.async_write_ha_state()
+        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -2574,25 +3002,53 @@ class EcoGuardDailyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], 
             _LOGGER.debug("Failed to update translated name: %s", e)
 
     def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by fetching latest daily cost value."""
-        if self.hass and not self.hass.is_stopping:
-            self.hass.async_create_task(self._async_fetch_value())
+        """Handle coordinator update by reading from cached data."""
+        self._update_from_coordinator_data()
 
-    async def _async_fetch_value(self) -> None:
-        """Fetch last known daily cost value asynchronously."""
-        if self._cost_type == "estimated":
-            cost_data = await self.coordinator.get_latest_estimated_cost(
-                utility_code=self._utility_code,
-                measuring_point_id=self._measuring_point_id,
-                external_key=self._installation.get("ExternalKey"),
-            )
+    def _update_from_coordinator_data(self) -> None:
+        """Update sensor state from coordinator's cached data (no API calls)."""
+        # Read from coordinator.data cache (populated by batch fetch)
+        coordinator_data = self.coordinator.data
+        if not coordinator_data:
+            self._attr_native_value = None
+            currency = self.coordinator.get_setting("Currency") or ""
+            self._attr_native_unit_of_measurement = currency
+            self._last_data_date = None
+            self.async_write_ha_state()
+            return
+
+        # Get cost cache from coordinator data
+        cost_cache = coordinator_data.get("latest_cost_cache", {})
+        
+        # Build cache key based on cost type
+        if self._measuring_point_id:
+            if self._cost_type == "estimated":
+                # For estimated, we'll need to calculate from consumption + rate
+                # For now, try metered cache key
+                cache_key = f"{self._utility_code}_{self._measuring_point_id}_metered"
+            else:
+                cache_key = f"{self._utility_code}_{self._measuring_point_id}_metered"
         else:
-            cost_data = await self.coordinator.get_latest_metered_cost(
-                utility_code=self._utility_code,
-                measuring_point_id=self._measuring_point_id,
-                external_key=self._installation.get("ExternalKey"),
-            )
-
+            cache_key = f"{self._utility_code}_all_metered"
+        
+        cost_data = cost_cache.get(cache_key)
+        
+        # If no metered cost and we need estimated, try to calculate from consumption
+        if not cost_data and self._cost_type == "estimated":
+            # Get consumption from cache and calculate estimated cost
+            consumption_cache = coordinator_data.get("latest_consumption_cache", {})
+            if self._measuring_point_id:
+                consumption_key = f"{self._utility_code}_{self._measuring_point_id}"
+            else:
+                consumption_key = f"{self._utility_code}_all"
+            
+            consumption_data = consumption_cache.get(consumption_key)
+            if consumption_data:
+                # We have consumption, but need rate to calculate cost
+                # For now, just return None - rate calculation would require API call
+                # This can be enhanced later to cache rates too
+                cost_data = None
+        
         if cost_data:
             raw_value = cost_data.get("value")
             self._attr_native_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
@@ -2699,10 +3155,16 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         return attrs
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, fetch initial value and update translations."""
+        """When entity is added to hass, update translations and set Unknown state."""
         await super().async_added_to_hass()
+        # Update sensor name with translations now that we're in hass
         await self._async_update_translated_name()
-        await self._async_fetch_value()
+        # Set sensor to Unknown state (available=True, native_value=None)
+        # No API calls during startup - sensors will show as "Unknown"
+        self._attr_native_value = None
+        self._attr_available = True
+        self.async_write_ha_state()
+        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -2734,9 +3196,104 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             _LOGGER.debug("Failed to update translated name: %s", e)
 
     def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by fetching aggregated daily cost."""
-        if self.hass and not self.hass.is_stopping:
-            self.hass.async_create_task(self._async_fetch_value())
+        """Handle coordinator update by reading from cached data."""
+        _LOGGER.info("Coordinator update received for %s (data available: %s)", 
+                     self.entity_id, self.coordinator.data is not None)
+        self._update_from_coordinator_data()
+
+    def _update_from_coordinator_data(self) -> None:
+        """Update sensor state from coordinator's cached data (no API calls)."""
+        # Read from coordinator.data cache (populated by batch fetch)
+        coordinator_data = self.coordinator.data
+        if not coordinator_data:
+            _LOGGER.debug("No coordinator data for %s", self.entity_id)
+            self._attr_native_value = None
+            currency = self.coordinator.get_setting("Currency") or ""
+            self._attr_native_unit_of_measurement = currency
+            self._attr_available = True
+            self.async_write_ha_state()
+            return
+
+        # Get cost cache from coordinator data
+        cost_cache = coordinator_data.get("latest_cost_cache", {})
+        
+        # Sum costs across all meters for this utility
+        active_installations = self.coordinator.get_active_installations()
+        total_value = 0.0
+        latest_timestamp = None
+        meters_with_data = []
+
+        for installation in active_installations:
+            registers = installation.get("Registers", [])
+            measuring_point_id = installation.get("MeasuringPointID")
+
+            # Check if this installation has the utility we're looking for
+            has_utility = False
+            for register in registers:
+                if register.get("UtilityCode") == self._utility_code:
+                    has_utility = True
+                    break
+
+            if not has_utility:
+                continue
+
+            # Get measuring point name
+            measuring_point_name = None
+            for mp in self.coordinator.get_measuring_points():
+                if mp.get("ID") == measuring_point_id:
+                    measuring_point_name = mp.get("Name")
+                    break
+
+            # Read cost from cache (no API call)
+            # For metered costs, use the cache key with "_metered" suffix
+            # For estimated costs, we might need to calculate from consumption
+            if self._cost_type == "actual":
+                cache_key = f"{self._utility_code}_{measuring_point_id}_metered"
+                cost_data = cost_cache.get(cache_key)
+            else:
+                # For estimated costs, we need to calculate from consumption
+                # This is more complex, so for now we'll skip it in the cache-based update
+                # and let _async_fetch_value handle it
+                continue
+
+            if cost_data and cost_data.get("value") is not None:
+                value = cost_data.get("value", 0.0)
+                total_value += value
+
+                # Track latest timestamp
+                time_stamp = cost_data.get("time")
+                if time_stamp:
+                    if latest_timestamp is None or time_stamp > latest_timestamp:
+                        latest_timestamp = time_stamp
+
+                meters_with_data.append({
+                    "measuring_point_id": measuring_point_id,
+                    "measuring_point_name": measuring_point_name,
+                    "value": value,
+                })
+
+        if total_value > 0 or (self._cost_type == "actual" and meters_with_data):
+            # Even if total is 0, update if we have meter data (shows 0 is valid)
+            self._attr_native_value = round_to_max_digits(total_value) if total_value > 0 else 0.0
+            currency = self.coordinator.get_setting("Currency") or ""
+            self._attr_native_unit_of_measurement = currency
+            if latest_timestamp:
+                self._last_data_date = datetime.fromtimestamp(latest_timestamp)
+            self._meters_with_data = meters_with_data
+            self._attr_available = True
+            
+            _LOGGER.info("Updated %s: %s %s (from %d meters)", 
+                         self.entity_id, self._attr_native_value, currency, len(meters_with_data))
+        else:
+            # No data available yet, but keep sensor available
+            self._attr_native_value = None
+            currency = self.coordinator.get_setting("Currency") or ""
+            self._attr_native_unit_of_measurement = currency
+            self._last_data_date = None
+            self._meters_with_data = []
+            self._attr_available = True
+
+        self.async_write_ha_state()
 
     async def _async_fetch_value(self) -> None:
         """Fetch aggregated daily cost across all meters of this utility type."""
@@ -2907,10 +3464,16 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
         return attrs
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, fetch initial value and update translations."""
+        """When entity is added to hass, update translations and set Unknown state."""
         await super().async_added_to_hass()
+        # Update sensor name with translations now that we're in hass
         await self._async_update_translated_name()
-        await self._async_fetch_value()
+        # Set sensor to Unknown state (available=True, native_value=None)
+        # No API calls during startup - sensors will show as "Unknown"
+        self._attr_native_value = None
+        self._attr_available = True
+        self.async_write_ha_state()
+        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -2940,12 +3503,24 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
             _LOGGER.debug("Failed to update translated name: %s", e)
 
     def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by fetching combined daily cost."""
-        if self.hass and not self.hass.is_stopping:
-            self.hass.async_create_task(self._async_fetch_value())
+        """Handle coordinator update by reading from cached data."""
+        self._update_from_coordinator_data()
 
-    async def _async_fetch_value(self) -> None:
-        """Fetch combined daily cost (HW + CW) across all meters."""
+    def _update_from_coordinator_data(self) -> None:
+        """Update sensor state from coordinator's cached data (no API calls)."""
+        # Read from coordinator.data cache (populated by batch fetch)
+        coordinator_data = self.coordinator.data
+        if not coordinator_data:
+            self._attr_native_value = None
+            currency = self.coordinator.get_setting("Currency") or ""
+            self._attr_native_unit_of_measurement = currency
+            self._attr_available = True  # Keep available even if no data
+            self.async_write_ha_state()
+            return
+
+        # Get cost cache from coordinator data
+        cost_cache = coordinator_data.get("latest_cost_cache", {})
+        
         active_installations = self.coordinator.get_active_installations()
         hw_total = 0.0
         cw_total = 0.0
@@ -2970,19 +3545,9 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
                 if utility_code not in ("HW", "CW"):
                     continue
 
-                # Fetch cost for this meter
-                if self._cost_type == "estimated":
-                    cost_data = await self.coordinator.get_latest_estimated_cost(
-                        utility_code=utility_code,
-                        measuring_point_id=measuring_point_id,
-                        external_key=installation.get("ExternalKey"),
-                    )
-                else:
-                    cost_data = await self.coordinator.get_latest_metered_cost(
-                        utility_code=utility_code,
-                        measuring_point_id=measuring_point_id,
-                        external_key=installation.get("ExternalKey"),
-                    )
+                # Read cost from cache (no API call)
+                cache_key = f"{utility_code}_{measuring_point_id}_metered"
+                cost_data = cost_cache.get(cache_key)
 
                 if cost_data and cost_data.get("value") is not None:
                     value = cost_data.get("value", 0.0)
@@ -3015,6 +3580,7 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
                 self._last_data_date = datetime.fromtimestamp(latest_timestamp)
             self._hw_meters_with_data = hw_meters_with_data
             self._cw_meters_with_data = cw_meters_with_data
+            self._attr_available = True
         else:
             self._attr_native_value = None
             currency = self.coordinator.get_setting("Currency") or ""
@@ -3022,6 +3588,8 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
             self._last_data_date = None
             self._hw_meters_with_data = []
             self._cw_meters_with_data = []
+            # Keep sensor available even if no data (shows as "unknown" not "unavailable")
+            self._attr_available = True
 
         self.async_write_ha_state()
 
@@ -3157,10 +3725,16 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
         return attrs
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, fetch initial value and update translations."""
+        """When entity is added to hass, update translations and set Unknown state."""
         await super().async_added_to_hass()
+        # Update sensor name with translations now that we're in hass
         await self._async_update_translated_name()
-        await self._async_fetch_value()
+        # Set sensor to Unknown state (available=True, native_value=None)
+        # No API calls during startup - sensors will show as "Unknown"
+        self._attr_native_value = None
+        self._attr_available = True
+        self.async_write_ha_state()
+        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -3205,9 +3779,69 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
             _LOGGER.debug("Failed to update translated name: %s", e)
 
     def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by fetching monthly value."""
-        if self.hass and not self.hass.is_stopping:
-            self.hass.async_create_task(self._async_fetch_value())
+        """Handle coordinator update by reading from cached data."""
+        _LOGGER.info("Coordinator update received for %s (data available: %s)", 
+                     self.entity_id, self.coordinator.data is not None)
+        self._update_from_coordinator_data()
+
+    def _update_from_coordinator_data(self) -> None:
+        """Update sensor state from coordinator's cached data (no API calls)."""
+        # Read from coordinator.data cache
+        coordinator_data = self.coordinator.data
+        if not coordinator_data:
+            _LOGGER.debug("No coordinator data for %s", self.entity_id)
+            self._attr_native_value = None
+            default_unit = ""
+            if self._aggregate_type == "price":
+                default_unit = self.coordinator.get_setting("Currency") or "NOK"
+            self._attr_native_unit_of_measurement = default_unit
+            self._attr_available = True
+            self.async_write_ha_state()
+            return
+
+        # Get current month
+        now = datetime.now()
+        year = now.year
+        month = now.month
+
+        # Check monthly aggregate cache (coordinator caches per-meter aggregates)
+        monthly_cache = coordinator_data.get("monthly_aggregate_cache", {})
+        cache_key = f"{self._utility_code}_{year}_{month}_{self._aggregate_type}_{self._cost_type if self._aggregate_type == 'price' else 'actual'}"
+        
+        # Also check per-meter cache
+        per_meter_cache_key = f"{self._utility_code}_{self._measuring_point_id}_{year}_{month}_{self._aggregate_type}_{self._cost_type if self._aggregate_type == 'price' else 'actual'}"
+        
+        aggregate_data = monthly_cache.get(cache_key) or monthly_cache.get(per_meter_cache_key)
+        
+        default_unit = ""
+        if self._aggregate_type == "price":
+            default_unit = self.coordinator.get_setting("Currency") or "NOK"
+        
+        if aggregate_data:
+            raw_value = aggregate_data.get("value")
+            self._attr_native_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            self._attr_native_unit_of_measurement = aggregate_data.get("unit") or default_unit
+            self._current_year = aggregate_data.get("year")
+            self._current_month = aggregate_data.get("month")
+            self._attr_available = True
+            self.async_write_ha_state()
+            return
+        
+        # No cached data - set placeholder
+        self._attr_native_value = None
+        self._attr_native_unit_of_measurement = default_unit
+        self._attr_available = True
+        self.async_write_ha_state()
+        
+        # Only trigger async fetch if HA is fully started (not during startup)
+        from homeassistant.core import CoreState
+        if self.hass and not self.hass.is_stopping and self.hass.state != CoreState.starting:
+            # Add a small delay to avoid immediate API calls during sensor creation
+            async def _deferred_fetch():
+                await asyncio.sleep(5.0)  # Wait 5 seconds after HA starts
+                if not self.hass.is_stopping:
+                    await self._async_fetch_value()
+            self.hass.async_create_task(_deferred_fetch())
 
     async def _async_fetch_value(self) -> None:
         """Fetch current month's aggregate value for this specific meter."""
@@ -3345,10 +3979,16 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
         return attrs
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, fetch initial value and update translations."""
+        """When entity is added to hass, update translations and set Unknown state."""
         await super().async_added_to_hass()
+        # Update sensor name with translations now that we're in hass
         await self._async_update_translated_name()
-        await self._async_fetch_value()
+        # Set sensor to Unknown state (available=True, native_value=None)
+        # No API calls during startup - sensors will show as "Unknown"
+        self._attr_native_value = None
+        self._attr_available = True
+        self.async_write_ha_state()
+        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -3383,9 +4023,64 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
             _LOGGER.debug("Failed to update translated name: %s", e)
 
     def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by fetching combined water value."""
-        if self.hass and not self.hass.is_stopping:
-            self.hass.async_create_task(self._async_fetch_value())
+        """Handle coordinator update by reading from cached data."""
+        _LOGGER.info("Coordinator update received for %s (data available: %s)", 
+                     self.entity_id, self.coordinator.data is not None)
+        self._update_from_coordinator_data()
+
+    def _update_from_coordinator_data(self) -> None:
+        """Update sensor state from coordinator's cached data (no API calls)."""
+        # This sensor sums HW + CW, which requires async operations
+        # Try to read from monthly aggregate cache first
+        coordinator_data = self.coordinator.data
+        if coordinator_data:
+            now = datetime.now()
+            year = now.year
+            month = now.month
+            monthly_cache = coordinator_data.get("monthly_aggregate_cache", {})
+            
+            # Get HW and CW aggregates
+            hw_cache_key = f"HW_{year}_{month}_{self._aggregate_type}_{self._cost_type if self._aggregate_type == 'price' else 'actual'}"
+            cw_cache_key = f"CW_{year}_{month}_{self._aggregate_type}_{self._cost_type if self._aggregate_type == 'price' else 'actual'}"
+            
+            hw_data = monthly_cache.get(hw_cache_key)
+            cw_data = monthly_cache.get(cw_cache_key)
+            
+            if hw_data and cw_data:
+                hw_value = hw_data.get("value", 0.0)
+                cw_value = cw_data.get("value", 0.0)
+                total_value = hw_value + cw_value
+                
+                default_unit = ""
+                if self._aggregate_type == "price":
+                    default_unit = self.coordinator.get_setting("Currency") or "NOK"
+                
+                self._attr_native_value = round_to_max_digits(total_value)
+                self._attr_native_unit_of_measurement = default_unit
+                self._current_year = year
+                self._current_month = month
+                self._attr_available = True
+                self.async_write_ha_state()
+                return
+        
+        # No cached data - set placeholder and defer async fetch until after startup
+        default_unit = ""
+        if self._aggregate_type == "price":
+            default_unit = self.coordinator.get_setting("Currency") or "NOK"
+        self._attr_native_value = None
+        self._attr_native_unit_of_measurement = default_unit
+        self._attr_available = True
+        self.async_write_ha_state()
+        
+        # Only trigger async fetch if HA is fully started (not during startup)
+        from homeassistant.core import CoreState
+        if self.hass and not self.hass.is_stopping and self.hass.state != CoreState.starting:
+            # Add a small delay to avoid immediate API calls during sensor creation
+            async def _deferred_fetch():
+                await asyncio.sleep(5.0)  # Wait 5 seconds after HA starts
+                if not self.hass.is_stopping:
+                    await self._async_fetch_value()
+            self.hass.async_create_task(_deferred_fetch())
 
     async def _async_fetch_value(self) -> None:
         """Fetch current month's combined water (HW + CW) value."""

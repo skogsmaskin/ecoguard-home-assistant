@@ -9,7 +9,7 @@ import time
 import zoneinfo
 import asyncio
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, CoreState
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DOMAIN
@@ -40,6 +40,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         node_id: int,
         domain: str,
         nord_pool_area: str | None = None,
+        entry_id: str | None = None,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -52,6 +53,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.node_id = node_id
         self.domain = domain
         self.nord_pool_area = nord_pool_area
+        self.entry_id = entry_id
         self._measuring_points: list[dict[str, Any]] = []
         self._installations: list[dict[str, Any]] = []
         self._latest_reception: list[dict[str, Any]] = []
@@ -65,69 +67,101 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._data_request_cache: dict[str, tuple[Any, float]] = {}  # Cache for data API requests: key -> (data, timestamp)
         self._data_cache_ttl: float = 60.0  # Cache data requests for 60 seconds to prevent duplicate calls
         self._pending_requests: dict[str, asyncio.Task] = {}  # Track pending requests to deduplicate simultaneous calls
+        self._cache_loaded: bool = False  # Track if we've loaded from cache
+        
+        # Caches for sensor data (populated by batch fetching)
+        # Key format: f"{utility_code}_{measuring_point_id or 'all'}"
+        self._latest_consumption_cache: dict[str, dict[str, Any]] = {}  # Latest consumption by utility/meter
+        self._latest_cost_cache: dict[str, dict[str, Any]] = {}  # Latest cost by utility/meter/cost_type
+        
+        # Daily data cache - stores ALL daily values for reuse (not just latest)
+        # Key format: f"{utility_code}_{measuring_point_id or 'all'}"
+        # Value: list of daily values sorted by time: [{"time": timestamp, "value": value, "unit": unit}, ...]
+        self._daily_consumption_cache: dict[str, list[dict[str, Any]]] = {}  # All daily consumption values
+        self._daily_price_cache: dict[str, list[dict[str, Any]]] = {}  # All daily price values
+        
+        # Key format: f"{utility_code}_{year}_{month}_{aggregate_type}_{cost_type}"
+        self._monthly_aggregate_cache: dict[str, dict[str, Any]] = {}  # Monthly aggregates
+        self._cache_timestamp: float = 0.0  # When cache was last updated
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch data from EcoGuard API."""
+        """Fetch data from EcoGuard API.
+        
+        This method is called:
+        - Once on startup (async_config_entry_first_refresh)
+        - Periodically based on update_interval (every hour by default)
+        """
+        from .storage import load_cached_data, save_cached_data
+        
+        _LOGGER.debug("Coordinator update triggered (cache_loaded=%s)", self._cache_loaded)
+        
         try:
-            # Fetch node data and settings (once, cached)
+            # Load from cache first (only once on startup)
+            if not self._cache_loaded and self.entry_id:
+                _LOGGER.debug("Attempting to load cached data for entry %s", self.entry_id)
+                cached_data = await load_cached_data(self.hass, self.entry_id)
+                if cached_data:
+                    _LOGGER.info("Loading data from cache for entry %s", self.entry_id)
+                    if cached_data.get("installations"):
+                        self._installations = cached_data["installations"]
+                        _LOGGER.info("Loaded %d installations from cache", len(self._installations))
+                    if cached_data.get("measuring_points"):
+                        self._measuring_points = cached_data["measuring_points"]
+                        _LOGGER.info("Loaded %d measuring points from cache", len(self._measuring_points))
+                    if cached_data.get("node_data"):
+                        self._node_data = cached_data["node_data"]
+                        _LOGGER.info("Loaded node_data from cache")
+                    if cached_data.get("settings"):
+                        self._settings = cached_data["settings"]
+                        _LOGGER.info("Loaded %d settings from cache", len(self._settings))
+                else:
+                    _LOGGER.debug("No cached data found for entry %s", self.entry_id)
+                self._cache_loaded = True
+
+            # Use cached node data and measuring points during startup
+            # API updates happen after Home Assistant has fully started (see __init__.py)
             if not self._node_data:
-                _LOGGER.debug("Fetching node data for node %s", self.node_id)
-                try:
-                    # Use get_node endpoint which includes MeasuringPoints directly
-                    self._node_data = await self.api.get_node(self.node_id)
-                    self._measuring_points = self._node_data.get("MeasuringPoints", [])
-                    _LOGGER.debug(
-                        "Found %d measuring points from node endpoint",
-                        len(self._measuring_points),
-                    )
-                except Exception as err:
-                    _LOGGER.warning(
-                        "Failed to fetch node data, trying measuring points endpoint: %s",
-                        err,
-                    )
-                    # Fallback to separate measuring points endpoint
-                    try:
-                        self._measuring_points = await self.api.get_measuring_points(
-                            self.node_id
-                        )
-                        _LOGGER.debug(
-                            "Found %d measuring points", len(self._measuring_points)
-                        )
-                    except Exception as err2:
-                        _LOGGER.error("Failed to fetch measuring points: %s", err2)
-                        self._measuring_points = []
+                _LOGGER.debug("No cached node data available")
+                self._node_data = None
+                self._measuring_points = []
+            elif not self._measuring_points:
+                _LOGGER.debug("No cached measuring points available")
+                self._measuring_points = []
+            else:
+                _LOGGER.debug("Using cached node data and measuring points")
 
+            # Use cached installations during startup
+            # API updates happen after Home Assistant has fully started (see __init__.py)
             if not self._installations:
-                try:
-                    self._installations = await self.api.get_installations(self.node_id)
-                    _LOGGER.debug("Found %d installations", len(self._installations))
-                except Exception as err:
-                    _LOGGER.warning("Failed to fetch installations: %s", err)
-                    self._installations = []
+                _LOGGER.debug("No cached installations available")
+                self._installations = []
+            else:
+                _LOGGER.debug("Using cached installations")
 
-            # Fetch settings (once, cached)
+            # Use cached settings during startup
+            # API updates happen after Home Assistant has fully started (see __init__.py)
             if not self._settings:
-                try:
-                    self._settings = await self.api.get_settings()
-                    _LOGGER.debug("Fetched %d settings", len(self._settings))
-                except Exception as err:
-                    _LOGGER.warning("Failed to fetch settings: %s", err)
-                    self._settings = []
+                _LOGGER.debug("No cached settings available")
+                self._settings = []
+            else:
+                _LOGGER.debug("Using cached settings")
 
             # Note: Latest reception is now handled by a separate coordinator
             # Keep this for backward compatibility, but it won't update frequently
             if not self._latest_reception:
-                try:
-                    self._latest_reception = await self.api.get_latest_reception(
-                        self.node_id
-                    )
-                except Exception as err:
-                    _LOGGER.warning("Failed to fetch latest reception: %s", err)
-                    self._latest_reception = []
+                _LOGGER.debug("No cached latest reception available")
+                self._latest_reception = []
 
             # Log static info summary
             self._log_static_info_summary()
 
+            # Batch fetch is triggered after Home Assistant has fully started
+            # (see __init__.py for the startup event listener)
+            # This ensures sensors load instantly without blocking startup
+
+            # Return data immediately - don't wait for background API updates
+            # This allows sensors to be created quickly using cached data
+            # Background updates will happen asynchronously
             return {
                 "measuring_points": self._measuring_points,
                 "installations": self._installations,
@@ -136,8 +170,29 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "settings": self._settings,
                 "node_id": self.node_id,
                 "domain": self.domain,
+                # Include caches so sensors can read from them
+                "latest_consumption_cache": self._latest_consumption_cache,
+                "latest_cost_cache": self._latest_cost_cache,
+                "daily_consumption_cache": self._daily_consumption_cache,  # All daily values for reuse
+                "daily_price_cache": self._daily_price_cache,  # All daily prices for reuse
+                "monthly_aggregate_cache": self._monthly_aggregate_cache,
             }
         except EcoGuardAPIError as err:
+            # If we have cached data, return it even if API calls fail
+            # This allows sensors to be created immediately on startup
+            if self._cache_loaded and (self._installations or self._measuring_points or self._settings):
+                _LOGGER.warning(
+                    "API error occurred, but returning cached data: %s", err
+                )
+                return {
+                    "measuring_points": self._measuring_points,
+                    "installations": self._installations,
+                    "latest_reception": self._latest_reception,
+                    "node_data": self._node_data,
+                    "settings": self._settings,
+                    "node_id": self.node_id,
+                    "domain": self.domain,
+                }
             raise UpdateFailed(f"Error communicating with API: {err}") from err
 
     def get_measuring_points(self) -> list[dict[str, Any]]:
@@ -216,6 +271,19 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Remove expired cache entry
                 del self._billing_results_cache[cache_key]
 
+        # Defer API calls during HA startup to avoid blocking initialization
+        if self.hass.state == CoreState.starting:
+            _LOGGER.debug(
+                "Deferring billing results API call for key %s (HA is starting, using cached data if available)",
+                cache_key
+            )
+            # Return expired cached data if available, or empty list
+            if cache_key in self._billing_results_cache:
+                cached_data, _ = self._billing_results_cache[cache_key]
+                _LOGGER.debug("Using expired cached billing data during startup")
+                return cached_data
+            return []
+        
         # Fetch from API
         try:
             _LOGGER.debug("Fetching billing results from API for key %s", cache_key)
@@ -380,6 +448,349 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return None
 
+    def _sync_cache_to_data(self) -> None:
+        """Sync cache dictionaries to coordinator.data so sensors can read them."""
+        if self.data:
+            self.data["latest_consumption_cache"] = self._latest_consumption_cache
+            self.data["latest_cost_cache"] = self._latest_cost_cache
+            self.data["daily_consumption_cache"] = self._daily_consumption_cache
+            self.data["daily_price_cache"] = self._daily_price_cache
+            self.data["monthly_aggregate_cache"] = self._monthly_aggregate_cache
+
+    async def _batch_fetch_sensor_data(self) -> None:
+        """Batch fetch consumption and price data for all utility codes.
+        
+        This method fetches data for all utility codes at once, then caches it
+        so individual sensors can read from the cache instead of making API calls.
+        """
+        import time
+        
+        try:
+            # Collect all unique utility codes from installations
+            utility_codes = set()
+            for installation in self._installations:
+                registers = installation.get("Registers", [])
+                for register in registers:
+                    utility_code = register.get("UtilityCode")
+                    if utility_code and utility_code in ("HW", "CW", "E", "HE"):
+                        utility_codes.add(utility_code)
+            
+            if not utility_codes:
+                _LOGGER.debug("No utility codes found, skipping batch fetch")
+                return
+            
+            _LOGGER.info("Batch fetching consumption and price data for utility codes: %s", sorted(utility_codes))
+            
+            # Get timezone for date calculations
+            timezone_str = self.get_setting("TimeZoneIANA") or "UTC"
+            try:
+                tz = zoneinfo.ZoneInfo(timezone_str)
+            except Exception:
+                tz = zoneinfo.ZoneInfo("UTC")
+            
+            now_tz = datetime.now(tz)
+            tomorrow_start = datetime.combine(
+                (now_tz.date() + timedelta(days=1)), datetime.min.time(), tz
+            )
+            to_time = int(tomorrow_start.timestamp())
+            
+            # Smart time range: Fetch only 7 days initially for fast startup
+            # Full 30-day fetch can happen in background later if needed
+            # This significantly reduces initial load time
+            initial_days = 7
+            from_time = int((datetime.combine(now_tz.date() - timedelta(days=initial_days), datetime.min.time(), tz)).timestamp())
+            
+            _LOGGER.debug("Batch fetch: Fetching %d days of data (from %s to %s)", 
+                         initial_days, datetime.fromtimestamp(from_time, tz=tz).date(), 
+                         datetime.fromtimestamp(to_time, tz=tz).date())
+            
+            # Create a mapping of measuring_point_id -> utility_codes for this installation
+            # This helps us correctly map API responses to cache keys
+            mp_to_utilities: dict[int, set[str]] = {}
+            for installation in self._installations:
+                mp_id = installation.get("MeasuringPointID")
+                if mp_id:
+                    registers = installation.get("Registers", [])
+                    utilities = {r.get("UtilityCode") for r in registers if r.get("UtilityCode") in utility_codes}
+                    if utilities:
+                        mp_to_utilities[mp_id] = utilities
+            
+            # Fetch consumption data per measuring point for accurate cache keys
+            # When include_sub_nodes=True, we get node-level aggregates, not per-meter data
+            # So we need to fetch per measuring point to get the correct cache keys
+            consumption_utilities = [f"{uc}[con]" for uc in utility_codes]
+            try:
+                # Fetch data per measuring point to get accurate cache keys
+                for measuring_point_id, utilities in mp_to_utilities.items():
+                    try:
+                        consumption_data = await self.api.get_data(
+                            node_id=self.node_id,
+                            from_time=from_time,
+                            to_time=to_time,
+                            interval="d",
+                            grouping="apartment",
+                            utilities=[f"{uc}[con]" for uc in utilities],
+                            include_sub_nodes=False,
+                            measuring_point_id=measuring_point_id,
+                        )
+                        
+                        # Process and cache consumption data for this measuring point
+                        if consumption_data and isinstance(consumption_data, list):
+                            for node_data in consumption_data:
+                                results = node_data.get("Result", [])
+                                
+                                if not results:
+                                    continue
+                                
+                                for result in results:
+                                    utility_code = result.get("Utl")
+                                    if result.get("Func") == "con" and utility_code:
+                                        values = result.get("Values", [])
+                                        unit = result.get("Unit", "")
+                                        
+                                        if not values:
+                                            continue
+                                        
+                                        # Cache ALL daily values (not just latest) for reuse
+                                        daily_values = []
+                                        latest_value = None
+                                        latest_time = None
+                                        
+                                        for value_entry in values:
+                                            value = value_entry.get("Value")
+                                            time_stamp = value_entry.get("Time")
+                                            if value is not None and time_stamp is not None:
+                                                daily_values.append({
+                                                    "time": time_stamp,
+                                                    "value": value,
+                                                    "unit": unit,
+                                                })
+                                                # Track latest for quick access
+                                                if latest_time is None or time_stamp > latest_time:
+                                                    latest_value = value
+                                                    latest_time = time_stamp
+                                        
+                                        if daily_values:
+                                            # Sort by time
+                                            daily_values.sort(key=lambda x: x["time"])
+                                            
+                                            # Cache keys - use measuring_point_id from our mapping
+                                            cache_key_all = f"{utility_code}_all"
+                                            cache_key_meter = f"{utility_code}_{measuring_point_id}"
+                                            
+                                            # Aggregate into "all" cache (sum values across all meters)
+                                            if cache_key_all not in self._daily_consumption_cache:
+                                                self._daily_consumption_cache[cache_key_all] = []
+                                            
+                                            # Merge daily values into "all" cache (deduplicate by time)
+                                            existing_all = self._daily_consumption_cache[cache_key_all]
+                                            existing_times = {v["time"] for v in existing_all}
+                                            
+                                            # Aggregate values by time for "all" cache
+                                            for daily_val in daily_values:
+                                                time_stamp = daily_val["time"]
+                                                if time_stamp in existing_times:
+                                                    # Sum with existing value for this time
+                                                    for existing in existing_all:
+                                                        if existing["time"] == time_stamp:
+                                                            existing["value"] += daily_val["value"]
+                                                            break
+                                                else:
+                                                    # New time, add it
+                                                    existing_all.append(daily_val.copy())
+                                            
+                                            # Sort "all" cache by time
+                                            existing_all.sort(key=lambda x: x["time"])
+                                            
+                                            # Store per-meter daily values
+                                            self._daily_consumption_cache[cache_key_meter] = daily_values
+                                            
+                                            # Also store latest for quick access
+                                            if latest_value is not None:
+                                                cache_entry = {
+                                                    "value": latest_value,
+                                                    "time": latest_time,
+                                                    "unit": unit,
+                                                    "utility_code": utility_code,
+                                                    "measuring_point_id": measuring_point_id,
+                                                }
+                                                
+                                                # Update "all" latest (sum across all meters)
+                                                if cache_key_all in self._latest_consumption_cache:
+                                                    existing_all_entry = self._latest_consumption_cache[cache_key_all]
+                                                    # Use the latest time and sum values
+                                                    if latest_time >= existing_all_entry.get("time", 0):
+                                                        existing_all_entry["value"] = existing_all_entry.get("value", 0) + latest_value
+                                                        existing_all_entry["time"] = latest_time
+                                                else:
+                                                    self._latest_consumption_cache[cache_key_all] = cache_entry.copy()
+                                                
+                                                # Store per-meter latest
+                                                self._latest_consumption_cache[cache_key_meter] = cache_entry
+                                                _LOGGER.debug("Cached consumption: %s (meter %s) = %s %s", 
+                                                             cache_key_meter, measuring_point_id, latest_value, unit)
+                    except Exception as err:
+                        _LOGGER.warning("Failed to fetch consumption data for measuring point %s: %s", measuring_point_id, err)
+                        continue
+                
+                if not self._latest_consumption_cache:
+                    _LOGGER.warning("Batch fetch: No consumption data was cached")
+                
+                _LOGGER.info("Cached consumption data: %d daily value sets, %d latest values", 
+                            len(self._daily_consumption_cache), len(self._latest_consumption_cache))
+            except Exception as err:
+                _LOGGER.warning("Failed to batch fetch consumption data: %s", err)
+            
+            # Fetch price data per measuring point for accurate cache keys
+            try:
+                # Fetch data per measuring point to get accurate cache keys
+                for measuring_point_id, utilities in mp_to_utilities.items():
+                    try:
+                        price_data = await self.api.get_data(
+                            node_id=self.node_id,
+                            from_time=from_time,
+                            to_time=to_time,
+                            interval="d",
+                            grouping="apartment",
+                            utilities=[f"{uc}[price]" for uc in utilities],
+                            include_sub_nodes=False,
+                            measuring_point_id=measuring_point_id,
+                        )
+                        
+                        # Process and cache price data for this measuring point
+                        if price_data and isinstance(price_data, list):
+                            for node_data in price_data:
+                                results = node_data.get("Result", [])
+                                
+                                for result in results:
+                                    utility_code = result.get("Utl")
+                                    if result.get("Func") == "price" and utility_code:
+                                        values = result.get("Values", [])
+                                        unit = result.get("Unit", "")
+                                        
+                                        # Cache ALL daily price values (not just latest) for reuse
+                                        daily_prices = []
+                                        latest_price = None
+                                        latest_time = None
+                                        
+                                        for value_entry in values:
+                                            value = value_entry.get("Value")
+                                            time_stamp = value_entry.get("Time")
+                                            if value is not None and value > 0 and time_stamp is not None:
+                                                daily_prices.append({
+                                                    "time": time_stamp,
+                                                    "value": value,
+                                                    "unit": unit,
+                                                })
+                                                # Track latest for quick access
+                                                if latest_time is None or time_stamp > latest_time:
+                                                    latest_price = value
+                                                    latest_time = time_stamp
+                                        
+                                        if daily_prices:
+                                            # Sort by time
+                                            daily_prices.sort(key=lambda x: x["time"])
+                                            
+                                            # Cache keys - use measuring_point_id from our mapping
+                                            cache_key = f"{utility_code}_{measuring_point_id}_metered"
+                                            
+                                            # Store all daily prices for reuse
+                                            self._daily_price_cache[cache_key] = daily_prices
+                                            
+                                            # Also store latest for quick access
+                                            if latest_price is not None:
+                                                cache_entry = {
+                                                    "value": latest_price,
+                                                    "time": latest_time,
+                                                    "unit": unit,
+                                                    "utility_code": utility_code,
+                                                    "cost_type": "metered",
+                                                    "measuring_point_id": measuring_point_id,
+                                                }
+                                                self._latest_cost_cache[cache_key] = cache_entry
+                                                _LOGGER.debug("Cached price: %s (meter %s) = %s %s", 
+                                                             cache_key, measuring_point_id, latest_price, unit)
+                    except Exception as err:
+                        _LOGGER.warning("Failed to fetch price data for measuring point %s: %s", measuring_point_id, err)
+                        continue
+                
+                _LOGGER.info("Cached price data: %d daily price sets, %d latest values",
+                            len(self._daily_price_cache), len(self._latest_cost_cache))
+            except Exception as err:
+                _LOGGER.warning("Failed to batch fetch price data: %s", err)
+            
+            # Update cache timestamp
+            self._cache_timestamp = time.time()
+            
+            # Log cache statistics
+            _LOGGER.info(
+                "Batch fetch complete: %d daily consumption sets, %d daily price sets, %d latest consumption, %d latest prices",
+                len(self._daily_consumption_cache),
+                len(self._daily_price_cache),
+                len(self._latest_consumption_cache),
+                len(self._latest_cost_cache)
+            )
+            
+            # Sync cache to coordinator.data and notify sensors
+            # Always update data and notify listeners to ensure sensors get updates
+            if self.data:
+                # Update the existing data dict with new cache
+                # Create a completely new dict with new cache dicts to ensure change detection
+                updated_data = {
+                    "measuring_points": self.data.get("measuring_points"),
+                    "installations": self.data.get("installations"),
+                    "latest_reception": self.data.get("latest_reception"),
+                    "node_data": self.data.get("node_data"),
+                    "settings": self.data.get("settings"),
+                    "node_id": self.data.get("node_id"),
+                    "domain": self.data.get("domain"),
+                    # Create new dicts for caches to ensure change detection
+                    "latest_consumption_cache": dict(self._latest_consumption_cache),
+                    "latest_cost_cache": dict(self._latest_cost_cache),
+                    "daily_consumption_cache": {k: list(v) for k, v in self._daily_consumption_cache.items()},  # Deep copy lists
+                    "daily_price_cache": {k: list(v) for k, v in self._daily_price_cache.items()},  # Deep copy lists
+                    "monthly_aggregate_cache": dict(self._monthly_aggregate_cache),
+                }
+                
+                # Use async_set_updated_data to properly notify sensors
+                # This ensures sensors get the update callback
+                # IMPORTANT: This must be called from the event loop, which we are (batch fetch runs in background task)
+                self.async_set_updated_data(updated_data)
+                # Also explicitly notify listeners to ensure all sensors get updated
+                # This is a safety net in case async_set_updated_data doesn't trigger for some reason
+                self.async_update_listeners()
+                
+                # Log listener details for debugging
+                listener_count = len(self._listeners) if hasattr(self, '_listeners') else 0
+                listener_ids = [str(l) for l in (self._listeners if hasattr(self, '_listeners') else [])][:10]
+                _LOGGER.info("Notified %d listeners about cache update (consumption: %d keys, cost: %d keys). Listeners: %s", 
+                             listener_count, 
+                             len(self._latest_consumption_cache),
+                             len(self._latest_cost_cache),
+                             listener_ids)
+                
+                # Schedule a delayed update notification to catch sensors that are added after batch fetch completes
+                # This ensures sensors get updated even if they're added after the batch fetch finishes
+                async def _delayed_notification():
+                    await asyncio.sleep(1.0)  # Wait 1 second for sensors to be added
+                    if not self.hass.is_stopping:
+                        _LOGGER.info("Delayed notification: Notifying %d listeners again (consumption: %d keys, cost: %d keys)", 
+                                     len(self._listeners) if hasattr(self, '_listeners') else 0,
+                                     len(self._latest_consumption_cache),
+                                     len(self._latest_cost_cache))
+                        self.async_update_listeners()
+                
+                self.hass.async_create_task(_delayed_notification())
+            else:
+                # If no data yet, just sync for when it's created
+                self._sync_cache_to_data()
+                # Notify listeners manually
+                self.async_update_listeners()
+                _LOGGER.debug("Notified listeners (no data yet, cache synced for later)")
+            
+        except Exception as err:
+            _LOGGER.warning("Error in batch fetch: %s", err)
+
     async def get_latest_consumption_value(
         self, utility_code: str, days: int = 7, measuring_point_id: int | None = None, external_key: str | None = None
     ) -> dict[str, Any] | None:
@@ -394,6 +805,20 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Returns a dict with 'value', 'time', 'unit', and 'utility_code',
         or None if no data is available.
         """
+        # First, try to get from cache (populated by batch fetch)
+        if measuring_point_id:
+            cache_key = f"{utility_code}_{measuring_point_id}"
+        else:
+            cache_key = f"{utility_code}_all"
+        
+        if cache_key in self._latest_consumption_cache:
+            cached = self._latest_consumption_cache[cache_key]
+            _LOGGER.debug("✓ Cache HIT: consumption data for %s (measuring_point_id=%s)", utility_code, measuring_point_id)
+            return cached
+        
+        # Cache miss - fall back to API call (for backward compatibility)
+        # This should rarely happen if batch fetch is working
+        _LOGGER.debug("✗ Cache MISS: consumption data for %s (measuring_point_id=%s), falling back to API", utility_code, measuring_point_id)
         try:
             # Get timezone from settings
             timezone_str = self.get_setting("TimeZoneIANA")
@@ -482,12 +907,20 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         for value_entry in reversed(values):
                             value = value_entry.get("Value")
                             if value is not None:
-                                return {
+                                result_data = {
                                     "value": value,
                                     "time": value_entry.get("Time"),
                                     "unit": unit,
                                     "utility_code": utility_code,
                                 }
+                                # Update cache for future use
+                                if measuring_point_id:
+                                    cache_key = f"{utility_code}_{measuring_point_id}"
+                                else:
+                                    cache_key = f"{utility_code}_all"
+                                self._latest_consumption_cache[cache_key] = result_data
+                                self._sync_cache_to_data()  # Keep coordinator.data in sync
+                                return result_data
 
             return None
         except Exception as err:
@@ -649,20 +1082,19 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         measuring_point_id: int | None = None,
         external_key: str | None = None,
     ) -> dict[str, Any] | None:
-        """Get the latest metered cost value from the API.
-
-        Returns only actual metered price data from the API. If no price data is available,
-        returns None (does not calculate from consumption).
-
-        Args:
-            utility_code: Utility code (e.g., "HW", "CW")
-            days: Number of days to look back (default: 30 to account for API delays)
-            measuring_point_id: Optional measuring point ID to filter by specific meter
-            external_key: Optional external key to filter by specific meter
-
-        Returns a dict with 'value', 'time', 'unit', 'utility_code', and 'cost_type',
-        or None if no metered price data is available.
-        """
+        # First, try to get from cache (populated by batch fetch)
+        if measuring_point_id:
+            cache_key = f"{utility_code}_{measuring_point_id}_metered"
+        else:
+            cache_key = f"{utility_code}_all_metered"
+        
+        if cache_key in self._latest_cost_cache:
+            cached = self._latest_cost_cache[cache_key]
+            _LOGGER.debug("✓ Cache HIT: metered cost data for %s (measuring_point_id=%s)", utility_code, measuring_point_id)
+            return cached
+        
+        # Cache miss - fall back to API call (for backward compatibility)
+        _LOGGER.debug("✗ Cache MISS: metered cost data for %s (measuring_point_id=%s), falling back to API", utility_code, measuring_point_id)
         price_data = await self._get_latest_price_data(
             utility_code=utility_code,
             days=days,
@@ -672,6 +1104,13 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if price_data:
             price_data["cost_type"] = "actual"
+            # Update cache for future use
+            if measuring_point_id:
+                cache_key = f"{utility_code}_{measuring_point_id}_metered"
+            else:
+                cache_key = f"{utility_code}_all_metered"
+            self._latest_cost_cache[cache_key] = price_data
+            self._sync_cache_to_data()  # Keep coordinator.data in sync
             return price_data
 
         _LOGGER.debug(
@@ -687,10 +1126,17 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         measuring_point_id: int | None = None,
         external_key: str | None = None,
     ) -> dict[str, Any] | None:
+        # For estimated cost, we can calculate from cached consumption + rate
+        # First try to get consumption from cache
+        if measuring_point_id:
+            consumption_cache_key = f"{utility_code}_{measuring_point_id}"
+        else:
+            consumption_cache_key = f"{utility_code}_all"
+        
         """Get the latest estimated cost value.
 
         First attempts to get actual price data from the API. If no price data is available,
-        calculates cost from consumption × rate. This is useful for utilities like HW where
+        calculates cost from consumption * rate. This is useful for utilities like HW where
         price data might not be available in the daily API.
 
         Args:
@@ -714,13 +1160,39 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             price_data["cost_type"] = "estimated"
             return price_data
 
-        # If no price data found, calculate from consumption × rate
+        # If no price data found, calculate from consumption * rate
         _LOGGER.debug(
-            "No price data found for %s (estimated), calculating from consumption × rate",
+            "No price data found for %s (estimated), calculating from consumption * rate",
             utility_code,
         )
 
+        # Try to get consumption from cache first
+        if measuring_point_id:
+            consumption_cache_key = f"{utility_code}_{measuring_point_id}"
+        else:
+            consumption_cache_key = f"{utility_code}_all"
+        
+        consumption_data = self._latest_consumption_cache.get(consumption_cache_key)
+        
+        # If not in cache, fetch it
+        if not consumption_data:
+            consumption_data = await self.get_latest_consumption_value(
+                utility_code=utility_code,
+                days=days,
+                measuring_point_id=measuring_point_id,
+                external_key=external_key,
+            )
+
         try:
+            if not consumption_data:
+                _LOGGER.debug("No consumption data available for %s", utility_code)
+                return None
+
+            consumption = consumption_data.get("value")
+            if consumption is None or consumption <= 0:
+                _LOGGER.debug("Consumption value is None or <= 0 for %s", utility_code)
+                return None
+
             # Get timezone from settings for rate calculation
             timezone_str = self.get_setting("TimeZoneIANA")
             if not timezone_str:
@@ -731,23 +1203,6 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception:
                 _LOGGER.warning("Invalid timezone %s, using UTC", timezone_str)
                 tz = zoneinfo.ZoneInfo("UTC")
-
-            # Get latest consumption value (this already handles API delays by looking back)
-            consumption_data = await self.get_latest_consumption_value(
-                utility_code=utility_code,
-                days=days,
-                measuring_point_id=measuring_point_id,
-                external_key=external_key,
-            )
-
-            if not consumption_data:
-                _LOGGER.debug("No consumption data available for %s", utility_code)
-                return None
-
-            consumption = consumption_data.get("value")
-            if consumption is None or consumption <= 0:
-                _LOGGER.debug("Consumption value is None or <= 0 for %s", utility_code)
-                return None
 
             # Get rate from billing for the date of the consumption data
             consumption_time = consumption_data.get("time")
@@ -765,12 +1220,12 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.debug("No rate found for %s", utility_code)
                 return None
 
-            # Calculate cost from consumption × rate
+            # Calculate cost from consumption * rate
             calculated_cost = consumption * rate
             currency = self.get_setting("Currency") or "NOK"
 
             _LOGGER.debug(
-                "Calculated estimated cost for %s: %.2f m3 × %.2f = %.2f %s",
+                "Calculated estimated cost for %s: %.2f m3 * %.2f = %.2f %s",
                 utility_code,
                 consumption,
                 rate,
@@ -1347,6 +1802,8 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         cost_type: str = "actual",
     ) -> dict[str, Any] | None:
         """Get monthly aggregate for consumption or price.
+        
+        First checks the monthly aggregate cache. If not found, makes API call and caches result.
 
         Args:
             utility_code: Utility code (e.g., "HW", "CW")
@@ -1359,27 +1816,88 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             Dict with 'value', 'unit', 'year', 'month', 'utility_code', 'aggregate_type', 'cost_type',
             or None if no data is available.
         """
+        # Check monthly aggregate cache first
+        cache_key = f"{utility_code}_{year}_{month}_{aggregate_type}_{cost_type}"
+        if cache_key in self._monthly_aggregate_cache:
+            cached = self._monthly_aggregate_cache[cache_key]
+            _LOGGER.debug("✓ Cache HIT: monthly aggregate %s", cache_key)
+            return cached
+        
+        # Cache miss - will try to calculate from daily cache or fetch from API
+        _LOGGER.debug("✗ Cache MISS: monthly aggregate %s, will try daily cache or API", cache_key)
+        
         # For price, use appropriate method based on utility
         if aggregate_type == "price":
-            # For "actual" cost_type, check if we have actual API price data first
+            # For "actual" cost_type, try to calculate from cached daily price data first (smart reuse!)
             if cost_type == "actual":
-                # Check if we have actual price data from the daily data API
+                timezone_str = self.get_setting("TimeZoneIANA") or "UTC"
                 try:
-                    timezone_str = self.get_setting("TimeZoneIANA") or "UTC"
-                    try:
-                        tz = zoneinfo.ZoneInfo(timezone_str)
-                    except Exception:
-                        tz = zoneinfo.ZoneInfo("UTC")
-
-                    from_date = datetime(year, month, 1, tzinfo=tz)
-                    if month == 12:
-                        to_date = datetime(year + 1, 1, 1, tzinfo=tz)
-                    else:
-                        to_date = datetime(year, month + 1, 1, tzinfo=tz)
-
-                    from_time = int(from_date.timestamp())
-                    to_time = int(to_date.timestamp())
-
+                    tz = zoneinfo.ZoneInfo(timezone_str)
+                except Exception:
+                    tz = zoneinfo.ZoneInfo("UTC")
+                
+                from_date = datetime(year, month, 1, tzinfo=tz)
+                if month == 12:
+                    to_date = datetime(year + 1, 1, 1, tzinfo=tz)
+                else:
+                    to_date = datetime(year, month + 1, 1, tzinfo=tz)
+                
+                from_time = int(from_date.timestamp())
+                to_time = int(to_date.timestamp())
+                
+                # Try to calculate from cached daily prices (aggregate across all meters)
+                total_price = 0.0
+                has_cached_data = False
+                
+                # Sum prices from all meters for this utility
+                for cache_key_price, daily_prices in self._daily_price_cache.items():
+                    if cache_key_price.startswith(f"{utility_code}_") and cache_key_price.endswith("_metered"):
+                        # Filter daily prices for this month
+                        month_prices = [
+                            p for p in daily_prices
+                            if from_time <= p["time"] < to_time and p.get("value") is not None and p.get("value", 0) > 0
+                        ]
+                        if month_prices:
+                            # Sum prices for this meter
+                            meter_total = sum(p["value"] for p in month_prices)
+                            total_price += meter_total
+                            has_cached_data = True
+                
+                if has_cached_data:
+                    currency = self.get_setting("Currency") or ""
+                    _LOGGER.info(
+                        "✓ Smart reuse: Calculated monthly price for %s %d-%02d from cached daily prices (no API call!)",
+                        utility_code, year, month
+                    )
+                    result = {
+                        "value": total_price,
+                        "unit": currency,
+                        "year": year,
+                        "month": month,
+                        "utility_code": utility_code,
+                        "aggregate_type": "price",
+                        "cost_type": "actual",
+                        "is_estimated": False,
+                    }
+                    # Cache the result
+                    self._monthly_aggregate_cache[cache_key] = result
+                    self._sync_cache_to_data()  # Keep coordinator.data in sync
+                    return result
+                else:
+                    _LOGGER.debug(
+                        "Daily price cache exists but no values for %s %d-%02d (date range mismatch?)",
+                        utility_code, year, month
+                    )
+                
+                # Cache miss - fall back to API call (but defer during startup)
+                if self.hass.state == CoreState.starting:
+                    _LOGGER.debug(
+                        "Deferring API call for monthly price aggregate %s %d-%02d (HA is starting)",
+                        utility_code, year, month
+                    )
+                    return None
+                
+                try:
                     data = await self.api.get_data(
                         node_id=self.node_id,
                         from_time=from_time,
@@ -1406,7 +1924,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                     if has_actual_api_data:
                         currency = self.get_setting("Currency") or ""
-                        return {
+                        result = {
                             "value": total_price,
                             "unit": currency,
                             "year": year,
@@ -1416,9 +1934,13 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             "cost_type": "actual",
                             "is_estimated": False,
                         }
+                        # Cache the result
+                        self._monthly_aggregate_cache[cache_key] = result
+                        self._sync_cache_to_data()  # Keep coordinator.data in sync
+                        return result
                 except Exception as err:
                     _LOGGER.debug(
-                        "Failed to check for actual API price data: %s",
+                        "Failed to fetch price from API: %s",
                         err,
                     )
 
@@ -1443,6 +1965,14 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                     from_time = int(from_date.timestamp())
                     to_time = int(to_date.timestamp())
+
+                    # Defer API calls during startup
+                    if self.hass.state == CoreState.starting:
+                        _LOGGER.debug(
+                            "Deferring API call for CW price %d-%02d (HA is starting)",
+                            year, month
+                        )
+                        return None
 
                     data = await self.api.get_data(
                         node_id=self.node_id,
@@ -1513,6 +2043,14 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                     from_time = int(from_date.timestamp())
                     to_time = int(to_date.timestamp())
+
+                    # Defer API calls during startup
+                    if self.hass.state == CoreState.starting:
+                        _LOGGER.debug(
+                            "Deferring API call for HW price check %d-%02d (HA is starting)",
+                            year, month
+                        )
+                        return None
 
                     # Check if we have actual price data from API
                     data = await self.api.get_data(
@@ -1631,7 +2169,61 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             return result
 
-        # For consumption, aggregate from daily data
+        # For consumption, try to calculate from cached daily data first (smart reuse!)
+        # This avoids API calls by reusing data we already fetched
+        if aggregate_type == "con":
+            # Try to calculate from cached daily consumption data
+            cache_key_daily = f"{utility_code}_all"  # Use aggregate cache key
+            daily_values = self._daily_consumption_cache.get(cache_key_daily)
+            
+            if daily_values:
+                # Get timezone for date calculations
+                timezone_str = self.get_setting("TimeZoneIANA") or "UTC"
+                try:
+                    tz = zoneinfo.ZoneInfo(timezone_str)
+                except Exception:
+                    tz = zoneinfo.ZoneInfo("UTC")
+                
+                # Calculate month boundaries
+                from_date = datetime(year, month, 1, tzinfo=tz)
+                if month == 12:
+                    to_date = datetime(year + 1, 1, 1, tzinfo=tz)
+                else:
+                    to_date = datetime(year, month + 1, 1, tzinfo=tz)
+                
+                from_time = int(from_date.timestamp())
+                to_time = int(to_date.timestamp())
+                
+                # Filter daily values for this month
+                month_values = [
+                    v for v in daily_values
+                    if from_time <= v["time"] < to_time and v.get("value") is not None
+                ]
+                
+                if month_values:
+                    # Sum all values for the month
+                    total_value = sum(v["value"] for v in month_values)
+                    unit = month_values[0].get("unit", "") if month_values else ""
+                    
+                    _LOGGER.debug(
+                        "Calculated monthly consumption for %s %d-%02d from %d cached daily values (reused data!)",
+                        utility_code, year, month, len(month_values)
+                    )
+                    
+                    result = {
+                        "value": total_value,
+                        "unit": unit,
+                        "year": year,
+                        "month": month,
+                        "utility_code": utility_code,
+                        "aggregate_type": aggregate_type,
+                    }
+                    # Cache the result
+                    self._monthly_aggregate_cache[cache_key] = result
+                    self._sync_cache_to_data()  # Keep coordinator.data in sync
+                    return result
+        
+        # Fall back to API call if cache miss or for price aggregates
         try:
             # Get timezone from settings
             timezone_str = self.get_setting("TimeZoneIANA")
@@ -1655,8 +2247,16 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             from_time = int(from_date.timestamp())
             to_time = int(to_date.timestamp())
 
+            # Defer API calls during startup
+            if self.hass.state == CoreState.starting:
+                _LOGGER.debug(
+                    "Deferring API call for monthly aggregate %s[%s] %d-%02d (HA is starting)",
+                    utility_code, aggregate_type, year, month
+                )
+                return None
+
             _LOGGER.debug(
-                "Fetching monthly aggregate for %s[%s] %d-%02d: from=%s to=%s",
+                "Fetching monthly aggregate for %s[%s] %d-%02d from API (cache miss): from=%s to=%s",
                 utility_code,
                 aggregate_type,
                 year,
@@ -1669,15 +2269,15 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             utilities = [f"{utility_code}[{aggregate_type}]"]
 
             # Create cache key for this request
-            cache_key = f"data_{self.node_id}_{from_time}_{to_time}_{utility_code}_{aggregate_type}"
+            api_cache_key = f"data_{self.node_id}_{from_time}_{to_time}_{utility_code}_{aggregate_type}"
 
-            # Check cache first
-            if cache_key in self._data_request_cache:
-                cached_data, cache_timestamp = self._data_request_cache[cache_key]
+            # Check API request cache first
+            if api_cache_key in self._data_request_cache:
+                cached_data, cache_timestamp = self._data_request_cache[api_cache_key]
                 age = time.time() - cache_timestamp
                 if age < self._data_cache_ttl:
                     _LOGGER.debug(
-                        "Using cached data for %s[%s] %d-%02d (age: %.1f seconds)",
+                        "Using cached API data for %s[%s] %d-%02d (age: %.1f seconds)",
                         utility_code,
                         aggregate_type,
                         year,
@@ -1687,13 +2287,13 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     data = cached_data
                 else:
                     # Cache expired, remove it
-                    del self._data_request_cache[cache_key]
+                    del self._data_request_cache[api_cache_key]
                     data = None
             else:
                 data = None
 
             # Check if there's already a pending request for this data
-            if data is None and cache_key in self._pending_requests:
+            if data is None and api_cache_key in self._pending_requests:
                 _LOGGER.debug(
                     "Waiting for pending request for %s[%s] %d-%02d",
                     utility_code,
@@ -1702,7 +2302,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     month,
                 )
                 try:
-                    data = await self._pending_requests[cache_key]
+                    data = await self._pending_requests[api_cache_key]
                 except Exception as err:
                     _LOGGER.warning(
                         "Pending request failed for %s[%s] %d-%02d: %s",
@@ -1713,8 +2313,8 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         err,
                     )
                     # Remove failed pending request
-                    if cache_key in self._pending_requests:
-                        del self._pending_requests[cache_key]
+                    if api_cache_key in self._pending_requests:
+                        del self._pending_requests[api_cache_key]
                     data = None
 
             # If no cached data and no pending request, make the API call
@@ -1733,16 +2333,16 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
                         # Cache the result
                         if result:
-                            self._data_request_cache[cache_key] = (result, time.time())
+                            self._data_request_cache[api_cache_key] = (result, time.time())
                         return result
                     finally:
                         # Remove from pending requests when done
-                        if cache_key in self._pending_requests:
-                            del self._pending_requests[cache_key]
+                        if api_cache_key in self._pending_requests:
+                            del self._pending_requests[api_cache_key]
 
                 # Store the task
                 task = asyncio.create_task(fetch_data())
-                self._pending_requests[cache_key] = task
+                self._pending_requests[api_cache_key] = task
 
                 # Wait for the result
                 data = await task
@@ -1772,7 +2372,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not has_data:
                 return None
 
-            return {
+            result = {
                 "value": total_value,
                 "unit": unit,
                 "year": year,
@@ -1780,6 +2380,10 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "utility_code": utility_code,
                 "aggregate_type": aggregate_type,
             }
+            # Cache the result
+            self._monthly_aggregate_cache[cache_key] = result
+            self._sync_cache_to_data()  # Keep coordinator.data in sync
+            return result
         except Exception as err:
             _LOGGER.warning(
                 "Failed to fetch monthly aggregate for %s[%s] %d-%02d: %s",
@@ -4118,7 +4722,12 @@ class EcoGuardLatestReceptionCoordinator(DataUpdateCoordinator[list[dict[str, An
         self.node_id = node_id
 
     async def _async_update_data(self) -> list[dict[str, Any]]:
-        """Fetch latest reception data from EcoGuard API."""
+        """Fetch latest reception data from EcoGuard API.
+        
+        Note: Latest reception is fetched after Home Assistant has fully started
+        (see __init__.py for the startup event listener) to avoid blocking startup.
+        During periodic updates, this method will fetch fresh data.
+        """
         try:
             latest_reception = await self.api.get_latest_reception(self.node_id)
             _LOGGER.debug("Fetched latest reception data: %d entries", len(latest_reception))
