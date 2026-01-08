@@ -107,14 +107,14 @@ The integration creates the following sensors, organized by purpose (Consumption
 - **Status**: Disabled by default (enable in entity registry if needed)
 
 #### Daily Consumption (Aggregated by Utility)
-- **Format**: `Consumption Daily - Utility`
+- **Format**: `Consumption Daily Metered - Utility`
 - **Examples**: 
-  - `Consumption Daily - Hot Water`
-  - `Consumption Daily - Cold Water`
+  - `Consumption Daily Metered - Hot Water`
+  - `Consumption Daily Metered - Cold Water`
 - Aggregated daily consumption across all meters for each utility type
 
 #### Daily Consumption (Combined Water)
-- **Format**: `Consumption Daily - Combined Water`
+- **Format**: `Consumption Daily Metered - Combined Water`
 - Combined hot and cold water daily consumption
 
 #### Monthly Consumption (Aggregated by Utility)

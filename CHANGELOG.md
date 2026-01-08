@@ -19,7 +19,7 @@ Major bump because breaking changes. Strictly following semantic versioning.
   - Format: `Consumption Monthly Aggregated - Meter "Measuring Point" (Utility)`
   - Format: `Cost Monthly Aggregated Metered - Meter "Measuring Point" (Utility)`
 - **Combined Water Sensors**: Combined hot and cold water consumption and costs
-  - Daily consumption: `Consumption Daily - Combined Water`
+  - Daily consumption: `Consumption Daily Metered - Combined Water`
   - Daily cost: `Cost Daily Metered - Combined Water` / `Cost Daily Estimated - Combined Water`
 
 #### Translation Support
@@ -36,7 +36,7 @@ Sensor names have been restructured to improve grouping and sorting in lists. Wh
 
 - **Consumption sensors**: Renamed from "Daily Consumption" to "Consumption Daily" format
   - Individual meters: `Consumption Daily - Meter "Measuring Point" (Utility)`
-  - Aggregated: `Consumption Daily - Utility`
+  - Aggregated: `Consumption Daily Metered - Utility`
 - **Cost sensors**: Renamed to "Cost Daily" and "Cost Monthly Aggregated" format
   - Individual meters: `Cost Daily Metered - Meter "Measuring Point" (Utility)`
   - Aggregated: `Cost Monthly Aggregated Metered - Utility`
