@@ -1,11 +1,11 @@
-# EcoGuard Home Assistant Integration
+# EcoGuard Home Assistant
 
 A Home Assistant custom integration for monitoring utility usage and costs through the EcoGuard Curves platform. EcoGuard delivers complete solutions and services for individual metering and distribution of water, heating, electricity and charging costs for housing companies in the Nordic region.
 
 <img width="503" height="763" alt="image" src="https://i.imgur.com/uCekRul.png" />
 
 This integration is currently mostly focused around water consumption metering and price estimation. Help for integrating support for other utilities (heating, electricity) are welcome, but I have yet to see this returned by the EcoGuard API.
-The integration will however map out all sensors found. If you have access to sensors with utility codes other than 'HW' and 'CW', please contact me and help include support for these.
+The integration will however map out all sensors found. If you have access to sensors with utility codes other than 'HW' (hot water) and 'CW' (cold water), please contact me and help include proper support for these.
 
 ## Features
 
