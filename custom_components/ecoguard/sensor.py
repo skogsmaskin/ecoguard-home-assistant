@@ -2104,7 +2104,7 @@ class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator],
         year = now.year
         month = now.month
 
-        cost_data = await self.coordinator.get_monthly_other_items_cost(
+        cost_data = await self.coordinator.billing_manager.get_monthly_other_items_cost(
             year=year,
             month=month,
         )
@@ -2557,18 +2557,40 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         self._attr_available = True
         self.async_write_ha_state()
         
-        # Only trigger async fetch if HA is fully started (not during startup)
-        if self.hass and not self.hass.is_stopping and not is_starting:
-            self.hass.async_create_task(self._async_fetch_value())
+        # Trigger async fetch (with delay during startup to avoid blocking)
+        if self.hass and not self.hass.is_stopping:
+            if is_starting:
+                # Delay during startup to avoid blocking
+                async def delayed_fetch():
+                    await asyncio.sleep(5)  # Wait 5 seconds after startup
+                    await self._async_fetch_value()
+                self.hass.async_create_task(delayed_fetch())
+            else:
+                self.hass.async_create_task(self._async_fetch_value())
 
     async def _async_fetch_value(self) -> None:
         """Fetch end-of-month estimate asynchronously."""
-        estimate_data = await self.coordinator.get_end_of_month_estimate()
+        _LOGGER.info("Starting async fetch for sensor.cost_monthly_estimated_final_settlement")
+        try:
+            _LOGGER.debug("Calling coordinator.get_end_of_month_estimate()")
+            estimate_data = await self.coordinator.get_end_of_month_estimate()
+            _LOGGER.debug("coordinator.get_end_of_month_estimate() returned: %s", "None" if estimate_data is None else f"dict with {len(estimate_data)} keys")
+        except Exception as err:
+            _LOGGER.error("Exception in get_end_of_month_estimate for sensor.cost_monthly_estimated_final_settlement: %s", err, exc_info=True)
+            estimate_data = None
 
         # Always set currency unit to prevent statistics issues
         default_currency = self.coordinator.get_setting("Currency") or ""
 
         if estimate_data:
+            _LOGGER.info(
+                "Updated sensor.cost_monthly_estimated_final_settlement: %.2f %s (HW: %.2f, CW: %.2f, Other: %.2f)",
+                estimate_data.get("total_bill_estimate", 0),
+                estimate_data.get("currency", default_currency),
+                estimate_data.get("hw_price_estimate", 0),
+                estimate_data.get("cw_price_estimate", 0),
+                estimate_data.get("other_items_cost", 0),
+            )
             raw_value = estimate_data.get("total_bill_estimate")
             self._attr_native_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
             # Use currency from data, or fall back to default
@@ -2620,6 +2642,9 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             self._cw_consumption_so_far = None
             self._cw_price_so_far = None
             self._hw_price_is_estimated = False
+            _LOGGER.debug(
+                "No estimate data available for sensor.cost_monthly_estimated_final_settlement (get_end_of_month_estimate returned None)"
+            )
 
         self.async_write_ha_state()
 

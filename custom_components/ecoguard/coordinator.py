@@ -18,14 +18,10 @@ from .const import (
     UPDATE_INTERVAL_DATA,
     UPDATE_INTERVAL_LATEST_RECEPTION,
 )
-
-# Try to import nordpool library (optional dependency)
-try:
-    from nordpool import elspot
-    NORD_POOL_AVAILABLE = True
-except ImportError:
-    NORD_POOL_AVAILABLE = False
-    elspot = None
+from .helpers import get_timezone, get_month_timestamps
+from .nord_pool import NordPoolPriceFetcher, NORD_POOL_AVAILABLE
+from .price_calculator import HWPriceCalculator
+from .billing_manager import BillingManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,12 +55,23 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._latest_reception: list[dict[str, Any]] = []
         self._node_data: dict[str, Any] | None = None
         self._settings: list[dict[str, Any]] = []
+        # Initialize Nord Pool price fetcher
         self._nord_pool_price_cache: dict[str, float] = {}  # Cache for current day prices
-        self._hw_calibration_ratio: float | None = None  # Calibrated ratio from historical data
-        self._hw_calibration_calculated: bool = False  # Flag to track if calibration was attempted
-        self._hw_calibration_lock: asyncio.Lock = asyncio.Lock()  # Lock to prevent race conditions in calibration calculation
+        self._nord_pool_fetcher: NordPoolPriceFetcher | None = None
+        if nord_pool_area:
+            self._nord_pool_fetcher = NordPoolPriceFetcher(price_cache=self._nord_pool_price_cache)
+        
+        # Initialize HW price calculator
+        self._hw_price_calculator: HWPriceCalculator | None = None
+        
+        # HW calibration ratio for spot price calculations
+        self._hw_calibration_ratio: float | None = None
+        self._hw_calibration_calculated: bool = False
+        self._hw_calibration_lock = asyncio.Lock()
+        
         self._billing_results_cache: dict[str, tuple[list[dict[str, Any]], float]] = {}  # Cache for billing results: key -> (data, timestamp)
         self._billing_cache_ttl: float = 86400.0  # Cache billing data for 24 hours (it's historical and doesn't change)
+        
         self._data_request_cache: dict[str, tuple[Any, float]] = {}  # Cache for data API requests: key -> (data, timestamp)
         self._data_cache_ttl: float = 60.0  # Cache data requests for 60 seconds to prevent duplicate calls
         self._pending_requests: dict[str, asyncio.Task] = {}  # Track pending requests to deduplicate simultaneous calls
@@ -85,6 +92,21 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Key format: f"{utility_code}_{year}_{month}_{aggregate_type}_{cost_type}"
         self._monthly_aggregate_cache: dict[str, dict[str, Any]] = {}  # Monthly aggregates
         self._cache_timestamp: float = 0.0  # When cache was last updated
+        
+        # Initialize billing manager after all attributes are set
+        self.billing_manager = BillingManager(
+            api=self.api,
+            node_id=self.node_id,
+            hass=self.hass,
+            billing_cache=self._billing_results_cache,
+            pending_requests=self._pending_requests,
+            pending_requests_lock=self._pending_requests_lock,
+            get_setting=self.get_setting,
+            billing_cache_ttl=self._billing_cache_ttl,
+            get_monthly_aggregate=lambda uc, y, m, at, ct: self.get_monthly_aggregate(uc, y, m, at, ct),
+            get_hw_price_from_spot_prices=lambda c, y, m, cwp, cwc: self._get_hw_price_from_spot_prices(c, y, m, cwp, cwc),
+            nord_pool_area=self.nord_pool_area,
+        )
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from EcoGuard API.
@@ -223,144 +245,6 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if setting.get("Name") == name:
                 return setting.get("Value")
         return None
-
-    async def _get_cached_billing_results(
-        self,
-        node_id: int,
-        start_from: int | None = None,
-        start_to: int | None = None,
-        cache_key: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Get billing results with caching and request deduplication.
-
-        Billing data is historical and doesn't change, so we cache it for 24 hours
-        to avoid unnecessary API calls and improve reliability.
-        
-        This method also deduplicates simultaneous requests for the same cache key
-        to prevent multiple API calls when multiple sensors request the same data.
-
-        Args:
-            node_id: Node ID
-            start_from: Start timestamp (optional)
-            start_to: End timestamp (optional)
-            cache_key: Optional cache key (if not provided, will be generated)
-
-        Returns:
-            List of billing results
-        """
-        import time
-
-        # Generate cache key if not provided
-        if cache_key is None:
-            cache_key = f"billing_{node_id}_{start_from}_{start_to}"
-
-        # Check cache first
-        if cache_key in self._billing_results_cache:
-            cached_data, cache_timestamp = self._billing_results_cache[cache_key]
-            age = time.time() - cache_timestamp
-
-            if age < self._billing_cache_ttl:
-                _LOGGER.debug(
-                    "Cached billing results for key %s (age: %.1f seconds)",
-                    cache_key,
-                    age,
-                )
-                return cached_data
-            else:
-                _LOGGER.debug(
-                    "Billing cache expired for key %s (age: %.1f seconds, TTL: %.1f seconds)",
-                    cache_key,
-                    age,
-                    self._billing_cache_ttl,
-                )
-                # Remove expired cache entry
-                del self._billing_results_cache[cache_key]
-
-        # Check if there's already a pending request for this cache key
-        if cache_key in self._pending_requests:
-            pending_task = self._pending_requests[cache_key]
-            if not pending_task.done():
-                _LOGGER.debug(
-                    "Waiting for pending billing results request for key %s",
-                    cache_key,
-                )
-                try:
-                    data = await pending_task
-                    return data
-                except Exception as err:
-                    _LOGGER.debug(
-                        "Pending billing request failed for key %s: %s",
-                        cache_key,
-                        err,
-                    )
-                    # Remove failed task and continue to fetch
-                    if cache_key in self._pending_requests:
-                        del self._pending_requests[cache_key]
-            else:
-                # Task completed, remove it
-                del self._pending_requests[cache_key]
-
-        # Defer API calls during HA startup to avoid blocking initialization
-        if self.hass.state == CoreState.starting:
-            _LOGGER.debug(
-                "Deferring billing results API call for key %s (HA is starting, using cached data if available)",
-                cache_key
-            )
-            # Return expired cached data if available, or empty list
-            if cache_key in self._billing_results_cache:
-                cached_data, _ = self._billing_results_cache[cache_key]
-                _LOGGER.debug("Using expired cached billing data during startup")
-                return cached_data
-            return []
-        
-        # Create async task for fetching
-        async def _fetch_billing_results() -> list[dict[str, Any]]:
-            try:
-                _LOGGER.debug("Fetching billing results from API for key %s", cache_key)
-                billing_results = await self.api.get_billing_results(
-                    node_id=node_id,
-                    start_from=start_from,
-                    start_to=start_to,
-                )
-
-                # Cache the results
-                if billing_results:
-                    self._billing_results_cache[cache_key] = (billing_results, time.time())
-                    _LOGGER.debug(
-                        "Cached billing results for key %s (%d results)",
-                        cache_key,
-                        len(billing_results),
-                    )
-
-                return billing_results if billing_results else []
-            except Exception as err:
-                _LOGGER.warning(
-                    "Failed to fetch billing results for key %s: %s. Using cached data if available.",
-                    cache_key,
-                    err,
-                )
-                # Return cached data even if expired, as fallback
-                if cache_key in self._billing_results_cache:
-                    cached_data, _ = self._billing_results_cache[cache_key]
-                    _LOGGER.debug("Using expired cached billing data as fallback")
-                    return cached_data
-                return []
-            finally:
-                # Clean up pending request
-                if cache_key in self._pending_requests:
-                    del self._pending_requests[cache_key]
-
-        # Create and track the task
-        task = asyncio.create_task(_fetch_billing_results())
-        self._pending_requests[cache_key] = task
-        
-        try:
-            return await task
-        except Exception as err:
-            # Clean up on error
-            if cache_key in self._pending_requests:
-                del self._pending_requests[cache_key]
-            raise
 
     def _log_static_info_summary(self) -> None:
         """Log a summary of all static information."""
@@ -1310,21 +1194,12 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Returns a dict with 'value', 'time', 'unit', 'utility_code', and 'cost_type',
         or None if no data is available.
         """
-        # First try to get actual price data from API
-        price_data = await self._get_latest_price_data(
-            utility_code=utility_code,
-            days=days,
-            measuring_point_id=measuring_point_id,
-            external_key=external_key,
-        )
-
-        if price_data:
-            price_data["cost_type"] = "estimated"
-            return price_data
-
-        # If no price data found, calculate from consumption * rate
+        # For estimated costs, skip API price data check and calculate directly
+        # "Estimated" means we calculate from consumption * rate (or spot prices for HW),
+        # not fetch from API (which would be "actual" data)
+        # This avoids blocking on API requests that may never complete
         _LOGGER.debug(
-            "No price data found for %s (estimated), calculating from consumption * rate",
+            "Calculating estimated cost for %s from consumption (spot prices for HW, rate for others)",
             utility_code,
         )
 
@@ -1509,7 +1384,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 del self._pending_requests[hw_cost_cache_key]
 
             # For non-HW or if spot price calculation failed, use billing rate
-            rate = await self.get_rate_from_billing(utility_code, year, month)
+            rate = await self.billing_manager.get_rate_from_billing(utility_code, year, month)
 
             if rate is None:
                 _LOGGER.debug("No rate found for %s", utility_code)
@@ -1552,542 +1427,6 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if inst.get("To") is None
         ]
 
-    async def get_rate_from_billing(
-        self,
-        utility_code: str,
-        year: int,
-        month: int,
-    ) -> float | None:
-        """Get the rate (price per m3) from billing results for a utility.
-
-        Since billing is lagging 2-3 months behind, looks back at least 3 months
-        to find the most recent billing period with rate information.
-
-        Args:
-            utility_code: Utility code (e.g., "HW", "CW")
-            year: Year (e.g., 2025)
-            month: Month (1-12)
-
-        Returns:
-            Rate per m3 from the most recent billing period found, or None if not found.
-        """
-        try:
-            # Get timezone from settings
-            timezone_str = self.get_setting("TimeZoneIANA")
-            if not timezone_str:
-                timezone_str = "UTC"
-
-            try:
-                tz = zoneinfo.ZoneInfo(timezone_str)
-            except Exception:
-                _LOGGER.warning("Invalid timezone %s, using UTC", timezone_str)
-                tz = zoneinfo.ZoneInfo("UTC")
-
-            # Calculate month boundaries in the configured timezone
-            from_date = datetime(year, month, 1, tzinfo=tz)
-            # Get first day of next month
-            if month == 12:
-                to_date = datetime(year + 1, 1, 1, tzinfo=tz)
-            else:
-                to_date = datetime(year, month + 1, 1, tzinfo=tz)
-
-            from_time = int(from_date.timestamp())
-            to_time = int(to_date.timestamp())
-
-            # Fetch billing results - look back at least 4 months (120 days) to account for
-            # billing lag of 2-3 months. We want to find the most recent billing period available.
-            lookback_days = 120  # 4 months to be safe
-            lookback_time = from_time - (lookback_days * 24 * 60 * 60)
-
-            _LOGGER.debug(
-                "Fetching billing results for rate lookup: from %s (lookback %d days) to %s",
-                lookback_time,
-                lookback_days,
-                to_time,
-            )
-
-            billing_results = await self.api.get_billing_results(
-                node_id=self.node_id,
-                start_from=lookback_time,
-                start_to=to_time,
-            )
-
-            if not billing_results or not isinstance(billing_results, list):
-                _LOGGER.debug("No billing results found for rate lookup")
-                return None
-
-            # Find the most recent billing result that has rate information for this utility
-            # Sort by end time descending to get most recent billing period first
-            sorted_results = sorted(
-                billing_results,
-                key=lambda x: x.get("End", 0),
-                reverse=True
-            )
-
-            for billing_result in sorted_results:
-                billing_start = billing_result.get("Start")
-                billing_end = billing_result.get("End")
-
-                if not billing_start or not billing_end:
-                    continue
-
-                parts = billing_result.get("Parts", [])
-                for part in parts:
-                    part_code = part.get("Code")
-                    if part_code == utility_code:
-                        # Look for variable charge items (Type C1 typically)
-                        items = part.get("Items", [])
-                        for item in items:
-                            price_component = item.get("PriceComponent", {})
-                            component_type = price_component.get("Type", "")
-                            rate = item.get("Rate")
-                            rate_unit = item.get("RateUnit", "")
-
-                            # Look for variable charges (C1 type) with m3 unit
-                            if component_type in ("C1", "C2") and rate_unit == "m3" and rate is not None:
-                                # Convert billing period timestamps to readable dates for logging
-                                billing_start_date = datetime.fromtimestamp(billing_start, tz=tz).strftime("%Y-%m-%d")
-                                billing_end_date = datetime.fromtimestamp(billing_end, tz=tz).strftime("%Y-%m-%d")
-
-                                _LOGGER.debug(
-                                    "Found rate for %s: %.2f %s (from billing period %s to %s)",
-                                    utility_code,
-                                    rate,
-                                    rate_unit,
-                                    billing_start_date,
-                                    billing_end_date,
-                                )
-                                return float(rate)
-
-            _LOGGER.debug("No rate found for %s in billing results", utility_code)
-            return None
-        except Exception as err:
-            _LOGGER.warning(
-                "Failed to get rate from billing for %s %d-%02d: %s",
-                utility_code,
-                year,
-                month,
-                err,
-            )
-            return None
-
-    async def get_monthly_other_items_cost(
-        self,
-        year: int,
-        month: int,
-    ) -> dict[str, Any] | None:
-        """Get monthly cost for other items (general fees) from billing results.
-
-        Looks for parts with Code=null and Name="Øvrig" (or similar) in billing results.
-        Uses the most recent billing data as the source of truth.
-
-        Args:
-            year: Year (e.g., 2025)
-            month: Month (1-12)
-
-        Returns:
-            Dict with 'value', 'unit', 'year', 'month', 'utility_code', 'aggregate_type',
-            or None if no data is available.
-        """
-        try:
-            # Get timezone from settings
-            timezone_str = self.get_setting("TimeZoneIANA")
-            if not timezone_str:
-                timezone_str = "UTC"
-
-            try:
-                tz = zoneinfo.ZoneInfo(timezone_str)
-            except Exception:
-                _LOGGER.warning("Invalid timezone %s, using UTC", timezone_str)
-                tz = zoneinfo.ZoneInfo("UTC")
-
-            # Calculate month boundaries in the configured timezone
-            from_date = datetime(year, month, 1, tzinfo=tz)
-            # Get first day of next month
-            if month == 12:
-                to_date = datetime(year + 1, 1, 1, tzinfo=tz)
-            else:
-                to_date = datetime(year, month + 1, 1, tzinfo=tz)
-
-            from_time = int(from_date.timestamp())
-            to_time = int(to_date.timestamp())
-
-            # Look back up to 6 months to find billing results
-            lookback_time = from_time - (180 * 24 * 60 * 60)  # 6 months
-            cache_key = f"monthly_other_items_{year}_{month}"
-            billing_results = await self._get_cached_billing_results(
-                node_id=self.node_id,
-                start_from=lookback_time,
-                start_to=to_time,
-                cache_key=cache_key,
-            )
-
-            if not billing_results or not isinstance(billing_results, list):
-                _LOGGER.debug("No billing results found for other items cost")
-                return None
-
-            # Sort by end date descending to get most recent first
-            sorted_results = sorted(
-                billing_results,
-                key=lambda x: x.get("End", 0),
-                reverse=True
-            )
-
-            # Find the most recent billing result with "other items" (Øvrig)
-            for billing_result in sorted_results:
-                parts = billing_result.get("Parts", [])
-                if not parts:
-                    continue
-
-                # Look for part with Code=null and Name="Øvrig" (or similar variations)
-                for part in parts:
-                    part_code = part.get("Code")
-                    part_name = part.get("Name", "")
-
-                    # Check if this is the "other items" part
-                    # Code should be null/None, and Name should be "Øvrig" or similar
-                    if part_code is None or part_code == "":
-                        # Check if name matches common variations
-                        part_name_lower = part_name.lower()
-                        if (
-                            "øvrig" in part_name_lower
-                            or "other" in part_name_lower
-                            or "andre" in part_name_lower
-                            or "misc" in part_name_lower
-                            or "generelle" in part_name_lower
-                        ):
-                            # Found the other items part, sum all items
-                            items = part.get("Items", [])
-                            total_cost = 0.0
-                            item_details = []
-
-                            for item in items:
-                                item_total = item.get("Total", 0)
-                                if isinstance(item_total, (int, float)) and item_total > 0:
-                                    total_cost += item_total
-
-                                    # Collect item details for logging
-                                    item_name = item.get("PriceComponent", {}).get("Name", "Unknown")
-                                    item_rate = item.get("Rate", 0)
-                                    item_details.append({
-                                        "name": item_name,
-                                        "rate": item_rate,
-                                        "total": item_total,
-                                    })
-
-                            if total_cost > 0:
-                                # Apply rounding from the part to match the actual bill
-                                rounding = part.get("Rounding", 0.0)
-                                if isinstance(rounding, (int, float)):
-                                    total_cost += rounding
-
-                                currency = self.get_setting("Currency") or "NOK"
-
-                                billing_start = billing_result.get("Start")
-                                billing_end = billing_result.get("End")
-
-                                _LOGGER.debug(
-                                    "Found other items cost: %.2f %s for %d-%02d (from billing period %s to %s, %d items, rounding: %.2f)",
-                                    total_cost,
-                                    currency,
-                                    year,
-                                    month,
-                                    datetime.fromtimestamp(billing_start, tz=tz).strftime("%Y-%m-%d") if billing_start else "unknown",
-                                    datetime.fromtimestamp(billing_end, tz=tz).strftime("%Y-%m-%d") if billing_end else "unknown",
-                                    len(item_details),
-                                    rounding,
-                                )
-
-                                return {
-                                    "value": total_cost,
-                                    "unit": currency,
-                                    "year": year,
-                                    "month": month,
-                                    "utility_code": "OTHER",
-                                    "aggregate_type": "price",
-                                    "cost_type": "actual",
-                                    "is_estimated": False,
-                                    "billing_period_start": billing_start,
-                                    "billing_period_end": billing_end,
-                                    "item_count": len(item_details),
-                                    "items": item_details,
-                                    "rounding": rounding,
-                                }
-
-            _LOGGER.debug("No other items found in billing results for %d-%02d", year, month)
-            return None
-
-        except Exception as err:
-            _LOGGER.warning(
-                "Failed to get other items cost for %d-%02d: %s",
-                year,
-                month,
-                err,
-            )
-            return None
-
-    async def get_monthly_price_from_billing(
-        self,
-        utility_code: str,
-        year: int,
-        month: int,
-    ) -> dict[str, Any] | None:
-        """Get monthly price from billing results or calculate from consumption × rate.
-
-        For HW: Calculates price from consumption × rate (since HW price is often 0 in daily data)
-        For CW: Tries to get price from billing results, falls back to calculation if needed
-
-        Args:
-            utility_code: Utility code (e.g., "HW", "CW")
-            year: Year (e.g., 2025)
-            month: Month (1-12)
-
-        Returns:
-            Dict with 'value', 'unit', 'year', 'month', 'utility_code', 'aggregate_type',
-            or None if no data is available.
-        """
-        try:
-            # Get timezone from settings
-            timezone_str = self.get_setting("TimeZoneIANA")
-            if not timezone_str:
-                timezone_str = "UTC"
-
-            try:
-                tz = zoneinfo.ZoneInfo(timezone_str)
-            except Exception:
-                _LOGGER.warning("Invalid timezone %s, using UTC", timezone_str)
-                tz = zoneinfo.ZoneInfo("UTC")
-
-            # Calculate month boundaries in the configured timezone
-            from_date = datetime(year, month, 1, tzinfo=tz)
-            # Get first day of next month
-            if month == 12:
-                to_date = datetime(year + 1, 1, 1, tzinfo=tz)
-            else:
-                to_date = datetime(year, month + 1, 1, tzinfo=tz)
-
-            from_time = int(from_date.timestamp())
-            to_time = int(to_date.timestamp())
-
-            _LOGGER.debug(
-                "Fetching monthly price from billing for %s %d-%02d: from=%s to=%s",
-                utility_code,
-                year,
-                month,
-                from_time,
-                to_time,
-            )
-
-            # For HW, try spot prices first (for current month), then fall back to billing rates
-            # For CW, try billing results first, then fall back to calculation
-            if utility_code == "HW":
-                # Get monthly consumption
-                consumption_data = await self.get_monthly_aggregate(
-                    utility_code=utility_code,
-                    year=year,
-                    month=month,
-                    aggregate_type="con",
-                )
-
-                if not consumption_data:
-                    _LOGGER.debug("No consumption data for %s %d-%02d", utility_code, year, month)
-                    return None
-
-                consumption = consumption_data.get("value")
-                if consumption is None:
-                    return None
-
-                # Try to calculate using spot prices for current month
-                # This gives more accurate pricing for recent consumption
-                now = datetime.now(tz)
-                is_current_month = (year == now.year and month == now.month)
-
-                if is_current_month:
-                    _LOGGER.debug(
-                        "Current month detected for %s %d-%02d, attempting to use spot prices",
-                        utility_code,
-                        year,
-                        month,
-                    )
-
-                    # Get current month's CW price and consumption if available (more accurate than billing rate)
-                    cw_price_data = await self.get_monthly_aggregate(
-                        utility_code="CW",
-                        year=year,
-                        month=month,
-                        aggregate_type="price",
-                    )
-                    cold_water_price = cw_price_data.get("value") if cw_price_data else None
-
-                    # Also get CW consumption to avoid fetching it again in the spot price function
-                    cw_consumption_data = await self.get_monthly_aggregate(
-                        utility_code="CW",
-                        year=year,
-                        month=month,
-                        aggregate_type="con",
-                    )
-                    cw_consumption = cw_consumption_data.get("value") if cw_consumption_data else None
-
-                    spot_price_data = await self._get_hw_price_from_spot_prices(
-                        consumption=consumption,
-                        year=year,
-                        month=month,
-                        cold_water_price=cold_water_price,
-                        cold_water_consumption=cw_consumption,
-                    )
-
-                    if spot_price_data:
-                        _LOGGER.info(
-                            "Calculated %s price for %d-%02d using spot prices: %.2f m3 = %.2f NOK (sensor: %s)",
-                            utility_code,
-                            year,
-                            month,
-                            consumption,
-                            spot_price_data.get("value"),
-                            spot_price_data.get("price_sensor", "unknown"),
-                        )
-                        return spot_price_data
-                    else:
-                        _LOGGER.debug(
-                            "Spot price calculation failed for %s %d-%02d, falling back to billing rate",
-                            utility_code,
-                            year,
-                            month,
-                        )
-
-                # Fall back to billing rate (for historical months or if spot prices unavailable)
-                rate = await self.get_rate_from_billing(utility_code, year, month)
-                if rate is None:
-                    _LOGGER.debug("No rate found for %s %d-%02d", utility_code, year, month)
-                    return None
-
-                # Calculate price using billing rate
-                price = consumption * rate
-
-                _LOGGER.debug(
-                    "Calculated %s price for %d-%02d using billing rate: %.2f m3 × %.2f = %.2f",
-                    utility_code,
-                    year,
-                    month,
-                    consumption,
-                    rate,
-                    price,
-                )
-
-                currency = self.get_setting("Currency") or "NOK"
-                return {
-                    "value": price,
-                    "unit": currency,
-                    "year": year,
-                    "month": month,
-                    "utility_code": utility_code,
-                    "aggregate_type": "price",
-                    "calculation_method": "billing_rate",
-                }
-
-            # For CW, try to get price from billing results first
-            cache_key = f"cw_price_{year}_{month}"
-            billing_results = await self._get_cached_billing_results(
-                node_id=self.node_id,
-                start_from=from_time,
-                start_to=to_time,
-                cache_key=cache_key,
-            )
-
-            if billing_results and isinstance(billing_results, list):
-                # Find billing results that overlap with the requested month
-                total_price = 0.0
-                has_data = False
-
-                for billing_result in billing_results:
-                    billing_start = billing_result.get("Start")
-                    billing_end = billing_result.get("End")
-
-                    # Check if billing period overlaps with requested month
-                    if billing_start and billing_end:
-                        # Billing period overlaps if it starts before month ends and ends after month starts
-                        if billing_start < to_time and billing_end > from_time:
-                            parts = billing_result.get("Parts", [])
-                            for part in parts:
-                                part_code = part.get("Code")
-                                if part_code == utility_code:
-                                    # Sum all items in this part
-                                    items = part.get("Items", [])
-                                    part_rounding = part.get("Rounding", 0.0)
-                                    for item in items:
-                                        total = item.get("Total")
-                                        if total is not None:
-                                            total_price += total
-                                            has_data = True
-
-                                    # Apply rounding from the part to match the actual bill
-                                    if isinstance(part_rounding, (int, float)) and has_data:
-                                        total_price += part_rounding
-
-                if has_data:
-                    currency = self.get_setting("Currency") or "NOK"
-                    return {
-                        "value": total_price,
-                        "unit": currency,
-                        "year": year,
-                        "month": month,
-                        "utility_code": utility_code,
-                        "aggregate_type": "price",
-                    }
-
-            # Fallback for CW: calculate from consumption × rate
-            _LOGGER.debug("No billing price found for %s, calculating from consumption × rate", utility_code)
-            consumption_data = await self.get_monthly_aggregate(
-                utility_code=utility_code,
-                year=year,
-                month=month,
-                aggregate_type="con",
-            )
-
-            if not consumption_data:
-                return None
-
-            consumption = consumption_data.get("value")
-            if consumption is None:
-                return None
-
-            # Get rate from billing results
-            rate = await self.get_rate_from_billing(utility_code, year, month)
-            if rate is None:
-                return None
-
-            # Calculate price
-            price = consumption * rate
-
-            _LOGGER.debug(
-                "Calculated %s price for %d-%02d: %.2f m3 × %.2f = %.2f",
-                utility_code,
-                year,
-                month,
-                consumption,
-                rate,
-                price,
-            )
-
-            currency = self.get_setting("Currency") or "NOK"
-            return {
-                "value": price,
-                "unit": currency,
-                "year": year,
-                "month": month,
-                "utility_code": utility_code,
-                "aggregate_type": "price",
-            }
-        except Exception as err:
-            _LOGGER.warning(
-                "Failed to fetch monthly price from billing for %s %d-%02d: %s",
-                utility_code,
-                year,
-                month,
-                err,
-            )
-            return None
-
     def _get_month_timestamps(self, year: int, month: int) -> tuple[int, int]:
         """Get start and end timestamps for a month.
         
@@ -2099,18 +1438,8 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             Tuple of (from_time, to_time) as Unix timestamps
         """
         timezone_str = self.get_setting("TimeZoneIANA") or "UTC"
-        try:
-            tz = zoneinfo.ZoneInfo(timezone_str)
-        except Exception:
-            tz = zoneinfo.ZoneInfo("UTC")
-        
-        from_date = datetime(year, month, 1, tzinfo=tz)
-        if month == 12:
-            to_date = datetime(year + 1, 1, 1, tzinfo=tz)
-        else:
-            to_date = datetime(year, month + 1, 1, tzinfo=tz)
-        
-        return (int(from_date.timestamp()), int(to_date.timestamp()))
+        tz = get_timezone(timezone_str)
+        return get_month_timestamps(year, month, tz)
 
     async def _calculate_monthly_price_from_daily_cache(
         self, utility_code: str, year: int, month: int
@@ -3262,7 +2591,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     return None
                 
                 # For CW or HW estimated (fallback), use billing results
-                result = await self.get_monthly_price_from_billing(
+                result = await self.billing_manager.get_monthly_price_from_billing(
                     utility_code=utility_code,
                     year=year,
                     month=month,
@@ -3782,7 +3111,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         meter_consumption = meter_consumption_data.get("value", 0.0)
                         
                         # Get rate from billing
-                        rate = await self.get_rate_from_billing(utility_code, year, month)
+                        rate = await self.billing_manager.get_rate_from_billing(utility_code, year, month)
                         
                         if rate is None:
                             # For HW, try proportional allocation from aggregate estimated cost
@@ -3996,7 +3325,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         
                         if meter_consumption_data and meter_consumption_data.get("value") is not None:
                             meter_consumption = meter_consumption_data.get("value", 0.0)
-                            rate = await self.get_rate_from_billing(utility_code, year, month)
+                            rate = await self.billing_manager.get_rate_from_billing(utility_code, year, month)
                             
                             if rate is not None:
                                 calculated_cost = meter_consumption * rate
@@ -4367,566 +3696,23 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         if not area_code:
             return None
-
-        if not NORD_POOL_AVAILABLE:
-            _LOGGER.warning(
-                "nordpool library not installed. Install it with: pip install nordpool"
-            )
-            return None
-
-        # Initialize fallback price variable (for use in exception handler)
-        fallback_price = None
-
-        try:
-            # Get timezone from settings
-            timezone_str = self.get_setting("TimeZoneIANA")
-            if not timezone_str:
-                timezone_str = "UTC"
-
-            try:
-                tz = zoneinfo.ZoneInfo(timezone_str)
-            except Exception:
-                tz = zoneinfo.ZoneInfo("UTC")
-
-            # Get current date/time in the configured timezone
-            now = datetime.now(tz)
-            today = now.date()
-            current_hour = now.hour
-
-            # Check cache first (prices are updated daily)
-            # Cache persists across coordinator updates since it's an instance variable
-            cache_key = f"{area_code}_{currency}_{today.isoformat()}"
-            if cache_key in self._nord_pool_price_cache:
-                _LOGGER.debug(
-                    "Using cached Nord Pool price for %s/%s: %.4f",
-                    area_code,
-                    currency,
-                    self._nord_pool_price_cache[cache_key],
+        
+        # Initialize fetcher if not already initialized (lazy initialization)
+        if not self._nord_pool_fetcher:
+            if not NORD_POOL_AVAILABLE:
+                _LOGGER.warning(
+                    "nordpool library not installed. Install it with: pip install nordpool"
                 )
-                return self._nord_pool_price_cache[cache_key]
-
-            # Also check if we have yesterday's price as fallback (if today's fetch fails)
-            yesterday = (today - timedelta(days=1)).isoformat()
-            fallback_cache_key = f"{area_code}_{currency}_{yesterday}"
-            if fallback_cache_key in self._nord_pool_price_cache:
-                fallback_price = self._nord_pool_price_cache[fallback_cache_key]
-                _LOGGER.debug(
-                    "Found fallback Nord Pool price from yesterday: %.4f",
-                    fallback_price,
-                )
-
-            # Check if there's already a pending request for this cache key
-            if cache_key in self._pending_requests:
-                pending_task = self._pending_requests[cache_key]
-                if not pending_task.done():
-                    _LOGGER.debug(
-                        "Waiting for pending Nord Pool spot price request for %s/%s",
-                        area_code,
-                        currency,
-                    )
-                    try:
-                        price = await pending_task
-                        return price
-                    except Exception as err:
-                        _LOGGER.debug(
-                            "Pending Nord Pool request failed for %s/%s: %s",
-                            area_code,
-                            currency,
-                            err,
-                        )
-                        # Remove failed task and continue to fetch
-                        if cache_key in self._pending_requests:
-                            del self._pending_requests[cache_key]
-                else:
-                    # Task completed, remove it
-                    del self._pending_requests[cache_key]
-
-            _LOGGER.debug(
-                "Fetching Nord Pool spot price for area %s, currency %s",
-                area_code,
-                currency,
-            )
-
-            # Create async task for fetching
-            async def _fetch_nord_pool_price() -> float | None:
-                # Initialize Nord Pool prices client
-                # Currency parameter: "EUR", "NOK", "SEK", "DKK"
-                # The library uses requests internally with a default 2-second timeout
-                # We need to patch the requests library to use a longer timeout
-                import requests
-
-                # Store original methods
-                original_session_request = requests.Session.request
-                original_get = requests.get
-                original_post = requests.post
-
-                # Patch requests to use a longer timeout
-                def patched_session_request(self, method, url, **kwargs):
-                    # Set default timeout if not specified
-                    if "timeout" not in kwargs:
-                        kwargs["timeout"] = 30.0  # 30 second timeout
-                    return original_session_request(self, method, url, **kwargs)
-
-                def patched_get(url, **kwargs):
-                    # Set default timeout if not specified
-                    if "timeout" not in kwargs:
-                        kwargs["timeout"] = 30.0  # 30 second timeout
-                    return original_get(url, **kwargs)
-
-                def patched_post(url, **kwargs):
-                    # Set default timeout if not specified
-                    if "timeout" not in kwargs:
-                        kwargs["timeout"] = 30.0  # 30 second timeout
-                    return original_post(url, **kwargs)
-
-                # Apply the patches
-                requests.Session.request = patched_session_request
-                requests.get = patched_get
-                requests.post = patched_post
-
-                try:
-                    # Initialize Prices with currency as positional argument
-                    # elspot.Prices(currency) not elspot.Prices(currency=currency)
-                    prices_spot = elspot.Prices(currency)
-
-                    # Fetch prices for today
-                    # The library's fetch() is synchronous, so run it in executor
-                    # IMPORTANT: Must specify end_date=date.today() to fetch today's prices,
-                    # otherwise the library defaults to tomorrow
-                    from datetime import date as date_class
-
-                    loop = asyncio.get_event_loop()
-
-                    def fetch_prices():
-                        try:
-                            # Fetch today's prices - must specify end_date to get today, not tomorrow
-                            _LOGGER.debug("Calling nordpool fetch for area %s, date %s", area_code, today)
-                            result = prices_spot.fetch(
-                                areas=[area_code],
-                                end_date=date_class(today.year, today.month, today.day)
-                            )
-                            _LOGGER.debug(
-                                "nordpool fetch returned: %s (type: %s)",
-                                result if result is None else f"{type(result).__name__}",
-                                type(result).__name__ if result else "None",
-                            )
-
-                            # If result is None, try fetching yesterday's data (sometimes today's data isn't available yet)
-                            if result is None:
-                                _LOGGER.debug("No data for today, trying yesterday's data")
-                                yesterday = today - timedelta(days=1)
-                                result = prices_spot.fetch(
-                                    areas=[area_code],
-                                    end_date=date_class(yesterday.year, yesterday.month, yesterday.day)
-                                )
-                                _LOGGER.debug(
-                                    "nordpool fetch for yesterday returned: %s",
-                                    type(result).__name__ if result else "None",
-                                )
-
-                            return result
-                        except Exception as e:
-                            _LOGGER.warning("Exception during nordpool fetch: %s", e, exc_info=True)
-                            # Don't re-raise, return None so we can use fallback
-                            return None
-
-                    try:
-                        result = await asyncio.wait_for(
-                            loop.run_in_executor(None, fetch_prices),
-                            timeout=45.0,  # 45 second timeout for the entire fetch operation
-                        )
-                    except asyncio.TimeoutError:
-                        _LOGGER.warning(
-                            "Nord Pool API request timed out after 45 seconds for area %s/%s",
-                            area_code,
-                            currency,
-                        )
-                        result = None
-                    except Exception as fetch_exception:
-                        _LOGGER.warning(
-                            "Exception while fetching Nord Pool prices: %s",
-                            fetch_exception,
-                            exc_info=True,
-                        )
-                        result = None
-                finally:
-                    # Restore original methods
-                    requests.Session.request = original_session_request
-                    requests.get = original_get
-                    requests.post = original_post
-
-                if not result:
-                    return None
-
-                # Process result and return price
-                # The nordpool library returns: result["areas"][area_code]["values"]
-                # Each entry in values has: {"start": datetime, "end": datetime, "value": float}
-                # The value is in currency/MWh
-                if not isinstance(result, dict) or "areas" not in result:
-                    _LOGGER.debug(
-                        "Nord Pool API: unexpected result structure. Type: %s, Keys: %s",
-                        type(result).__name__,
-                        list(result.keys()) if isinstance(result, dict) else "not a dict",
-                    )
-                    return None
-
-                area_data = result.get("areas", {}).get(area_code)
-                if not area_data:
-                    _LOGGER.debug(
-                        "Nord Pool API: area %s not found in areas dict. Available areas: %s",
-                        area_code,
-                        list(result.get("areas", {}).keys()),
-                    )
-                    return None
-
-                values = area_data.get("values")
-                if not values:
-                    _LOGGER.debug("Nord Pool API returned empty values array for area %s", area_code)
-                    return None
-
-                # Find the current hour's price, or use the most recent available price
-                # The nordpool library returns prices in currency/MWh, so we need to convert to kWh
-                current_price = None
-                prices_today = []
-
-                for price_entry in values:
-                    start_time = price_entry.get("start")
-                    price_entry.get("end")
-                    value = price_entry.get("value")
-
-                    if value is None:
-                        continue
-
-                    # Check if this price is for today
-                    if start_time and isinstance(start_time, datetime):
-                        price_date = start_time.date()
-                        if price_date == today:
-                            # nordpool library returns prices in currency/MWh
-                            # Convert to currency/kWh
-                            price_per_kwh = value / 1000.0
-                            prices_today.append(price_per_kwh)
-
-                            # Check if this is the current hour
-                            if start_time.hour == current_hour:
-                                current_price = price_per_kwh
-                                _LOGGER.debug(
-                                    "Found current hour price for %s: %.2f %s/MWh = %.4f %s/kWh (hour %d)",
-                                    area_code,
-                                    value,
-                                    currency,
-                                    price_per_kwh,
-                                    currency,
-                                    current_hour,
-                                )
-
-                if not prices_today:
-                    _LOGGER.debug("No prices found for today (%s) for area %s", today, area_code)
-                    return None
-
-                # Use current hour price if available, otherwise use average of today's prices
-                if current_price is not None:
-                    _LOGGER.debug("Using current hour price: %.4f %s/kWh", current_price, currency)
-                    spot_price = current_price
-                else:
-                    # Use average of today's prices
-                    avg_price = sum(prices_today) / len(prices_today)
-                    _LOGGER.debug(
-                        "Using average of today's prices: %.4f %s/kWh (%d price points)",
-                        avg_price,
-                        currency,
-                        len(prices_today),
-                    )
-                    spot_price = avg_price
-
-                # Cache the result
-                self._nord_pool_price_cache[cache_key] = spot_price
-                return spot_price
-
-            # Create and track the task
-            task = asyncio.create_task(_fetch_nord_pool_price())
-            self._pending_requests[cache_key] = task
-
-            try:
-                spot_price = await task
-                # If we got a price, it's already cached in the task
-                if spot_price is not None:
-                    return spot_price
-                
-                # If fetch failed, try fallback
-                _LOGGER.debug("Nord Pool API returned no data for area %s", area_code)
-                # If we have a fallback price from yesterday, use it
-                if fallback_price is not None:
-                    _LOGGER.warning(
-                        "Using fallback Nord Pool price from yesterday: %.4f",
-                        fallback_price,
-                    )
-                    return fallback_price
                 return None
-            except Exception as err:
-                # Clean up on error
-                if cache_key in self._pending_requests:
-                    del self._pending_requests[cache_key]
-                # Try fallback on error
-                if fallback_price is not None:
-                    _LOGGER.warning(
-                        "Error fetching Nord Pool price, using fallback from yesterday: %.4f",
-                        fallback_price,
-                    )
-                    return fallback_price
-                raise
-            finally:
-                # Clean up pending request if still there
-                if cache_key in self._pending_requests and self._pending_requests[cache_key].done():
-                    del self._pending_requests[cache_key]
-        except Exception as err:
-            _LOGGER.warning(
-                "Failed to fetch Nord Pool spot price for %s/%s: %s",
-                area_code,
-                currency,
-                err,
-            )
-            # Return fallback price if available (yesterday's price)
-            if fallback_price is not None:
-                _LOGGER.info(
-                    "Using fallback Nord Pool price from yesterday: %.4f %s/kWh",
-                    fallback_price,
-                    currency,
-                )
-                return fallback_price
-            return None
-
-    async def _calculate_hw_calibration_ratio(
-        self,
-        months_back: int = 6,
-    ) -> float | None:
-        """Calculate calibration ratio by comparing historical billing data with spot prices.
-
-        This method analyzes historical billing periods to find the relationship between
-        actual HW prices and Nord Pool spot prices, accounting for system efficiency,
-        fixed costs, and other factors.
-
-        Formula: ratio = (HW_price_per_m3 - CW_price_per_m3) / (avg_spot_price × energy_factor)
-
-        Args:
-            months_back: Number of months to look back (default: 6)
-
-        Returns:
-            Calibration ratio (typically 0.5-2.0), or None if insufficient data
-        """
-        if not self.nord_pool_area:
-            _LOGGER.debug("Nord Pool area not configured, cannot calculate calibration ratio")
-            return None
-
-        if not NORD_POOL_AVAILABLE:
-            _LOGGER.debug("nordpool library not available, cannot calculate calibration ratio")
-            return None
-
-        try:
-            # Get timezone and currency
-            timezone_str = self.get_setting("TimeZoneIANA") or "UTC"
-            try:
-                tz = zoneinfo.ZoneInfo(timezone_str)
-            except Exception:
-                tz = zoneinfo.ZoneInfo("UTC")
-
-            currency = self.get_setting("Currency") or "NOK"
-
-            # Calculate date range
-            now = datetime.now(tz)
-            end_date = now.date()
-            start_date = (now - timedelta(days=months_back * 30)).date()
-
-            # Fetch billing results for the period
-            start_timestamp = int(datetime.combine(start_date, datetime.min.time()).replace(tzinfo=tz).timestamp())
-            end_timestamp = int(datetime.combine(end_date, datetime.max.time()).replace(tzinfo=tz).timestamp())
-
-            _LOGGER.debug(
-                "Calculating HW calibration ratio from billing data: %s to %s",
-                start_date,
-                end_date,
-            )
-
-            # Use cached billing data if available
-            cache_key = f"calibration_{start_timestamp}_{end_timestamp}"
-            billing_results = await self._get_cached_billing_results(
-                node_id=self.node_id,
-                start_from=start_timestamp,
-                start_to=end_timestamp,
-                cache_key=cache_key,
-            )
-
-            if not billing_results or not isinstance(billing_results, list):
-                _LOGGER.debug("No billing results found for calibration")
-                return None
-
-            # Sort by end time descending (most recent first)
-            sorted_results = sorted(
-                billing_results,
-                key=lambda x: x.get("End", 0),
-                reverse=True,
-            )
-
-            ratios = []
-            ENERGY_PER_M3 = 45.0  # Same as in _get_hw_price_from_spot_prices
-
-            for billing_result in sorted_results:
-                billing_start = billing_result.get("Start")
-                billing_end = billing_result.get("End")
-
-                if not billing_start or not billing_end:
-                    continue
-
-                # Get HW and CW rates from billing
-                hw_rate = None
-                cw_rate = None
-
-                parts = billing_result.get("Parts", [])
-                for part in parts:
-                    part_code = part.get("Code")
-                    items = part.get("Items", [])
-
-                    for item in items:
-                        price_component = item.get("PriceComponent", {})
-                        component_type = price_component.get("Type", "")
-                        rate = item.get("Rate")
-                        rate_unit = item.get("RateUnit", "")
-
-                        if component_type in ("C1", "C2") and rate_unit == "m3" and rate is not None:
-                            if part_code == "HW":
-                                hw_rate = float(rate)
-                            elif part_code == "CW":
-                                cw_rate = float(rate)
-
-                if hw_rate is None or cw_rate is None:
-                    continue
-
-                # Calculate average spot price for the billing period
-                # Use the middle of the period
-                period_start = datetime.fromtimestamp(billing_start, tz=tz)
-                period_end = datetime.fromtimestamp(billing_end, tz=tz)
-                period_middle = period_start + (period_end - period_start) / 2
-                period_date = period_middle.date()
-
-                # Fetch average spot price for this period
-                # We'll use the nordpool library to get prices for the period
-                import requests
-                from datetime import date as date_class
-
-                # Store original methods
-                original_session_request = requests.Session.request
-                original_get = requests.get
-                original_post = requests.post
-
-                # Patch requests for timeout
-                def patched_session_request(self, method, url, **kwargs):
-                    if "timeout" not in kwargs:
-                        kwargs["timeout"] = 30.0
-                    return original_session_request(self, method, url, **kwargs)
-
-                def patched_get(url, **kwargs):
-                    if "timeout" not in kwargs:
-                        kwargs["timeout"] = 30.0
-                    return original_get(url, **kwargs)
-
-                def patched_post(url, **kwargs):
-                    if "timeout" not in kwargs:
-                        kwargs["timeout"] = 30.0
-                    return original_post(url, **kwargs)
-
-                requests.Session.request = patched_session_request
-                requests.get = patched_get
-                requests.post = patched_post
-
-                try:
-                    prices_spot = elspot.Prices(currency)
-                    loop = asyncio.get_event_loop()
-
-                    def fetch_historical_price():
-                        try:
-                            result = prices_spot.fetch(
-                                areas=[self.nord_pool_area],
-                                end_date=date_class(period_date.year, period_date.month, period_date.day),
-                            )
-                            return result
-                        except Exception as e:
-                            _LOGGER.debug("Error fetching historical spot price: %s", e)
-                            return None
-
-                    result = await loop.run_in_executor(None, fetch_historical_price)
-                finally:
-                    requests.Session.request = original_session_request
-                    requests.get = original_get
-                    requests.post = original_post
-
-                if not result or not isinstance(result, dict) or "areas" not in result:
-                    _LOGGER.debug("No spot price data for period %s", period_date)
-                    continue
-
-                area_data = result.get("areas", {}).get(self.nord_pool_area)
-                if not area_data:
-                    continue
-
-                values = area_data.get("values", [])
-                if not values:
-                    continue
-
-                # Calculate average spot price for the period (convert from MWh to kWh)
-                spot_prices = []
-                for price_entry in values:
-                    value = price_entry.get("value")
-                    if value is not None:
-                        # nordpool returns prices in currency/MWh, convert to kWh
-                        price_per_kwh = value / 1000.0
-                        spot_prices.append(price_per_kwh)
-
-                if not spot_prices:
-                    continue
-
-                avg_spot_price = sum(spot_prices) / len(spot_prices)
-
-                # Calculate ratio: (HW_price - CW_price) / (spot_price × energy_factor)
-                # This accounts for the actual system efficiency and fixed costs
-                heating_cost_per_m3 = avg_spot_price * ENERGY_PER_M3
-                actual_heating_cost_per_m3 = hw_rate - cw_rate
-
-                if heating_cost_per_m3 > 0:
-                    ratio = actual_heating_cost_per_m3 / heating_cost_per_m3
-                    ratios.append(ratio)
-
-                    _LOGGER.debug(
-                        "Calibration data point: HW=%.2f, CW=%.2f, Spot=%.4f, Ratio=%.3f (period: %s to %s)",
-                        hw_rate,
-                        cw_rate,
-                        avg_spot_price,
-                        ratio,
-                        period_start.strftime("%Y-%m-%d"),
-                        period_end.strftime("%Y-%m-%d"),
-                    )
-
-            if not ratios:
-                _LOGGER.debug("No valid calibration data points found")
-                return None
-
-            # Calculate average ratio (could also use median for robustness)
-            avg_ratio = sum(ratios) / len(ratios)
-
-            _LOGGER.info(
-                "Calculated HW calibration ratio: %.3f (from %d billing periods, range: %.3f - %.3f)",
-                avg_ratio,
-                len(ratios),
-                min(ratios),
-                max(ratios),
-            )
-
-            return avg_ratio
-
-        except Exception as err:
-            _LOGGER.warning(
-                "Failed to calculate HW calibration ratio: %s",
-                err,
-                exc_info=True,
-            )
-            return None
+            # Initialize fetcher with shared cache
+            self._nord_pool_fetcher = NordPoolPriceFetcher(price_cache=self._nord_pool_price_cache)
+        
+        timezone_str = self.get_setting("TimeZoneIANA") or "UTC"
+        return await self._nord_pool_fetcher.get_spot_price(
+            area_code=area_code,
+            currency=currency,
+            timezone_str=timezone_str,
+        )
 
     async def _get_hw_price_from_spot_prices(
         self,
@@ -4964,15 +3750,22 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Use lock to prevent race conditions when multiple sensors call this simultaneously
             async with self._hw_calibration_lock:
                 if not self._hw_calibration_calculated:
-                    self._hw_calibration_ratio = await self._calculate_hw_calibration_ratio(months_back=6)
+                    _LOGGER.info("Calculating HW calibration ratio from historical billing data...")
+                    self._hw_calibration_ratio = await self.billing_manager.calculate_hw_calibration_ratio(months_back=6)
                     self._hw_calibration_calculated = True
                     if self._hw_calibration_ratio:
                         _LOGGER.info(
-                            "Using calibrated HW heating cost ratio: %.3f (from historical billing data)",
+                            "✓ Calibration ratio calculated successfully: %.3f (from historical billing data). "
+                            "This will be applied to all HW price calculations.",
                             self._hw_calibration_ratio,
                         )
                     else:
-                        _LOGGER.debug("No calibration ratio available, using default calculation")
+                        _LOGGER.warning(
+                            "✗ No calibration ratio available! HW prices will be calculated without calibration. "
+                            "This may result in lower than expected prices (typically ~50% of actual cost). "
+                            "Check if billing data and Nord Pool area are configured correctly. "
+                            "The calibration ratio is typically around 1.5-2.5."
+                        )
 
             spot_price = None
             price_sensor_entity_id = None
@@ -5020,14 +3813,27 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Apply calibration ratio if available (accounts for system efficiency, fixed costs, etc.)
             if self._hw_calibration_ratio is not None:
                 heating_cost = base_heating_cost * self._hw_calibration_ratio
-                _LOGGER.debug(
-                    "Applied calibration ratio %.3f: base=%.2f NOK → calibrated=%.2f NOK",
+                _LOGGER.info(
+                    "✓ Applied calibration ratio %.3f: base=%.2f NOK → calibrated=%.2f NOK (consumption=%.3f m3, energy=%.2f kWh, spot=%.4f NOK/kWh)",
                     self._hw_calibration_ratio,
                     base_heating_cost,
                     heating_cost,
+                    consumption,
+                    total_energy_kwh,
+                    spot_price,
                 )
             else:
                 heating_cost = base_heating_cost
+                _LOGGER.warning(
+                    "✗ No calibration ratio available! Using base heating cost only: %.2f NOK (consumption=%.3f m3, energy=%.2f kWh, spot=%.4f NOK/kWh). "
+                    "This may result in lower than expected prices (~50% of actual cost). "
+                    "The calibration ratio should typically be around 1.5-2.5. "
+                    "Check logs for calibration ratio calculation errors.",
+                    base_heating_cost,
+                    consumption,
+                    total_energy_kwh,
+                    spot_price,
+                )
 
             # Get cold water cost
             # If we have the current month's CW price, use it directly (more accurate)
@@ -5050,7 +3856,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Fallback to billing rate if we don't have current month price
             if cold_water_cost is None:
-                cold_water_rate = await self.get_rate_from_billing("CW", year, month)
+                cold_water_rate = await self.billing_manager.get_rate_from_billing("CW", year, month)
 
                 if cold_water_rate is None:
                     _LOGGER.debug(
@@ -5327,8 +4133,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Look back up to 6 months to find a billing result
                 lookback_time = from_time - (180 * 24 * 60 * 60)  # 6 months
                 cache_key = f"vat_{year}_{month}"
-                billing_results = await self._get_cached_billing_results(
-                    node_id=self.node_id,
+                billing_results = await self.billing_manager.get_cached_billing_results(
                     start_from=lookback_time,
                     start_to=to_time,
                     cache_key=cache_key,
@@ -5498,10 +4303,14 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             - days_remaining: Number of days remaining in month
             - total_days_in_month: Total days in current month
         """
+        import uuid
+        call_id = str(uuid.uuid4())[:8]
+        _LOGGER.debug("get_end_of_month_estimate[%s]: Method called", call_id)
         try:
             now = datetime.now()
             current_year = now.year
             current_month = now.month
+            _LOGGER.debug("get_end_of_month_estimate[%s]: Starting for year=%d, month=%d", call_id, current_year, current_month)
 
             # Get timezone
             timezone_str = self.get_setting("TimeZoneIANA") or "UTC"
@@ -5712,7 +4521,13 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
 
             # If we don't have HW price data, try to estimate it
-            if "hw_price_estimate" not in estimates or estimates["hw_price_estimate"]["days_with_data"] == 0:
+            hw_price_has_data = False
+            if "hw_price_estimate" in estimates:
+                hw_price_est_data = estimates["hw_price_estimate"]
+                if isinstance(hw_price_est_data, dict):
+                    hw_price_has_data = hw_price_est_data.get("days_with_data", 0) > 0
+            
+            if not hw_price_has_data:
                 # Try to estimate HW price using spot prices
                 if "hw_con_estimate" in estimates:
                     hw_consumption_estimate = estimates["hw_con_estimate"]["estimated_total"]
@@ -5759,17 +4574,82 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             hw_price_estimate_value,
                         )
 
-            # Get other items cost from last bill
-            other_items_data = await self.get_monthly_other_items_cost(
-                year=current_year,
-                month=current_month,
-            )
-            other_items_cost = other_items_data.get("value", 0) if other_items_data else 0
+            # If we don't have CW price data, try to estimate it from monthly aggregate
+            cw_price_has_data = False
+            if "cw_price_estimate" in estimates:
+                cw_price_est_data = estimates["cw_price_estimate"]
+                if isinstance(cw_price_est_data, dict):
+                    cw_price_has_data = cw_price_est_data.get("days_with_data", 0) > 0
+            
+            if not cw_price_has_data:
+                # Try to get CW price estimate from monthly aggregate
+                if "cw_con_estimate" in estimates:
+                    cw_consumption_estimate = estimates["cw_con_estimate"]["estimated_total"]
+                    
+                    # Try to get estimated price from monthly aggregate
+                    cw_price_data = await self.get_monthly_aggregate(
+                        utility_code="CW",
+                        year=current_year,
+                        month=current_month,
+                        aggregate_type="price",
+                        cost_type="estimated",
+                    )
+                    
+                    if cw_price_data and cw_price_data.get("value") is not None:
+                        cw_price_estimate_value = cw_price_data.get("value", 0)
+                        estimates["cw_price_estimate"] = {
+                            "mean_daily": cw_price_estimate_value / total_days_in_month,
+                            "total_so_far": 0,  # Not available from daily data
+                            "estimated_total": cw_price_estimate_value,
+                            "days_with_data": 0,  # Estimated, not from actual daily data
+                            "is_estimated": True,
+                        }
+                        _LOGGER.debug(
+                            "Estimated CW price from monthly aggregate: %.2f",
+                            cw_price_estimate_value,
+                        )
 
+            _LOGGER.debug("get_end_of_month_estimate[%s]: Finished calculating estimates, now getting other items cost", call_id)
+            
+            # Get other items cost from last bill
+            _LOGGER.debug("get_end_of_month_estimate[%s]: Getting other items cost for year=%d, month=%d", call_id, current_year, current_month)
+            other_items_cost = 0
+            try:
+                other_items_data = await self.billing_manager.get_monthly_other_items_cost(
+                    year=current_year,
+                    month=current_month,
+                )
+                if other_items_data:
+                    other_items_cost = other_items_data.get("value", 0)
+                else:
+                    other_items_cost = 0
+                _LOGGER.debug("get_end_of_month_estimate[%s]: Got other items cost: %.2f", call_id, other_items_cost)
+            except Exception as err:
+                _LOGGER.error("get_end_of_month_estimate[%s]: EXCEPTION in get_monthly_other_items_cost: %s", call_id, err, exc_info=True)
+                other_items_cost = 0
+
+            _LOGGER.debug("get_end_of_month_estimate[%s]: About to calculate total bill estimate", call_id)
+            
             # Calculate total estimated bill
-            hw_price_est = estimates.get("hw_price_estimate", {}).get("estimated_total", 0)
-            cw_price_est = estimates.get("cw_price_estimate", {}).get("estimated_total", 0)
-            total_bill_estimate = hw_price_est + cw_price_est + other_items_cost
+            try:
+                hw_price_est = estimates.get("hw_price_estimate", {}).get("estimated_total", 0)
+                cw_price_est = estimates.get("cw_price_estimate", {}).get("estimated_total", 0)
+                total_bill_estimate = hw_price_est + cw_price_est + other_items_cost
+
+                _LOGGER.debug(
+                    "get_end_of_month_estimate[%s]: Calculating total bill estimate: HW=%.2f, CW=%.2f, Other=%.2f, Total=%.2f",
+                    call_id,
+                    hw_price_est,
+                    cw_price_est,
+                    other_items_cost,
+                    total_bill_estimate,
+                )
+            except Exception as err:
+                _LOGGER.warning("Failed to calculate total bill estimate: %s", err, exc_info=True)
+                # Use safe defaults
+                hw_price_est = 0
+                cw_price_est = 0
+                total_bill_estimate = other_items_cost
 
             # Calculate maximum days with data across all metrics to show data freshness
             max_days_with_data = 0
@@ -5783,10 +4663,21 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if data_time and (latest_data_timestamp is None or data_time > latest_data_timestamp):
                     latest_data_timestamp = data_time
 
+            # Safely extract values from estimates dictionary
+            def safe_get(key: str, attr: str, default: Any = 0) -> Any:
+                """Safely get nested dictionary value."""
+                try:
+                    data = estimates.get(key, {})
+                    if isinstance(data, dict):
+                        return data.get(attr, default)
+                    return default
+                except (AttributeError, TypeError):
+                    return default
+
             result = {
-                "hw_consumption_estimate": estimates.get("hw_con_estimate", {}).get("estimated_total", 0),
+                "hw_consumption_estimate": safe_get("hw_con_estimate", "estimated_total", 0),
                 "hw_price_estimate": hw_price_est,
-                "cw_consumption_estimate": estimates.get("cw_con_estimate", {}).get("estimated_total", 0),
+                "cw_consumption_estimate": safe_get("cw_con_estimate", "estimated_total", 0),
                 "cw_price_estimate": cw_price_est,
                 "other_items_cost": other_items_cost,
                 "total_bill_estimate": total_bill_estimate,
@@ -5798,24 +4689,25 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "days_remaining": days_remaining,
                 "total_days_in_month": total_days_in_month,
                 "latest_data_timestamp": latest_data_timestamp,  # Latest timestamp with data
-                "hw_mean_daily_consumption": estimates.get("hw_con_estimate", {}).get("mean_daily", 0),
-                "hw_mean_daily_price": estimates.get("hw_price_estimate", {}).get("mean_daily", 0),
-                "cw_mean_daily_consumption": estimates.get("cw_con_estimate", {}).get("mean_daily", 0),
-                "cw_mean_daily_price": estimates.get("cw_price_estimate", {}).get("mean_daily", 0),
-                "hw_consumption_so_far": estimates.get("hw_con_estimate", {}).get("total_so_far", 0),
-                "hw_price_so_far": estimates.get("hw_price_estimate", {}).get("total_so_far", 0),
-                "cw_consumption_so_far": estimates.get("cw_con_estimate", {}).get("total_so_far", 0),
-                "cw_price_so_far": estimates.get("cw_price_estimate", {}).get("total_so_far", 0),
-                "hw_consumption_days_with_data": estimates.get("hw_con_estimate", {}).get("days_with_data", 0),
-                "hw_price_days_with_data": estimates.get("hw_price_estimate", {}).get("days_with_data", 0),
-                "cw_consumption_days_with_data": estimates.get("cw_con_estimate", {}).get("days_with_data", 0),
-                "cw_price_days_with_data": estimates.get("cw_price_estimate", {}).get("days_with_data", 0),
-                "hw_price_is_estimated": estimates.get("hw_price_estimate", {}).get("is_estimated", False),
+                "hw_mean_daily_consumption": safe_get("hw_con_estimate", "mean_daily", 0),
+                "hw_mean_daily_price": safe_get("hw_price_estimate", "mean_daily", 0),
+                "cw_mean_daily_consumption": safe_get("cw_con_estimate", "mean_daily", 0),
+                "cw_mean_daily_price": safe_get("cw_price_estimate", "mean_daily", 0),
+                "hw_consumption_so_far": safe_get("hw_con_estimate", "total_so_far", 0),
+                "hw_price_so_far": safe_get("hw_price_estimate", "total_so_far", 0),
+                "cw_consumption_so_far": safe_get("cw_con_estimate", "total_so_far", 0),
+                "cw_price_so_far": safe_get("cw_price_estimate", "total_so_far", 0),
+                "hw_consumption_days_with_data": safe_get("hw_con_estimate", "days_with_data", 0),
+                "hw_price_days_with_data": safe_get("hw_price_estimate", "days_with_data", 0),
+                "cw_consumption_days_with_data": safe_get("cw_con_estimate", "days_with_data", 0),
+                "cw_price_days_with_data": safe_get("cw_price_estimate", "days_with_data", 0),
+                "hw_price_is_estimated": safe_get("hw_price_estimate", "is_estimated", False),
             }
 
             _LOGGER.info(
-                "End-of-month estimate for %d-%02d: Total=%.2f %s (HW: %.2f, CW: %.2f, Other: %.2f) "
+                "get_end_of_month_estimate[%s]: End-of-month estimate for %d-%02d: Total=%.2f %s (HW: %.2f, CW: %.2f, Other: %.2f) "
                 "(%d days with data out of %d calendar days elapsed, %d days in month)",
+                call_id,
                 current_year,
                 current_month,
                 total_bill_estimate,
@@ -5828,11 +4720,14 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 total_days_in_month,
             )
 
+            _LOGGER.debug("get_end_of_month_estimate[%s]: Returning result with %d keys", call_id, len(result))
             return result
         except Exception as err:
             _LOGGER.warning(
-                "Failed to calculate end-of-month estimate: %s",
+                "get_end_of_month_estimate[%s]: Failed to calculate end-of-month estimate: %s",
+                call_id,
                 err,
+                exc_info=True,
             )
             return None
 
