@@ -353,11 +353,6 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
         except Exception as e:
             _LOGGER.warning("Failed to update translated name: %s", e, exc_info=True)
 
-    def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by reading from cached data."""
-        _LOGGER.info("Coordinator update received for %s (data available: %s)",
-                     self.entity_id, self.coordinator.data is not None)
-        self._update_from_coordinator_data()
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -484,12 +479,7 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
-        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, str(coordinator.node_id))},
-            "name": device_name,
-            "manufacturer": "EcoGuard",
-        }
+        self._attr_device_info = self._get_device_info(coordinator.node_id)
 
         # Disable individual meter sensors by default (users can enable if needed)
         self._attr_entity_registry_enabled_default = False
@@ -512,18 +502,6 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
             attrs["utility_code"] = self._utility_code
 
         return attrs
-
-    async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, update translations and set Unknown state."""
-        await super().async_added_to_hass()
-        # Update sensor name with translations now that we're in hass
-        await self._async_update_translated_name()
-        # Set sensor to Unknown state (available=True, native_value=None)
-        # No API calls during startup - sensors will show as "Unknown"
-        self._attr_native_value = None
-        self._attr_available = True
-        self.async_write_ha_state()
-        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -561,11 +539,6 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
-    def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by reading from cached data."""
-        _LOGGER.info("Coordinator update received for %s (data available: %s)",
-                     self.entity_id, self.coordinator.data is not None)
-        self._update_from_coordinator_data()
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -710,12 +683,7 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
-        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, str(coordinator.node_id))},
-            "name": device_name,
-            "manufacturer": "EcoGuard",
-        }
+        self._attr_device_info = self._get_device_info(coordinator.node_id)
 
         # Set state class
         if aggregate_type == "con":
@@ -780,11 +748,6 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
-    def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by reading from cached data."""
-        _LOGGER.info("Coordinator update received for %s (data available: %s)",
-                     self.entity_id, self.coordinator.data is not None)
-        self._update_from_coordinator_data()
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -1016,7 +979,7 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
         self.async_write_ha_state()
 
 
-class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
+class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
     """Sensor for other items (general fees) from billing results.
 
     Uses the most recent billing data as the source of truth.
@@ -1028,7 +991,7 @@ class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator],
         coordinator: EcoGuardDataUpdateCoordinator,
     ) -> None:
         """Initialize the other items sensor."""
-        super().__init__(coordinator)
+        super().__init__(coordinator, hass=hass)
         self._hass = hass
 
         # Use "Cost Monthly Other Items" format to ensure entity_id starts with "cost_monthly_other_items"
@@ -1042,12 +1005,7 @@ class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator],
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
-        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, str(coordinator.node_id))},
-            "name": device_name,
-            "manufacturer": "EcoGuard",
-        }
+        self._attr_device_info = self._get_device_info(coordinator.node_id)
 
         # Set state class
         self._attr_state_class = SensorStateClass.MEASUREMENT
@@ -1082,18 +1040,6 @@ class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator],
 
         return attrs
 
-    async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, update translations and set Unknown state."""
-        await super().async_added_to_hass()
-        # Update sensor name with translations now that we're in hass
-        await self._async_update_translated_name()
-        # Set sensor to Unknown state (available=True, native_value=None)
-        # No API calls during startup - sensors will show as "Unknown"
-        self._attr_native_value = None
-        self._attr_available = True
-        self.async_write_ha_state()
-        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
-
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
         if not self.hass or not self._hass:
@@ -1103,20 +1049,10 @@ class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator],
             # Keep "Cost Monthly Other Items" format to maintain entity_id starting with "cost_monthly_other_items"
             # The translation key might be used for display, but we keep the name format consistent
             new_name = await async_get_translation(self._hass, "name.cost_monthly_other_items")
-            if self._attr_name != new_name:
-                self._attr_name = new_name
-                self.async_write_ha_state()
-
-                # Also update the entity registry name so it shows correctly in modals
-                await async_update_entity_registry_name(self, new_name)
+            await self._update_name_and_registry(new_name, log_level="debug")
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
-    def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by reading from cached data."""
-        _LOGGER.info("Coordinator update received for %s (data available: %s)",
-                     self.entity_id, self.coordinator.data is not None)
-        self._update_from_coordinator_data()
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -1212,7 +1148,7 @@ class EcoGuardOtherItemsSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator],
         self.async_write_ha_state()
 
 
-class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
+class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
     """Sensor for total monthly cost across all utilities.
 
     Always outputs the pure (pre-VAT) value. If VAT is detected in billing results,
@@ -1235,7 +1171,7 @@ class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
             coordinator: The coordinator instance
             cost_type: "actual" for metered API data, "estimated" for estimated costs
         """
-        super().__init__(coordinator)
+        super().__init__(coordinator, hass=hass)
         self._hass = hass
 
         self._cost_type = cost_type  # "actual" (displayed as "Metered") or "estimated"
@@ -1263,12 +1199,7 @@ class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
-        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, str(coordinator.node_id))},
-            "name": device_name,
-            "manufacturer": "EcoGuard",
-        }
+        self._attr_device_info = self._get_device_info(coordinator.node_id)
 
         # Set state class
         self._attr_state_class = SensorStateClass.MEASUREMENT
@@ -1300,18 +1231,6 @@ class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
         return attrs
 
-    async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, update translations and set Unknown state."""
-        await super().async_added_to_hass()
-        # Update sensor name with translations now that we're in hass
-        await self._async_update_translated_name()
-        # Set sensor to Unknown state (available=True, native_value=None)
-        # No API calls during startup - sensors will show as "Unknown"
-        self._attr_native_value = None
-        self._attr_available = True
-        self.async_write_ha_state()
-        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
-
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
         if not self.hass or not self._hass:
@@ -1327,20 +1246,10 @@ class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
             else:
                 metered = await async_get_translation(self._hass, "name.metered")
                 new_name = f"{cost_monthly_aggregated} {metered} - {all_utilities}"
-            if self._attr_name != new_name:
-                self._attr_name = new_name
-                self.async_write_ha_state()
-
-                # Also update the entity registry name so it shows correctly in modals
-                await async_update_entity_registry_name(self, new_name)
+            await self._update_name_and_registry(new_name, log_level="debug")
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
-    def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by reading from cached data."""
-        _LOGGER.info("Coordinator update received for %s (data available: %s)",
-                     self.entity_id, self.coordinator.data is not None)
-        self._update_from_coordinator_data()
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -1460,7 +1369,7 @@ class EcoGuardTotalMonthlyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
         self.async_write_ha_state()
 
 
-class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
+class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
     """Sensor for end-of-month bill estimate.
 
     Estimates the total bill for the current month based on mean daily consumption
@@ -1473,7 +1382,7 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         coordinator: EcoGuardDataUpdateCoordinator,
     ) -> None:
         """Initialize the end-of-month estimate sensor."""
-        super().__init__(coordinator)
+        super().__init__(coordinator, hass=hass)
         self._hass = hass
 
         # Use "Cost Monthly Estimated Final Settlement" format to ensure entity_id starts with "cost_monthly_estimated_final_settlement_"
@@ -1487,12 +1396,7 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
-        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, str(coordinator.node_id))},
-            "name": device_name,
-            "manufacturer": "EcoGuard",
-        }
+        self._attr_device_info = self._get_device_info(coordinator.node_id)
 
         # Set state class
         self._attr_state_class = SensorStateClass.MEASUREMENT
@@ -1587,18 +1491,6 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
 
         return attrs
 
-    async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, update translations and set Unknown state."""
-        await super().async_added_to_hass()
-        # Update sensor name with translations now that we're in hass
-        await self._async_update_translated_name()
-        # Set sensor to Unknown state (available=True, native_value=None)
-        # No API calls during startup - sensors will show as "Unknown"
-        self._attr_native_value = None
-        self._attr_available = True
-        self.async_write_ha_state()
-        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
-
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
         if not self.hass or not self._hass:
@@ -1607,20 +1499,10 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         try:
             # Keep "Cost Monthly Estimated Final Settlement" format to maintain entity_id starting with "cost_monthly_estimated_final_settlement"
             new_name = await async_get_translation(self._hass, "name.cost_monthly_estimated_final_settlement")
-            if self._attr_name != new_name:
-                self._attr_name = new_name
-                self.async_write_ha_state()
-
-                # Also update the entity registry name so it shows correctly in modals
-                await async_update_entity_registry_name(self, new_name)
+            await self._update_name_and_registry(new_name, log_level="debug")
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
-    def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by reading from cached data."""
-        _LOGGER.info("Coordinator update received for %s (data available: %s)",
-                     self.entity_id, self.coordinator.data is not None)
-        self._update_from_coordinator_data()
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -1754,7 +1636,7 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
             coordinator: The coordinator instance
             utility_code: Utility code (e.g., "HW", "CW")
         """
-        super().__init__(coordinator)
+        super().__init__(coordinator, hass=hass)
         self._hass = hass
         self._utility_code = utility_code
 
@@ -1812,18 +1694,6 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
 
         return attrs
 
-    async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, update translations and set Unknown state."""
-        await super().async_added_to_hass()
-        # Update sensor name with translations now that we're in hass
-        await self._async_update_translated_name()
-        # Set sensor to Unknown state (available=True, native_value=None)
-        # No API calls during startup - sensors will show as "Unknown"
-        self._attr_native_value = None
-        self._attr_available = True
-        self.async_write_ha_state()
-        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
-
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
         if not self.hass or not self._hass:
@@ -1848,11 +1718,6 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
-    def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by reading from cached data."""
-        _LOGGER.info("Coordinator update received for %s (data available: %s)",
-                     self.entity_id, self.coordinator.data is not None)
-        self._update_from_coordinator_data()
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -1966,7 +1831,7 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
         self.async_write_ha_state()
 
 
-class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
+class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
     """Sensor for combined daily water consumption (HW + CW) across all meters."""
 
     def __init__(
@@ -1980,7 +1845,7 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             hass: Home Assistant instance
             coordinator: The coordinator instance
         """
-        super().__init__(coordinator)
+        super().__init__(coordinator, hass=hass)
         self._hass = hass
 
         # Format: "Consumption Daily Metered - Combined Water"
@@ -2045,18 +1910,6 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             ]
 
         return attrs
-
-    async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, update translations and set Unknown state."""
-        await super().async_added_to_hass()
-        # Update sensor name with translations now that we're in hass
-        await self._async_update_translated_name()
-        # Set sensor to Unknown state (available=True, native_value=None)
-        # No API calls during startup - sensors will show as "Unknown"
-        self._attr_native_value = None
-        self._attr_available = True
-        self.async_write_ha_state()
-        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -2184,7 +2037,7 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         self.async_write_ha_state()
 
 
-class EcoGuardDailyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
+class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
     """Sensor for last known daily cost for a specific meter."""
 
     def __init__(
@@ -2208,7 +2061,7 @@ class EcoGuardDailyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], 
             measuring_point_name: Measuring point name
             cost_type: "actual" for metered API data, "estimated" for estimated costs
         """
-        super().__init__(coordinator)
+        super().__init__(coordinator, hass=hass)
         self._hass = hass
         self._installation = installation
         self._utility_code = utility_code
@@ -2281,18 +2134,6 @@ class EcoGuardDailyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], 
             attrs["last_data_date_readable"] = self._last_data_date.strftime("%Y-%m-%d")
 
         return attrs
-
-    async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, update translations and set Unknown state."""
-        await super().async_added_to_hass()
-        # Update sensor name with translations now that we're in hass
-        await self._async_update_translated_name()
-        # Set sensor to Unknown state (available=True, native_value=None)
-        # No API calls during startup - sensors will show as "Unknown"
-        self._attr_native_value = None
-        self._attr_available = True
-        self.async_write_ha_state()
-        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -2448,7 +2289,7 @@ class EcoGuardDailyCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], 
         self.async_write_ha_state()
 
 
-class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
+class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
     """Sensor for aggregated daily cost across all meters of a utility type."""
 
     def __init__(
@@ -2466,7 +2307,7 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
             utility_code: Utility code (e.g., "HW", "CW")
             cost_type: "actual" for metered API data, "estimated" for estimated costs
         """
-        super().__init__(coordinator)
+        super().__init__(coordinator, hass=hass)
         self._hass = hass
         self._utility_code = utility_code
         self._cost_type = cost_type
@@ -2534,18 +2375,6 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
 
         return attrs
 
-    async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, update translations and set Unknown state."""
-        await super().async_added_to_hass()
-        # Update sensor name with translations now that we're in hass
-        await self._async_update_translated_name()
-        # Set sensor to Unknown state (available=True, native_value=None)
-        # No API calls during startup - sensors will show as "Unknown"
-        self._attr_native_value = None
-        self._attr_available = True
-        self.async_write_ha_state()
-        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
-
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
         if not self.hass or not self._hass:
@@ -2575,11 +2404,6 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
-    def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by reading from cached data."""
-        _LOGGER.info("Coordinator update received for %s (data available: %s)",
-                     self.entity_id, self.coordinator.data is not None)
-        self._update_from_coordinator_data()
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -2765,7 +2589,7 @@ class EcoGuardDailyCostAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         self.async_write_ha_state()
 
 
-class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
+class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
     """Sensor for combined daily water cost (HW + CW) across all meters."""
 
     def __init__(
@@ -2781,7 +2605,7 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
             coordinator: The coordinator instance
             cost_type: "actual" for metered API data, "estimated" for estimated costs
         """
-        super().__init__(coordinator)
+        super().__init__(coordinator, hass=hass)
         self._hass = hass
         self._cost_type = cost_type
 
@@ -2857,18 +2681,6 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
             ]
 
         return attrs
-
-    async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, update translations and set Unknown state."""
-        await super().async_added_to_hass()
-        # Update sensor name with translations now that we're in hass
-        await self._async_update_translated_name()
-        # Set sensor to Unknown state (available=True, native_value=None)
-        # No API calls during startup - sensors will show as "Unknown"
-        self._attr_native_value = None
-        self._attr_available = True
-        self.async_write_ha_state()
-        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -3132,7 +2944,7 @@ class EcoGuardDailyCombinedWaterCostSensor(CoordinatorEntity[EcoGuardDataUpdateC
         self.async_write_ha_state()
 
 
-class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
+class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
     """Sensor for monthly consumption or cost for a specific meter."""
 
     def __init__(
@@ -3165,7 +2977,7 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
             natural in English. This distinction is intentional: "price" for API/internal use,
             "cost" for user-facing display.
         """
-        super().__init__(coordinator)
+        super().__init__(coordinator, hass=hass)
         self._hass = hass
         self._installation = installation
         self._utility_code = utility_code
@@ -3262,18 +3074,6 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
 
         return attrs
 
-    async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, update translations and set Unknown state."""
-        await super().async_added_to_hass()
-        # Update sensor name with translations now that we're in hass
-        await self._async_update_translated_name()
-        # Set sensor to Unknown state (available=True, native_value=None)
-        # No API calls during startup - sensors will show as "Unknown"
-        self._attr_native_value = None
-        self._attr_available = True
-        self.async_write_ha_state()
-        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
-
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
         if not self.hass or not self._hass:
@@ -3316,11 +3116,6 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
-    def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by reading from cached data."""
-        _LOGGER.info("Coordinator update received for %s (data available: %s)",
-                     self.entity_id, self.coordinator.data is not None)
-        self._update_from_coordinator_data()
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -3818,7 +3613,7 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
         self.async_write_ha_state()
 
 
-class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
+class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
     """Sensor for combined water (HW + CW) consumption or cost."""
 
     def __init__(
@@ -3843,7 +3638,7 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
             natural in English. This distinction is intentional: "price" for API/internal use,
             "cost" for user-facing display.
         """
-        super().__init__(coordinator)
+        super().__init__(coordinator, hass=hass)
         self._hass = hass
         self._aggregate_type = aggregate_type
         self._cost_type = cost_type
@@ -3919,18 +3714,6 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
 
         return attrs
 
-    async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, update translations and set Unknown state."""
-        await super().async_added_to_hass()
-        # Update sensor name with translations now that we're in hass
-        await self._async_update_translated_name()
-        # Set sensor to Unknown state (available=True, native_value=None)
-        # No API calls during startup - sensors will show as "Unknown"
-        self._attr_native_value = None
-        self._attr_available = True
-        self.async_write_ha_state()
-        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
-
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
         if not self.hass or not self._hass:
@@ -3963,11 +3746,6 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
-    def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by reading from cached data."""
-        _LOGGER.info("Coordinator update received for %s (data available: %s)",
-                     self.entity_id, self.coordinator.data is not None)
-        self._update_from_coordinator_data()
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
