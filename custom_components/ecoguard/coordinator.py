@@ -1204,17 +1204,69 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.warning("Invalid timezone %s, using UTC", timezone_str)
                 tz = zoneinfo.ZoneInfo("UTC")
 
-            # Get rate from billing for the date of the consumption data
+            # Get date from consumption data
             consumption_time = consumption_data.get("time")
             if consumption_time:
                 consumption_date = datetime.fromtimestamp(consumption_time, tz=tz)
-                rate = await self.get_rate_from_billing(
-                    utility_code, consumption_date.year, consumption_date.month
-                )
+                year = consumption_date.year
+                month = consumption_date.month
             else:
                 # Fallback to current month if no timestamp
                 now = datetime.now(tz)
-                rate = await self.get_rate_from_billing(utility_code, now.year, now.month)
+                year = now.year
+                month = now.month
+
+            # For HW, use spot prices and calibration (more accurate than simple rate)
+            if utility_code == "HW":
+                _LOGGER.debug("Calculating HW estimated cost: consumption=%.3f m3, year=%d, month=%d, measuring_point_id=%s", 
+                             consumption, year, month, measuring_point_id)
+                # Try to get CW price and consumption for more accurate calculation
+                cw_price = None
+                cw_consumption = None
+                
+                # Try to get CW price from cache
+                cw_price_cache_key = "CW_all_metered"  # Use aggregate cache key
+                coordinator_data = self.data
+                if coordinator_data:
+                    cost_cache = coordinator_data.get("latest_cost_cache", {})
+                    cw_price_data = cost_cache.get(cw_price_cache_key)
+                    if cw_price_data:
+                        cw_price = cw_price_data.get("value")
+                        _LOGGER.debug("Got CW price from cache: %.2f NOK", cw_price)
+                
+                # Try to get CW consumption from cache
+                cw_consumption_cache_key = "CW_all"
+                cw_consumption_data = self._latest_consumption_cache.get(cw_consumption_cache_key)
+                if cw_consumption_data:
+                    cw_consumption = cw_consumption_data.get("value")
+                    _LOGGER.debug("Got CW consumption from cache: %.3f m3", cw_consumption)
+                
+                # Calculate HW price using spot prices
+                hw_price_data = await self._get_hw_price_from_spot_prices(
+                    consumption=consumption,
+                    year=year,
+                    month=month,
+                    cold_water_price=cw_price,
+                    cold_water_consumption=cw_consumption,
+                )
+                
+                if hw_price_data:
+                    daily_cost = hw_price_data.get("value")
+                    _LOGGER.info("Calculated HW daily estimated cost: %.2f NOK (consumption: %.3f m3, year: %d, month: %d)", 
+                                daily_cost, consumption, year, month)
+                    # Convert to daily cost format
+                    return {
+                        "value": daily_cost,
+                        "time": consumption_time,
+                        "unit": hw_price_data.get("unit") or self.get_setting("Currency") or "NOK",
+                        "utility_code": utility_code,
+                        "cost_type": "estimated",
+                    }
+                else:
+                    _LOGGER.debug("Spot price calculation failed for HW, falling back to billing rate")
+
+            # For non-HW or if spot price calculation failed, use billing rate
+            rate = await self.get_rate_from_billing(utility_code, year, month)
 
             if rate is None:
                 _LOGGER.debug("No rate found for %s", utility_code)
