@@ -18,10 +18,17 @@ from .const import (
     UPDATE_INTERVAL_DATA,
     UPDATE_INTERVAL_LATEST_RECEPTION,
 )
-from .helpers import get_timezone, get_month_timestamps
+from .helpers import (
+    get_timezone,
+    get_month_timestamps,
+    get_date_range_timestamps,
+    format_cache_key,
+    log_static_info_summary,
+)
 from .nord_pool import NordPoolPriceFetcher, NORD_POOL_AVAILABLE
 from .price_calculator import HWPriceCalculator
 from .billing_manager import BillingManager
+from .request_deduplicator import RequestDeduplicator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,39 +67,45 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._nord_pool_fetcher: NordPoolPriceFetcher | None = None
         if nord_pool_area:
             self._nord_pool_fetcher = NordPoolPriceFetcher(price_cache=self._nord_pool_price_cache)
-        
-        # Initialize HW price calculator
+
+        # Initialize HW price calculator (will be set up after billing_manager is created)
         self._hw_price_calculator: HWPriceCalculator | None = None
-        
-        # HW calibration ratio for spot price calculations
-        self._hw_calibration_ratio: float | None = None
-        self._hw_calibration_calculated: bool = False
-        self._hw_calibration_lock = asyncio.Lock()
-        
+
         self._billing_results_cache: dict[str, tuple[list[dict[str, Any]], float]] = {}  # Cache for billing results: key -> (data, timestamp)
         self._billing_cache_ttl: float = 86400.0  # Cache billing data for 24 hours (it's historical and doesn't change)
-        
+
         self._data_request_cache: dict[str, tuple[Any, float]] = {}  # Cache for data API requests: key -> (data, timestamp)
         self._data_cache_ttl: float = 60.0  # Cache data requests for 60 seconds to prevent duplicate calls
         self._pending_requests: dict[str, asyncio.Task] = {}  # Track pending requests to deduplicate simultaneous calls
         self._pending_requests_lock = asyncio.Lock()  # Lock to prevent race conditions when checking/adding pending requests
         self._cache_loaded: bool = False  # Track if we've loaded from cache
         
+        # Initialize request deduplicator for API data requests
+        # Shares cache and pending_requests with coordinator for compatibility
+        self._request_deduplicator = RequestDeduplicator(
+            hass=self.hass,
+            cache_ttl=self._data_cache_ttl,
+            defer_during_startup=True,
+            cache=self._data_request_cache,
+            pending_requests=self._pending_requests,
+            lock=self._pending_requests_lock,
+        )
+
         # Caches for sensor data (populated by batch fetching)
         # Key format: f"{utility_code}_{measuring_point_id or 'all'}"
         self._latest_consumption_cache: dict[str, dict[str, Any]] = {}  # Latest consumption by utility/meter
         self._latest_cost_cache: dict[str, dict[str, Any]] = {}  # Latest cost by utility/meter/cost_type
-        
+
         # Daily data cache - stores ALL daily values for reuse (not just latest)
         # Key format: f"{utility_code}_{measuring_point_id or 'all'}"
         # Value: list of daily values sorted by time: [{"time": timestamp, "value": value, "unit": unit}, ...]
         self._daily_consumption_cache: dict[str, list[dict[str, Any]]] = {}  # All daily consumption values
         self._daily_price_cache: dict[str, list[dict[str, Any]]] = {}  # All daily price values
-        
+
         # Key format: f"{utility_code}_{year}_{month}_{aggregate_type}_{cost_type}"
         self._monthly_aggregate_cache: dict[str, dict[str, Any]] = {}  # Monthly aggregates
         self._cache_timestamp: float = 0.0  # When cache was last updated
-        
+
         # Initialize billing manager after all attributes are set
         self.billing_manager = BillingManager(
             api=self.api,
@@ -108,17 +121,26 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             nord_pool_area=self.nord_pool_area,
         )
 
+        # Initialize HW price calculator now that billing_manager is available
+        if nord_pool_area:
+            self._hw_price_calculator = HWPriceCalculator(
+                calculate_calibration_ratio=lambda months_back: self.billing_manager.calculate_hw_calibration_ratio(months_back=months_back),
+                nord_pool_fetcher=self._nord_pool_fetcher,
+                get_rate_from_billing=lambda uc, y, m: self.billing_manager.get_rate_from_billing(uc, y, m),
+                get_setting=self.get_setting,
+            )
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from EcoGuard API.
-        
+
         This method is called:
         - Once on startup (async_config_entry_first_refresh)
         - Periodically based on update_interval (every hour by default)
         """
         from .storage import load_cached_data, save_cached_data
-        
+
         _LOGGER.debug("Coordinator update triggered (cache_loaded=%s)", self._cache_loaded)
-        
+
         try:
             # Load from cache first (only once on startup)
             if not self._cache_loaded and self.entry_id:
@@ -177,7 +199,15 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._latest_reception = []
 
             # Log static info summary
-            self._log_static_info_summary()
+            log_static_info_summary(
+                node_data=self._node_data,
+                settings=self._settings,
+                installations=self._installations,
+                measuring_points=self._measuring_points,
+                latest_reception=self._latest_reception,
+                node_id=self.node_id,
+                domain=self.domain,
+            )
 
             # Batch fetch is triggered after Home Assistant has fully started
             # (see __init__.py for the startup event listener)
@@ -246,124 +276,6 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return setting.get("Value")
         return None
 
-    def _log_static_info_summary(self) -> None:
-        """Log a summary of all static information."""
-        if not self._node_data and not self._settings:
-            return
-
-        _LOGGER.debug("=" * 80)
-        _LOGGER.debug("ECOGUARD STATIC DATA SUMMARY")
-        _LOGGER.debug("=" * 80)
-
-        # Node Information
-        if self._node_data:
-            _LOGGER.debug("NODE DATA:")
-            _LOGGER.debug("  Node ID: %s", self.node_id)
-            _LOGGER.debug("  Domain: %s", self.domain)
-
-            # Properties
-            properties = self._node_data.get("Properties", [])
-            if properties:
-                _LOGGER.debug("  Properties:")
-                for prop in properties:
-                    _LOGGER.debug("    - %s: %s", prop.get("Name", "Unknown"), prop.get("Value", "N/A"))
-
-            # Measuring Points
-            measuring_points = self._node_data.get("MeasuringPoints", [])
-            if measuring_points:
-                _LOGGER.debug("  Measuring Points (%d):", len(measuring_points))
-                for mp in measuring_points:
-                    _LOGGER.debug("    - ID: %s, Name: %s", mp.get("ID"), mp.get("Name"))
-
-            # SubNodes
-            sub_nodes = self._node_data.get("SubNodes", [])
-            if sub_nodes:
-                _LOGGER.debug("  SubNodes (%d):", len(sub_nodes))
-                for sub in sub_nodes:
-                    _LOGGER.debug("    - ID: %s, Name: %s", sub.get("ID"), sub.get("Name"))
-
-            # Rental Contracts
-            contracts = self._node_data.get("RentalContracts", [])
-            if contracts:
-                _LOGGER.debug("  Rental Contracts (%d):", len(contracts))
-                for contract in contracts:
-                    contract_date = contract.get("Date")
-                    if contract_date:
-                        from datetime import datetime
-                        date_str = datetime.fromtimestamp(contract_date).strftime("%Y-%m-%d")
-                    else:
-                        date_str = "N/A"
-                    _LOGGER.debug("    - ID: %s, Date: %s, Code: %s",
-                                 contract.get("ID"), date_str, contract.get("ContractCode"))
-        else:
-            _LOGGER.debug("NODE DATA: Not available")
-
-        # Settings
-        if self._settings:
-            _LOGGER.debug("SETTINGS (%d):", len(self._settings))
-            for setting in self._settings:
-                _LOGGER.debug("  - %s: %s", setting.get("Name"), setting.get("Value"))
-        else:
-            _LOGGER.debug("SETTINGS: Not available")
-
-        # Installations
-        if self._installations:
-            _LOGGER.debug("INSTALLATIONS (%d):", len(self._installations))
-            for inst in self._installations:
-                mp_id = inst.get("MeasuringPointID")
-                device_type = inst.get("DeviceTypeDisplay", "Unknown")
-                external_key = inst.get("ExternalKey", "N/A")
-
-                # Installation lifespan
-                from_date = inst.get("From")
-                to_date = inst.get("To")
-                if from_date:
-                    from_str = datetime.fromtimestamp(from_date).strftime("%Y-%m-%d")
-                else:
-                    from_str = "N/A"
-                if to_date:
-                    to_str = datetime.fromtimestamp(to_date).strftime("%Y-%m-%d")
-                    status = "Ended"
-                else:
-                    to_str = "Active"
-                    status = "Active"
-
-                _LOGGER.debug("  - MeasuringPointID: %s, DeviceType: %s, ExternalKey: %s",
-                             mp_id, device_type, external_key)
-                _LOGGER.debug("    Status: %s, From: %s, To: %s", status, from_str, to_str)
-
-                # Registers (utility codes)
-                registers = inst.get("Registers", [])
-                if registers:
-                    _LOGGER.debug("    Registers:")
-                    for reg in registers:
-                        util_code = reg.get("UtilityCode", "Unknown")
-                        _LOGGER.debug("      - UtilityCode: %s", util_code)
-        else:
-            _LOGGER.debug("INSTALLATIONS: Not available")
-
-        # Measuring Points (from cache)
-        if self._measuring_points:
-            _LOGGER.debug("MEASURING POINTS CACHE (%d):", len(self._measuring_points))
-            for mp in self._measuring_points:
-                _LOGGER.debug("  - ID: %s, Name: %s", mp.get("ID"), mp.get("Name"))
-
-        # Latest Reception
-        if self._latest_reception:
-            _LOGGER.debug("LATEST RECEPTION (%d):", len(self._latest_reception))
-            for reception in self._latest_reception:
-                pos_id = reception.get("PositionID")
-                latest = reception.get("LatestReception")
-                if latest:
-                    from datetime import datetime
-                    date_str = datetime.fromtimestamp(latest).strftime("%Y-%m-%d %H:%M:%S")
-                else:
-                    date_str = "N/A"
-                _LOGGER.debug("  - PositionID: %s, LatestReception: %s", pos_id, date_str)
-        else:
-            _LOGGER.debug("LATEST RECEPTION: Not available")
-
-        _LOGGER.debug("=" * 80)
 
     def get_latest_reading(
         self, measuring_point_id: int
@@ -389,12 +301,12 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _batch_fetch_sensor_data(self) -> None:
         """Batch fetch consumption and price data for all utility codes.
-        
+
         This method fetches data for all utility codes at once, then caches it
         so individual sensors can read from the cache instead of making API calls.
         """
         import time
-        
+
         try:
             # Collect all unique utility codes from installations
             utility_codes = set()
@@ -404,35 +316,35 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     utility_code = register.get("UtilityCode")
                     if utility_code and utility_code in ("HW", "CW", "E", "HE"):
                         utility_codes.add(utility_code)
-            
+
             if not utility_codes:
                 _LOGGER.debug("No utility codes found, skipping batch fetch")
                 return
-            
+
             _LOGGER.info("Batch fetching consumption and price data for utility codes: %s", sorted(utility_codes))
-            
+
             # Get timezone for date calculations
             timezone_str = self.get_setting("TimeZoneIANA") or "UTC"
             try:
                 tz = zoneinfo.ZoneInfo(timezone_str)
             except Exception:
                 tz = zoneinfo.ZoneInfo("UTC")
-            
+
             now_tz = datetime.now(tz)
             tomorrow_start = datetime.combine(
                 (now_tz.date() + timedelta(days=1)), datetime.min.time(), tz
             )
             to_time = int(tomorrow_start.timestamp())
-            
+
             # Fetch 30 days of data for comprehensive cache coverage
             # Since this runs asynchronously in the background, it doesn't block startup
             initial_days = 30
             from_time = int((datetime.combine(now_tz.date() - timedelta(days=initial_days), datetime.min.time(), tz)).timestamp())
-            
-            _LOGGER.debug("Batch fetch: Fetching %d days of data (from %s to %s)", 
-                         initial_days, datetime.fromtimestamp(from_time, tz=tz).date(), 
+
+            _LOGGER.debug("Batch fetch: Fetching %d days of data (from %s to %s)",
+                         initial_days, datetime.fromtimestamp(from_time, tz=tz).date(),
                          datetime.fromtimestamp(to_time, tz=tz).date())
-            
+
             # Create a mapping of measuring_point_id -> utility_codes for this installation
             # This helps us correctly map API responses to cache keys
             mp_to_utilities: dict[int, set[str]] = {}
@@ -443,7 +355,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     utilities = {r.get("UtilityCode") for r in registers if r.get("UtilityCode") in utility_codes}
                     if utilities:
                         mp_to_utilities[mp_id] = utilities
-            
+
             # Fetch consumption data per measuring point for accurate cache keys
             # When include_sub_nodes=True, we get node-level aggregates, not per-meter data
             # So we need to fetch per measuring point to get the correct cache keys
@@ -462,29 +374,29 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             include_sub_nodes=False,
                             measuring_point_id=measuring_point_id,
                         )
-                        
+
                         # Process and cache consumption data for this measuring point
                         if consumption_data and isinstance(consumption_data, list):
                             for node_data in consumption_data:
                                 results = node_data.get("Result", [])
-                                
+
                                 if not results:
                                     continue
-                                
+
                                 for result in results:
                                     utility_code = result.get("Utl")
                                     if result.get("Func") == "con" and utility_code:
                                         values = result.get("Values", [])
                                         unit = result.get("Unit", "")
-                                        
+
                                         if not values:
                                             continue
-                                        
+
                                         # Cache ALL daily values (not just latest) for reuse
                                         daily_values = []
                                         latest_value = None
                                         latest_time = None
-                                        
+
                                         for value_entry in values:
                                             value = value_entry.get("Value")
                                             time_stamp = value_entry.get("Time")
@@ -498,23 +410,23 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                                 if latest_time is None or time_stamp > latest_time:
                                                     latest_value = value
                                                     latest_time = time_stamp
-                                        
+
                                         if daily_values:
                                             # Sort by time
                                             daily_values.sort(key=lambda x: x["time"])
-                                            
+
                                             # Cache keys - use measuring_point_id from our mapping
                                             cache_key_all = f"{utility_code}_all"
                                             cache_key_meter = f"{utility_code}_{measuring_point_id}"
-                                            
+
                                             # Aggregate into "all" cache (sum values across all meters)
                                             if cache_key_all not in self._daily_consumption_cache:
                                                 self._daily_consumption_cache[cache_key_all] = []
-                                            
+
                                             # Merge daily values into "all" cache (deduplicate by time)
                                             existing_all = self._daily_consumption_cache[cache_key_all]
                                             existing_times = {v["time"] for v in existing_all}
-                                            
+
                                             # Aggregate values by time for "all" cache
                                             for daily_val in daily_values:
                                                 time_stamp = daily_val["time"]
@@ -527,13 +439,13 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                                 else:
                                                     # New time, add it
                                                     existing_all.append(daily_val.copy())
-                                            
+
                                             # Sort "all" cache by time
                                             existing_all.sort(key=lambda x: x["time"])
-                                            
+
                                             # Store per-meter daily values
                                             self._daily_consumption_cache[cache_key_meter] = daily_values
-                                            
+
                                             # Also store latest for quick access
                                             if latest_value is not None:
                                                 cache_entry = {
@@ -543,7 +455,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                                     "utility_code": utility_code,
                                                     "measuring_point_id": measuring_point_id,
                                                 }
-                                                
+
                                                 # Update "all" latest (sum across all meters)
                                                 if cache_key_all in self._latest_consumption_cache:
                                                     existing_all_entry = self._latest_consumption_cache[cache_key_all]
@@ -553,23 +465,23 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                                         existing_all_entry["time"] = latest_time
                                                 else:
                                                     self._latest_consumption_cache[cache_key_all] = cache_entry.copy()
-                                                
+
                                                 # Store per-meter latest
                                                 self._latest_consumption_cache[cache_key_meter] = cache_entry
-                                                _LOGGER.debug("Cached consumption: %s (meter %s) = %s %s", 
+                                                _LOGGER.debug("Cached consumption: %s (meter %s) = %s %s",
                                                              cache_key_meter, measuring_point_id, latest_value, unit)
                     except Exception as err:
                         _LOGGER.warning("Failed to fetch consumption data for measuring point %s: %s", measuring_point_id, err)
                         continue
-                
+
                 if not self._latest_consumption_cache:
                     _LOGGER.warning("Batch fetch: No consumption data was cached")
-                
-                _LOGGER.info("Cached consumption data: %d daily value sets, %d latest values", 
+
+                _LOGGER.info("Cached consumption data: %d daily value sets, %d latest values",
                             len(self._daily_consumption_cache), len(self._latest_consumption_cache))
             except Exception as err:
                 _LOGGER.warning("Failed to batch fetch consumption data: %s", err)
-            
+
             # Fetch price data per measuring point for accurate cache keys
             try:
                 # Fetch data per measuring point to get accurate cache keys
@@ -585,23 +497,23 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             include_sub_nodes=False,
                             measuring_point_id=measuring_point_id,
                         )
-                        
+
                         # Process and cache price data for this measuring point
                         if price_data and isinstance(price_data, list):
                             for node_data in price_data:
                                 results = node_data.get("Result", [])
-                                
+
                                 for result in results:
                                     utility_code = result.get("Utl")
                                     if result.get("Func") == "price" and utility_code:
                                         values = result.get("Values", [])
                                         unit = result.get("Unit", "")
-                                        
+
                                         # Cache ALL daily price values (not just latest) for reuse
                                         daily_prices = []
                                         latest_price = None
                                         latest_time = None
-                                        
+
                                         for value_entry in values:
                                             value = value_entry.get("Value")
                                             time_stamp = value_entry.get("Time")
@@ -615,17 +527,17 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                                 if latest_time is None or time_stamp > latest_time:
                                                     latest_price = value
                                                     latest_time = time_stamp
-                                        
+
                                         if daily_prices:
                                             # Sort by time
                                             daily_prices.sort(key=lambda x: x["time"])
-                                            
+
                                             # Cache keys - use measuring_point_id from our mapping
                                             cache_key = f"{utility_code}_{measuring_point_id}_metered"
-                                            
+
                                             # Store all daily prices for reuse
                                             self._daily_price_cache[cache_key] = daily_prices
-                                            
+
                                             # Also store latest for quick access
                                             if latest_price is not None:
                                                 cache_entry = {
@@ -637,20 +549,20 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                                     "measuring_point_id": measuring_point_id,
                                                 }
                                                 self._latest_cost_cache[cache_key] = cache_entry
-                                                _LOGGER.debug("Cached price: %s (meter %s) = %s %s", 
+                                                _LOGGER.debug("Cached price: %s (meter %s) = %s %s",
                                                              cache_key, measuring_point_id, latest_price, unit)
                     except Exception as err:
                         _LOGGER.warning("Failed to fetch price data for measuring point %s: %s", measuring_point_id, err)
                         continue
-                
+
                 _LOGGER.info("Cached price data: %d daily price sets, %d latest values",
                             len(self._daily_price_cache), len(self._latest_cost_cache))
             except Exception as err:
                 _LOGGER.warning("Failed to batch fetch price data: %s", err)
-            
+
             # Update cache timestamp
             self._cache_timestamp = time.time()
-            
+
             # Log cache statistics
             _LOGGER.info(
                 "Batch fetch complete: %d daily consumption sets, %d daily price sets, %d latest consumption, %d latest prices",
@@ -659,7 +571,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 len(self._latest_consumption_cache),
                 len(self._latest_cost_cache)
             )
-            
+
             # Sync cache to coordinator.data and notify sensors
             # Always update data and notify listeners to ensure sensors get updates
             if self.data:
@@ -680,7 +592,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "daily_price_cache": {k: list(v) for k, v in self._daily_price_cache.items()},  # Deep copy lists
                     "monthly_aggregate_cache": dict(self._monthly_aggregate_cache),
                 }
-                
+
                 # Use async_set_updated_data to properly notify sensors
                 # This ensures sensors get the update callback
                 # IMPORTANT: This must be called from the event loop, which we are (batch fetch runs in background task)
@@ -688,27 +600,27 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Also explicitly notify listeners to ensure all sensors get updated
                 # This is a safety net in case async_set_updated_data doesn't trigger for some reason
                 self.async_update_listeners()
-                
+
                 # Log listener details for debugging
                 listener_count = len(self._listeners) if hasattr(self, '_listeners') else 0
                 listener_ids = [str(l) for l in (self._listeners if hasattr(self, '_listeners') else [])][:10]
-                _LOGGER.info("Notified %d listeners about cache update (consumption: %d keys, cost: %d keys). Listeners: %s", 
-                             listener_count, 
+                _LOGGER.info("Notified %d listeners about cache update (consumption: %d keys, cost: %d keys). Listeners: %s",
+                             listener_count,
                              len(self._latest_consumption_cache),
                              len(self._latest_cost_cache),
                              listener_ids)
-                
+
                 # Schedule a delayed update notification to catch sensors that are added after batch fetch completes
                 # This ensures sensors get updated even if they're added after the batch fetch finishes
                 async def _delayed_notification():
                     await asyncio.sleep(1.0)  # Wait 1 second for sensors to be added
                     if not self.hass.is_stopping:
-                        _LOGGER.info("Delayed notification: Notifying %d listeners again (consumption: %d keys, cost: %d keys)", 
+                        _LOGGER.info("Delayed notification: Notifying %d listeners again (consumption: %d keys, cost: %d keys)",
                                      len(self._listeners) if hasattr(self, '_listeners') else 0,
                                      len(self._latest_consumption_cache),
                                      len(self._latest_cost_cache))
                         self.async_update_listeners()
-                
+
                 self.hass.async_create_task(_delayed_notification())
             else:
                 # If no data yet, just sync for when it's created
@@ -716,7 +628,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Notify listeners manually
                 self.async_update_listeners()
                 _LOGGER.debug("Notified listeners (no data yet, cache synced for later)")
-            
+
         except Exception as err:
             _LOGGER.warning("Error in batch fetch: %s", err)
 
@@ -739,12 +651,12 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             cache_key = f"{utility_code}_{measuring_point_id}"
         else:
             cache_key = f"{utility_code}_all"
-        
+
         if cache_key in self._latest_consumption_cache:
             cached = self._latest_consumption_cache[cache_key]
             _LOGGER.debug("✓ Cache HIT: consumption data for %s (measuring_point_id=%s)", utility_code, measuring_point_id)
             return cached
-        
+
         # Cache miss - fall back to API call (for backward compatibility)
         # This should rarely happen if batch fetch is working
         _LOGGER.debug("✗ Cache MISS: consumption data for %s (measuring_point_id=%s), falling back to API", utility_code, measuring_point_id)
@@ -871,7 +783,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         Helper method that extracts common logic for fetching price data.
         Returns price data if found, None otherwise.
-        
+
         This method deduplicates simultaneous requests for the same parameters
         to prevent multiple API calls when multiple sensors request the same data.
 
@@ -885,233 +797,119 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         or None if no price data is available.
         """
         try:
-            # Get timezone from settings
-            timezone_str = self.get_setting("TimeZoneIANA")
-            if not timezone_str:
-                timezone_str = "UTC"
-
-            try:
-                tz = zoneinfo.ZoneInfo(timezone_str)
-            except Exception:
-                _LOGGER.warning("Invalid timezone %s, using UTC", timezone_str)
-                tz = zoneinfo.ZoneInfo("UTC")
-
-            # Get current time in the configured timezone
-            now_tz = datetime.now(tz)
-
-            # Align to start of tomorrow in the timezone (to include all of today)
-            tomorrow_start = datetime.combine(
-                (now_tz.date() + timedelta(days=1)), datetime.min.time(), tz
-            )
-            to_time = int(tomorrow_start.timestamp())
-
-            # Calculate from_time as start of day N days ago
-            # Use longer lookback to account for API delays
-            from_date = (now_tz.date() - timedelta(days=days))
-            from_start = datetime.combine(from_date, datetime.min.time(), tz)
-            from_time = int(from_start.timestamp())
+            # Get date range timestamps
+            from_time, to_time = get_date_range_timestamps(days, self.get_setting)
 
             # Create cache key for request deduplication
-            cache_key = f"price_{utility_code}_{from_time}_{to_time}_{measuring_point_id or 'all'}"
-            
-            # Use lock to prevent race condition when checking/adding pending requests
-            async with self._pending_requests_lock:
-                # Check if there's already a pending request for this cache key
-                if cache_key in self._pending_requests:
-                    pending_task = self._pending_requests[cache_key]
-                    if not pending_task.done():
-                        task_to_await = pending_task
-                    else:
-                        # Task completed, remove it
-                        del self._pending_requests[cache_key]
-                        task_to_await = None
-                else:
-                    task_to_await = None
-            
-            # Await outside the lock to avoid deadlock
-            if task_to_await is not None:
-                _LOGGER.debug(
-                    "Waiting for pending price data request for %s (measuring_point_id=%s)",
-                    utility_code,
-                    measuring_point_id,
-                )
-                try:
-                    data = await task_to_await
-                    return data
-                except Exception as err:
-                    _LOGGER.debug(
-                        "Pending price request failed for %s: %s",
-                        utility_code,
-                        err,
-                    )
-                    # Remove failed task if it's still the same one
-                    async with self._pending_requests_lock:
-                        if cache_key in self._pending_requests and self._pending_requests[cache_key] is task_to_await:
-                            del self._pending_requests[cache_key]
-                    # Continue to fetch below
+            cache_key = format_cache_key(
+                "price",
+                utility_code=utility_code,
+                measuring_point_id=measuring_point_id,
+                from_time=from_time,
+                to_time=to_time,
+            )
 
+            # Format timestamps for logging
+            tz = get_timezone(self.get_setting("TimeZoneIANA"))
+            from_start_dt = datetime.fromtimestamp(from_time, tz=tz)
+            to_start_dt = datetime.fromtimestamp(to_time, tz=tz)
             _LOGGER.debug(
                 "Fetching price data for %s: from=%s (%s) to=%s (%s)",
                 utility_code,
                 from_time,
-                from_start.isoformat(),
+                from_start_dt.isoformat(),
                 to_time,
-                tomorrow_start.isoformat(),
+                to_start_dt.isoformat(),
             )
 
-            # Create async task for fetching
+            # Create async function for fetching and processing price data
             async def _fetch_price_data() -> dict[str, Any] | None:
-                try:
-                    # Query data endpoint for price
-                    # Use measuringpointid in API call if provided for efficiency
-                    data = await self.api.get_data(
-                        node_id=self.node_id,
-                        from_time=from_time,
-                        to_time=to_time,
-                        interval="d",
-                        grouping="apartment",
-                        utilities=[f"{utility_code}[price]"],
-                        include_sub_nodes=measuring_point_id is None,  # Only include sub-nodes if not filtering by measuring point
-                        measuring_point_id=measuring_point_id,
-                    )
-
-                    # Find the latest non-null value from price data
-                    # Data structure: [{"ID": ..., "Name": ..., "Result": [{"Utl": "HW", "Func": "price", "Unit": "NOK", "Values": [...]}]}]
-                    # If measuringpointid was used, the API should have filtered the data already
-                    # But we still check for compatibility and in case external_key filtering is needed
-                    total_value = 0.0
-                    latest_time = None
-                    unit = ""
-                    found_price_value = False
-
-                    if data and isinstance(data, list):
-                        for node_data in data:
-                            # If measuring_point_id was provided but API didn't filter correctly, do client-side filtering
-                            if measuring_point_id is not None:
-                                node_id = node_data.get("ID")
-                                # Check if this node_data corresponds to the measuring point
-                                if node_id != measuring_point_id:
-                                    # Try to match via installations (fallback if API filtering didn't work)
-                                    matched = False
-                                    for inst in self._installations:
-                                        if inst.get("MeasuringPointID") == measuring_point_id:
-                                            if external_key and inst.get("ExternalKey") == external_key:
-                                                matched = True
-                                                break
-                                            elif not external_key:
-                                                matched = True
-                                                break
-                                    if not matched:
-                                        continue
-
-                            results = node_data.get("Result", [])
-                            for result in results:
-                                if result.get("Utl") == utility_code and result.get("Func") == "price":
-                                    values = result.get("Values", [])
-                                    if not unit:
-                                        unit = result.get("Unit", "")
-
-                                    # Find the latest non-null, non-zero value (values are sorted by time)
-                                    # API can be a day behind, so we look through all values to find the last one with data
-                                    for value_entry in reversed(values):
-                                        value = value_entry.get("Value")
-                                        # Check for both None and 0, as price might be 0 if not yet calculated
-                                        if value is not None and value != 0:
-                                            total_value += value
-                                            found_price_value = True
-                                            current_time = value_entry.get("Time")
-                                            if latest_time is None or (current_time is not None and current_time > latest_time):
-                                                latest_time = current_time
-                                            break  # Only take the latest value for this meter
-
-                    # If we found price data, return it
-                    if found_price_value:
-                        _LOGGER.debug(
-                            "Found price data for %s: value=%.2f, time=%s",
-                            utility_code,
-                            total_value,
-                            latest_time,
-                        )
-                        return {
-                            "value": total_value,
-                            "time": latest_time,
-                            "unit": unit,
-                            "utility_code": utility_code,
-                        }
-
-                    return None
-                finally:
-                    # Clean up pending request
-                    async with self._pending_requests_lock:
-                        if cache_key in self._pending_requests and self._pending_requests[cache_key] is task:
-                            del self._pending_requests[cache_key]
-
-            # Check one more time for pending request before creating task (with lock)
-            async with self._pending_requests_lock:
-                if cache_key in self._pending_requests:
-                    pending_task = self._pending_requests[cache_key]
-                    if not pending_task.done():
-                        task_to_await = pending_task
-                    else:
-                        # Task completed, remove it
-                        del self._pending_requests[cache_key]
-                        task_to_await = None
-                else:
-                    task_to_await = None
-            
-            # If we found a pending task, await it
-            if task_to_await is not None:
-                _LOGGER.debug(
-                    "Found pending price data request for %s (measuring_point_id=%s) (late check)",
-                    utility_code,
-                    measuring_point_id,
+                # Query data endpoint for price
+                # Use measuringpointid in API call if provided for efficiency
+                data = await self.api.get_data(
+                    node_id=self.node_id,
+                    from_time=from_time,
+                    to_time=to_time,
+                    interval="d",
+                    grouping="apartment",
+                    utilities=[f"{utility_code}[price]"],
+                    include_sub_nodes=measuring_point_id is None,  # Only include sub-nodes if not filtering by measuring point
+                    measuring_point_id=measuring_point_id,
                 )
-                try:
-                    return await task_to_await
-                except Exception as err:
+
+                # Find the latest non-null value from price data
+                # Data structure: [{"ID": ..., "Name": ..., "Result": [{"Utl": "HW", "Func": "price", "Unit": "NOK", "Values": [...]}]}]
+                # If measuringpointid was used, the API should have filtered the data already
+                # But we still check for compatibility and in case external_key filtering is needed
+                total_value = 0.0
+                latest_time = None
+                unit = ""
+                found_price_value = False
+
+                if data and isinstance(data, list):
+                    for node_data in data:
+                        # If measuring_point_id was provided but API didn't filter correctly, do client-side filtering
+                        if measuring_point_id is not None:
+                            node_id = node_data.get("ID")
+                            # Check if this node_data corresponds to the measuring point
+                            if node_id != measuring_point_id:
+                                # Try to match via installations (fallback if API filtering didn't work)
+                                matched = False
+                                for inst in self._installations:
+                                    if inst.get("MeasuringPointID") == measuring_point_id:
+                                        if external_key and inst.get("ExternalKey") == external_key:
+                                            matched = True
+                                            break
+                                        elif not external_key:
+                                            matched = True
+                                            break
+                                if not matched:
+                                    continue
+
+                        results = node_data.get("Result", [])
+                        for result in results:
+                            if result.get("Utl") == utility_code and result.get("Func") == "price":
+                                values = result.get("Values", [])
+                                if not unit:
+                                    unit = result.get("Unit", "")
+
+                                # Find the latest non-null, non-zero value (values are sorted by time)
+                                # API can be a day behind, so we look through all values to find the last one with data
+                                for value_entry in reversed(values):
+                                    value = value_entry.get("Value")
+                                    # Check for both None and 0, as price might be 0 if not yet calculated
+                                    if value is not None and value != 0:
+                                        total_value += value
+                                        found_price_value = True
+                                        current_time = value_entry.get("Time")
+                                        if latest_time is None or (current_time is not None and current_time > latest_time):
+                                            latest_time = current_time
+                                        break  # Only take the latest value for this meter
+
+                # If we found price data, return it
+                if found_price_value:
                     _LOGGER.debug(
-                        "Pending price request failed for %s: %s",
+                        "Found price data for %s: value=%.2f, time=%s",
                         utility_code,
-                        err,
+                        total_value,
+                        latest_time,
                     )
-                    async with self._pending_requests_lock:
-                        if cache_key in self._pending_requests and self._pending_requests[cache_key] is task_to_await:
-                            del self._pending_requests[cache_key]
-                    # Continue to create new task below
-            
-            # Create and track the task (with lock protection)
-            # We need to add it to _pending_requests BEFORE starting it to prevent races
-            async with self._pending_requests_lock:
-                # Final check - did another request create a task while we were waiting?
-                if cache_key in self._pending_requests:
-                    pending_task = self._pending_requests[cache_key]
-                    if not pending_task.done():
-                        # Another task exists, use that one
-                        task = pending_task
-                    else:
-                        # Task completed, remove it and create new one
-                        del self._pending_requests[cache_key]
-                        task = asyncio.create_task(_fetch_price_data())
-                        self._pending_requests[cache_key] = task
-                else:
-                    # No pending task, create and add it
-                    task = asyncio.create_task(_fetch_price_data())
-                    self._pending_requests[cache_key] = task
-            
-            try:
-                return await task
-            except Exception as err:
-                # Clean up on error
-                async with self._pending_requests_lock:
-                    if cache_key in self._pending_requests and self._pending_requests[cache_key] is task:
-                        del self._pending_requests[cache_key]
-                raise
-            finally:
-                # Clean up pending request if still there and it's done
-                async with self._pending_requests_lock:
-                    if cache_key in self._pending_requests and self._pending_requests[cache_key].done():
-                        if self._pending_requests[cache_key] is task:
-                            del self._pending_requests[cache_key]
+                    return {
+                        "value": total_value,
+                        "time": latest_time,
+                        "unit": unit,
+                        "utility_code": utility_code,
+                    }
+
+                return None
+
+            # Use request deduplicator to handle caching and deduplication
+            # Note: This doesn't use the data_request_cache since it processes the data
+            return await self._request_deduplicator.get_or_fetch(
+                cache_key=cache_key,
+                fetch_func=_fetch_price_data,
+                use_cache=False,  # Don't cache processed results, only deduplicate requests
+            )
 
         except Exception as err:
             _LOGGER.warning(
@@ -1133,12 +931,12 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             cache_key = f"{utility_code}_{measuring_point_id}_metered"
         else:
             cache_key = f"{utility_code}_all_metered"
-        
+
         if cache_key in self._latest_cost_cache:
             cached = self._latest_cost_cache[cache_key]
             _LOGGER.debug("✓ Cache HIT: metered cost data for %s (measuring_point_id=%s)", utility_code, measuring_point_id)
             return cached
-        
+
         # Cache miss - fall back to API call (for backward compatibility)
         _LOGGER.debug("✗ Cache MISS: metered cost data for %s (measuring_point_id=%s), falling back to API", utility_code, measuring_point_id)
         price_data = await self._get_latest_price_data(
@@ -1178,7 +976,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             consumption_cache_key = f"{utility_code}_{measuring_point_id}"
         else:
             consumption_cache_key = f"{utility_code}_all"
-        
+
         """Get the latest estimated cost value.
 
         First attempts to get actual price data from the API. If no price data is available,
@@ -1208,9 +1006,9 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             consumption_cache_key = f"{utility_code}_{measuring_point_id}"
         else:
             consumption_cache_key = f"{utility_code}_all"
-        
+
         consumption_data = self._latest_consumption_cache.get(consumption_cache_key)
-        
+
         # If not in cache, fetch it
         if not consumption_data:
             consumption_data = await self.get_latest_consumption_value(
@@ -1256,52 +1054,22 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # For HW, use spot prices and calibration (more accurate than simple rate)
             if utility_code == "HW":
                 # Create cache key for this calculation to deduplicate simultaneous requests
-                hw_cost_cache_key = f"hw_estimated_cost_{consumption:.3f}_{year}_{month}_{measuring_point_id or 'all'}"
-                
-                # Use lock to prevent race condition when checking/adding pending requests
-                async with self._pending_requests_lock:
-                    # Check if there's already a pending request for this calculation
-                    if hw_cost_cache_key in self._pending_requests:
-                        pending_task = self._pending_requests[hw_cost_cache_key]
-                        if not pending_task.done():
-                            task_to_await = pending_task
-                        else:
-                            # Task completed, remove it
-                            del self._pending_requests[hw_cost_cache_key]
-                            task_to_await = None
-                    else:
-                        task_to_await = None
-                
-                # Await outside the lock to avoid deadlock
-                if task_to_await is not None:
-                    _LOGGER.debug(
-                        "Waiting for pending HW estimated cost calculation: consumption=%.3f m3, year=%d, month=%d",
-                        consumption, year, month
-                    )
-                    try:
-                        result = await task_to_await
-                        return result
-                    except Exception as err:
-                        _LOGGER.debug(
-                            "Pending HW cost calculation failed: %s",
-                            err,
-                        )
-                        # Remove failed task if it's still the same one
-                        async with self._pending_requests_lock:
-                            if hw_cost_cache_key in self._pending_requests and self._pending_requests[hw_cost_cache_key] is task_to_await:
-                                del self._pending_requests[hw_cost_cache_key]
-                        # Continue to calculate below
+                hw_cost_cache_key = format_cache_key(
+                    "hw_estimated_cost",
+                    consumption=consumption,
+                    year=year,
+                    month=month,
+                    measuring_point_id=measuring_point_id,
+                )
 
-                # No pending task, create a new one
-                _LOGGER.debug("Calculating HW estimated cost: consumption=%.3f m3, year=%d, month=%d, measuring_point_id=%s", 
-                             consumption, year, month, measuring_point_id)
-                
                 # Create async task for calculation
                 async def _calculate_hw_estimated_cost() -> dict[str, Any] | None:
+                    _LOGGER.debug("Calculating HW estimated cost: consumption=%.3f m3, year=%d, month=%d, measuring_point_id=%s",
+                                 consumption, year, month, measuring_point_id)
                     # Try to get CW price and consumption for more accurate calculation
                     cw_price = None
                     cw_consumption = None
-                    
+
                     # Try to get CW price from cache
                     cw_price_cache_key = "CW_all_metered"  # Use aggregate cache key
                     coordinator_data = self.data
@@ -1311,14 +1079,14 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         if cw_price_data:
                             cw_price = cw_price_data.get("value")
                             _LOGGER.debug("Got CW price from cache: %.2f NOK", cw_price)
-                    
+
                     # Try to get CW consumption from cache
                     cw_consumption_cache_key = "CW_all"
                     cw_consumption_data = self._latest_consumption_cache.get(cw_consumption_cache_key)
                     if cw_consumption_data:
                         cw_consumption = cw_consumption_data.get("value")
                         _LOGGER.debug("Got CW consumption from cache: %.3f m3", cw_consumption)
-                    
+
                     # Calculate HW price using spot prices
                     hw_price_data = await self._get_hw_price_from_spot_prices(
                         consumption=consumption,
@@ -1327,10 +1095,10 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         cold_water_price=cw_price,
                         cold_water_consumption=cw_consumption,
                     )
-                    
+
                     if hw_price_data:
                         daily_cost = hw_price_data.get("value")
-                        _LOGGER.info("Calculated HW daily estimated cost: %.2f NOK (consumption: %.3f m3, year: %d, month: %d)", 
+                        _LOGGER.info("Calculated HW daily estimated cost: %.2f NOK (consumption: %.3f m3, year: %d, month: %d)",
                                     daily_cost, consumption, year, month)
                         # Convert to daily cost format
                         return {
@@ -1343,45 +1111,15 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     else:
                         _LOGGER.debug("Spot price calculation failed for HW, falling back to billing rate")
                         return None
-                
-                # Create and track the task (with lock protection)
-                task = asyncio.create_task(_calculate_hw_estimated_cost())
-                async with self._pending_requests_lock:
-                    # Double-check that no other task was created while we were creating this one
-                    if hw_cost_cache_key not in self._pending_requests:
-                        self._pending_requests[hw_cost_cache_key] = task
-                    else:
-                        # Another task was created, await that one instead
-                        task.cancel()
-                        task = self._pending_requests[hw_cost_cache_key]
-                
-                try:
-                    result = await task
-                    if result:
-                        return result
-                except asyncio.CancelledError:
-                    # Task was cancelled because another one was created first
-                    # Await the other task instead
-                    async with self._pending_requests_lock:
-                        if hw_cost_cache_key in self._pending_requests:
-                            task = self._pending_requests[hw_cost_cache_key]
-                        else:
-                            raise
-                    result = await task
-                    if result:
-                        return result
-                except Exception as err:
-                    # Clean up on error
-                    async with self._pending_requests_lock:
-                        if hw_cost_cache_key in self._pending_requests and self._pending_requests[hw_cost_cache_key] is task:
-                            del self._pending_requests[hw_cost_cache_key]
-                    raise
-                finally:
-                    # Clean up pending request if still there and it's done
-                    async with self._pending_requests_lock:
-                        if hw_cost_cache_key in self._pending_requests and self._pending_requests[hw_cost_cache_key].done():
-                            if self._pending_requests[hw_cost_cache_key] is task:
-                                del self._pending_requests[hw_cost_cache_key]
+
+                # Use request deduplicator for calculation task (not API call, so use_cache=False)
+                result = await self._request_deduplicator.get_or_fetch(
+                    cache_key=hw_cost_cache_key,
+                    fetch_func=_calculate_hw_estimated_cost,
+                    use_cache=False,  # Don't cache calculation results, only deduplicate
+                )
+                if result:
+                    return result
 
             # For non-HW or if spot price calculation failed, use billing rate
             rate = await self.billing_manager.get_rate_from_billing(utility_code, year, month)
@@ -1429,37 +1167,35 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _get_month_timestamps(self, year: int, month: int) -> tuple[int, int]:
         """Get start and end timestamps for a month.
-        
+
         Args:
             year: Year
             month: Month (1-12)
-            
+
         Returns:
             Tuple of (from_time, to_time) as Unix timestamps
         """
-        timezone_str = self.get_setting("TimeZoneIANA") or "UTC"
-        tz = get_timezone(timezone_str)
-        return get_month_timestamps(year, month, tz)
+        return get_month_timestamps(year, month, get_timezone(self.get_setting("TimeZoneIANA")))
 
     async def _calculate_monthly_price_from_daily_cache(
         self, utility_code: str, year: int, month: int
     ) -> dict[str, Any] | None:
         """Calculate monthly price from cached daily prices.
-        
+
         Args:
             utility_code: Utility code (e.g., "HW", "CW")
             year: Year
             month: Month (1-12)
-            
+
         Returns:
             Dict with price data or None if not available
         """
         from_time, to_time = self._get_month_timestamps(year, month)
-        
+
         # Try to calculate from cached daily prices (aggregate across all meters)
         total_price = 0.0
         has_cached_data = False
-        
+
         # Sum prices from all meters for this utility
         for cache_key_price, daily_prices in self._daily_price_cache.items():
             if cache_key_price.startswith(f"{utility_code}_") and cache_key_price.endswith("_metered"):
@@ -1473,7 +1209,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     meter_total = sum(p["value"] for p in month_prices)
                     total_price += meter_total
                     has_cached_data = True
-        
+
         if has_cached_data:
             currency = self.get_setting("Currency") or ""
             _LOGGER.info(
@@ -1490,7 +1226,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "cost_type": "actual",
                 "is_estimated": False,
             }
-        
+
         return None
 
     async def _fetch_monthly_price_from_api(
@@ -1508,183 +1244,43 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         from_time, to_time = self._get_month_timestamps(year, month)
         
-        # Defer API calls during startup
-        if self.hass.state == CoreState.starting:
-            _LOGGER.debug(
-                "Deferring API call for monthly price aggregate %s %d-%02d (HA is starting)",
-                utility_code, year, month
-            )
-            return None
-
         # Create cache key for this request
-        api_cache_key = f"data_{self.node_id}_{from_time}_{to_time}_{utility_code}_price"
-
-        # Check API request cache first
-        data = None
-        if api_cache_key in self._data_request_cache:
-            cached_data, cache_timestamp = self._data_request_cache[api_cache_key]
-            age = time.time() - cache_timestamp
-            if age < self._data_cache_ttl:
-                _LOGGER.debug(
-                    "Using cached API data for %s price %d-%02d (age: %.1f seconds)",
-                    utility_code,
-                    year,
-                    month,
-                    age,
-                )
-                data = cached_data
-            else:
-                # Cache expired, remove it
-                del self._data_request_cache[api_cache_key]
-
-        # Use lock to prevent race condition when checking/adding pending requests
-        async with self._pending_requests_lock:
-            # Check if there's already a pending request for this data
-            if data is None and api_cache_key in self._pending_requests:
-                pending_task = self._pending_requests[api_cache_key]
-                if not pending_task.done():
-                    task_to_await = pending_task
-                else:
-                    # Task completed, remove it
-                    del self._pending_requests[api_cache_key]
-                    task_to_await = None
-            else:
-                task_to_await = None
+        api_cache_key = format_cache_key(
+            "data",
+            utility_code=utility_code,
+            from_time=from_time,
+            to_time=to_time,
+            node_id=self.node_id,
+            aggregate_type="price",
+        )
         
-        # Await outside the lock to avoid deadlock
-        if task_to_await is not None:
+        async def fetch_price_data() -> list[dict[str, Any]] | None:
+            """Fetch price data from API."""
             _LOGGER.debug(
-                "Waiting for pending price API request for %s %d-%02d",
+                "Fetching monthly price for %s %d-%02d from API: from=%s to=%s",
                 utility_code,
                 year,
                 month,
+                from_time,
+                to_time,
             )
-            try:
-                data = await task_to_await
-            except Exception as err:
-                _LOGGER.warning(
-                    "Pending price API request failed for %s %d-%02d: %s",
-                    utility_code,
-                    year,
-                    month,
-                    err,
-                )
-                # Remove failed pending request if it's still the same one
-                async with self._pending_requests_lock:
-                    if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task_to_await:
-                        del self._pending_requests[api_cache_key]
-                data = None
-
-        # If no cached data and no pending request, make the API call
-        if data is None:
-            # Check one more time for pending request before creating task (with lock)
-            async with self._pending_requests_lock:
-                if api_cache_key in self._pending_requests:
-                    pending_task = self._pending_requests[api_cache_key]
-                    if not pending_task.done():
-                        task_to_await = pending_task
-                    else:
-                        # Task completed, remove it
-                        del self._pending_requests[api_cache_key]
-                        task_to_await = None
-                else:
-                    task_to_await = None
-            
-            # If we found a pending task, await it
-            if task_to_await is not None:
-                _LOGGER.debug(
-                    "Found pending price API request for %s %d-%02d (late check)",
-                    utility_code,
-                    year,
-                    month,
-                )
-                try:
-                    data = await task_to_await
-                except Exception as err:
-                    _LOGGER.warning(
-                        "Pending price API request failed for %s %d-%02d: %s",
-                        utility_code,
-                        year,
-                        month,
-                        err,
-                    )
-                    async with self._pending_requests_lock:
-                        if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task_to_await:
-                            del self._pending_requests[api_cache_key]
-                    data = None
-            
-            # Only log and create task if we're actually going to make an API call
-            if data is None:
-                _LOGGER.debug(
-                    "Fetching monthly price for %s %d-%02d from API (cache miss): from=%s to=%s",
-                    utility_code,
-                    year,
-                    month,
-                    from_time,
-                    to_time,
-                )
-            
-            # If still no data, create a new task
-            if data is None:
-                # Create a task for this request
-                # We'll capture the task reference to use in cleanup
-                task_ref = None
-                
-                async def fetch_price_data():
-                    nonlocal task_ref
-                    try:
-                        result = await self.api.get_data(
-                            node_id=self.node_id,
-                            from_time=from_time,
-                            to_time=to_time,
-                            interval="d",
-                            grouping="apartment",
-                            utilities=[f"{utility_code}[price]"],
-                            include_sub_nodes=True,
-                        )
-                        # Cache the result
-                        if result:
-                            self._data_request_cache[api_cache_key] = (result, time.time())
-                        return result
-                    finally:
-                        # Remove from pending requests when done
-                        async with self._pending_requests_lock:
-                            if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task_ref:
-                                del self._pending_requests[api_cache_key]
-
-                # Create and track the task (with lock protection)
-                # We need to add it to _pending_requests BEFORE starting it to prevent races
-                async with self._pending_requests_lock:
-                    # Final check - did another request create a task while we were waiting?
-                    if api_cache_key in self._pending_requests:
-                        pending_task = self._pending_requests[api_cache_key]
-                        if not pending_task.done():
-                            # Another task exists, use that one
-                            task = pending_task
-                        else:
-                            # Task completed, remove it and create new one
-                            del self._pending_requests[api_cache_key]
-                            task = asyncio.create_task(fetch_price_data())
-                            task_ref = task
-                            # Add to dict immediately after creation (still inside lock)
-                            self._pending_requests[api_cache_key] = task
-                    else:
-                        # No pending task, create and add it (all inside lock for atomicity)
-                        task = asyncio.create_task(fetch_price_data())
-                        task_ref = task
-                        # Add to dict immediately after creation (still inside lock)
-                        self._pending_requests[api_cache_key] = task
-
-                # Wait for the result (outside lock to avoid deadlock)
-                try:
-                    data = await task
-                except Exception as err:
-                    # Clean up on error
-                    async with self._pending_requests_lock:
-                        if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task:
-                            del self._pending_requests[api_cache_key]
-                    raise
-
+            return await self.api.get_data(
+                node_id=self.node_id,
+                from_time=from_time,
+                to_time=to_time,
+                interval="d",
+                grouping="apartment",
+                utilities=[f"{utility_code}[price]"],
+                include_sub_nodes=True,
+            )
+        
+        # Use request deduplicator to handle caching and deduplication
+        data = await self._request_deduplicator.get_or_fetch(
+            cache_key=api_cache_key,
+            fetch_func=fetch_price_data,
+            use_cache=True,
+        )
+        
         if not data or not isinstance(data, list):
             return None
 
@@ -1714,20 +1310,20 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "cost_type": "actual",
                 "is_estimated": False,
             }
-        
+
         return None
 
     async def _get_monthly_price_actual(
         self, utility_code: str, year: int, month: int, cache_key: str
     ) -> dict[str, Any] | None:
         """Get monthly actual price aggregate.
-        
+
         Args:
             utility_code: Utility code (e.g., "HW", "CW")
             year: Year
             month: Month (1-12)
             cache_key: Cache key for storing result
-            
+
         Returns:
             Dict with price data or None if not available
         """
@@ -1737,18 +1333,18 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._monthly_aggregate_cache[cache_key] = result
             self._sync_cache_to_data()
             return result
-        
+
         _LOGGER.debug(
             "Daily price cache exists but no values for %s %d-%02d (date range mismatch?)",
             utility_code, year, month
         )
-        
+
         # Fall back to API call
         result = await self._fetch_monthly_price_from_api(utility_code, year, month)
         if result:
             self._monthly_aggregate_cache[cache_key] = result
             self._sync_cache_to_data()
-        
+
         return result
 
     async def _get_monthly_price_cw(
@@ -1770,178 +1366,45 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         
         from_time, to_time = self._get_month_timestamps(year, month)
         
-        # Defer API calls during startup
-        if self.hass.state == CoreState.starting:
-            _LOGGER.debug(
-                "Deferring API call for CW price %d-%02d (HA is starting)",
-                year, month
-            )
-            return None
-        
         # Create cache key for this request
-        api_cache_key = f"data_{self.node_id}_{from_time}_{to_time}_{utility_code}_price"
+        api_cache_key = format_cache_key(
+            "data",
+            utility_code=utility_code,
+            from_time=from_time,
+            to_time=to_time,
+            node_id=self.node_id,
+            aggregate_type="price",
+        )
         
-        # Check API request cache first
-        data = None
-        if api_cache_key in self._data_request_cache:
-            cached_data, cache_timestamp = self._data_request_cache[api_cache_key]
-            age = time.time() - cache_timestamp
-            if age < self._data_cache_ttl:
-                _LOGGER.debug(
-                    "Using cached API data for CW price %d-%02d (age: %.1f seconds)",
-                    year,
-                    month,
-                    age,
-                )
-                data = cached_data
-            else:
-                # Cache expired, remove it
-                del self._data_request_cache[api_cache_key]
-        
-        # Use lock to prevent race condition when checking/adding pending requests
-        async with self._pending_requests_lock:
-            # Check if there's already a pending request for this data
-            if data is None and api_cache_key in self._pending_requests:
-                pending_task = self._pending_requests[api_cache_key]
-                if not pending_task.done():
-                    task_to_await = pending_task
-                else:
-                    # Task completed, remove it
-                    del self._pending_requests[api_cache_key]
-                    task_to_await = None
-            else:
-                task_to_await = None
-        
-        # Await outside the lock to avoid deadlock
-        if task_to_await is not None:
+        async def fetch_cw_price_data() -> list[dict[str, Any]] | None:
+            """Fetch CW price data from API."""
             _LOGGER.debug(
-                "Waiting for pending CW price API request for %d-%02d",
+                "Fetching CW price for %d-%02d from API: from=%s to=%s",
                 year,
                 month,
+                from_time,
+                to_time,
             )
-            try:
-                data = await task_to_await
-            except Exception as err:
-                _LOGGER.warning(
-                    "Pending CW price API request failed for %d-%02d: %s",
-                    year,
-                    month,
-                    err,
-                )
-                # Remove failed pending request if it's still the same one
-                async with self._pending_requests_lock:
-                    if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task_to_await:
-                        del self._pending_requests[api_cache_key]
-                data = None
+            return await self.api.get_data(
+                node_id=self.node_id,
+                from_time=from_time,
+                to_time=to_time,
+                interval="d",
+                grouping="apartment",
+                utilities=[f"{utility_code}[price]"],
+                include_sub_nodes=True,
+            )
         
-        # If no cached data and no pending request, make the API call
-        if data is None:
-            # Check one more time for pending request before creating task (with lock)
-            async with self._pending_requests_lock:
-                if api_cache_key in self._pending_requests:
-                    pending_task = self._pending_requests[api_cache_key]
-                    if not pending_task.done():
-                        task_to_await = pending_task
-                    else:
-                        # Task completed, remove it
-                        del self._pending_requests[api_cache_key]
-                        task_to_await = None
-                else:
-                    task_to_await = None
-            
-            # If we found a pending task, await it
-            if task_to_await is not None:
-                _LOGGER.debug(
-                    "Found pending CW price API request for %d-%02d (late check)",
-                    year,
-                    month,
-                )
-                try:
-                    data = await task_to_await
-                except Exception as err:
-                    _LOGGER.warning(
-                        "Pending CW price API request failed for %d-%02d: %s",
-                        year,
-                        month,
-                        err,
-                    )
-                    async with self._pending_requests_lock:
-                        if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task_to_await:
-                            del self._pending_requests[api_cache_key]
-                    data = None
-            
-            # If still no data, create a new task
-            if data is None:
-                # Only log when we're actually going to make an API call
-                _LOGGER.debug(
-                    "Fetching CW price for %d-%02d from API (cache miss): from=%s to=%s",
-                    year,
-                    month,
-                    from_time,
-                    to_time,
-                )
-                # Create a task for this request
-                # We'll capture the task reference to use in cleanup
-                task_ref = None
-                
-                async def fetch_cw_price_data():
-                    nonlocal task_ref
-                    try:
-                        result = await self.api.get_data(
-                            node_id=self.node_id,
-                            from_time=from_time,
-                            to_time=to_time,
-                            interval="d",
-                            grouping="apartment",
-                            utilities=[f"{utility_code}[price]"],
-                            include_sub_nodes=True,
-                        )
-                        # Cache the result
-                        if result:
-                            self._data_request_cache[api_cache_key] = (result, time.time())
-                        return result
-                    finally:
-                        # Remove from pending requests when done
-                        async with self._pending_requests_lock:
-                            if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task_ref:
-                                del self._pending_requests[api_cache_key]
-                
-                # Create and track the task (with lock protection)
-                # We need to add it to _pending_requests BEFORE starting it to prevent races
-                async with self._pending_requests_lock:
-                    # Final check - did another request create a task while we were waiting?
-                    if api_cache_key in self._pending_requests:
-                        pending_task = self._pending_requests[api_cache_key]
-                        if not pending_task.done():
-                            # Another task exists, use that one
-                            task = pending_task
-                        else:
-                            # Task completed, remove it and create new one
-                            del self._pending_requests[api_cache_key]
-                            task = asyncio.create_task(fetch_cw_price_data())
-                            task_ref = task
-                            # Add to dict immediately after creation (still inside lock)
-                            self._pending_requests[api_cache_key] = task
-                    else:
-                        # No pending task, create and add it (all inside lock for atomicity)
-                        task = asyncio.create_task(fetch_cw_price_data())
-                        task_ref = task
-                        # Add to dict immediately after creation (still inside lock)
-                        self._pending_requests[api_cache_key] = task
-
-                # Wait for the result (outside lock to avoid deadlock)
-                try:
-                    data = await task
-                except Exception as err:
-                    # Clean up on error
-                    async with self._pending_requests_lock:
-                        if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task:
-                            del self._pending_requests[api_cache_key]
-                    raise
+        # Use request deduplicator to handle caching and deduplication
+        data = await self._request_deduplicator.get_or_fetch(
+            cache_key=api_cache_key,
+            fetch_func=fetch_cw_price_data,
+            use_cache=True,
+        )
         
         if not data or not isinstance(data, list):
             return None
-        
+
         # Process the data
         total_price = 0.0
         has_data = False
@@ -1975,185 +1438,59 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "cost_type": cost_type,
                 "is_estimated": False,
             }
-        
+
         return None
 
     async def _get_monthly_price_hw_estimated(
         self, year: int, month: int
     ) -> dict[str, Any] | None:
         """Get monthly estimated price for HW utility.
-        
+
         Args:
             year: Year
             month: Month (1-12)
-            
+
         Returns:
             Dict with price data or None if not available
         """
         from_time, to_time = self._get_month_timestamps(year, month)
-        
-        # Defer API calls during startup
-        if self.hass.state == CoreState.starting:
-            _LOGGER.debug(
-                "Deferring API call for HW price check %d-%02d (HA is starting)",
-                year, month
-            )
-            return None
-        
+
         # First check if we have actual price data from API
         # Use the same deduplication pattern as other price fetches
-        api_cache_key = f"data_{self.node_id}_{from_time}_{to_time}_HW_price"
-        
-        # Check API request cache first
-        data = None
-        if api_cache_key in self._data_request_cache:
-            cached_data, cache_timestamp = self._data_request_cache[api_cache_key]
-            age = time.time() - cache_timestamp
-            if age < self._data_cache_ttl:
-                _LOGGER.debug(
-                    "Using cached API data for HW price check %d-%02d (age: %.1f seconds)",
-                    year,
-                    month,
-                    age,
-                )
-                data = cached_data
-        
-        # Use lock to prevent race condition when checking/adding pending requests
-        async with self._pending_requests_lock:
-            # Check if there's already a pending request for this data
-            if data is None and api_cache_key in self._pending_requests:
-                pending_task = self._pending_requests[api_cache_key]
-                if not pending_task.done():
-                    task_to_await = pending_task
-                else:
-                    # Task completed, remove it
-                    del self._pending_requests[api_cache_key]
-                    task_to_await = None
-            else:
-                task_to_await = None
-        
-        # Await outside the lock to avoid deadlock
-        if task_to_await is not None:
+        api_cache_key = format_cache_key(
+            "data",
+            utility_code="HW",
+            from_time=from_time,
+            to_time=to_time,
+            node_id=self.node_id,
+            aggregate_type="price",
+        )
+
+        async def fetch_hw_price_check_data() -> list[dict[str, Any]] | None:
+            """Fetch HW price check data from API."""
             _LOGGER.debug(
-                "Waiting for pending HW price check API request for %d-%02d",
+                "Fetching HW price check for %d-%02d from API: from=%s to=%s",
                 year,
                 month,
+                from_time,
+                to_time,
             )
-            try:
-                data = await task_to_await
-            except Exception as err:
-                _LOGGER.warning(
-                    "Pending HW price check API request failed for %d-%02d: %s",
-                    year,
-                    month,
-                    err,
-                )
-                # Remove failed pending request if it's still the same one
-                async with self._pending_requests_lock:
-                    if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task_to_await:
-                        del self._pending_requests[api_cache_key]
-                data = None
-        
-        # If no cached data and no pending request, make the API call
-        if data is None:
-            # Check one more time for pending request before creating task (with lock)
-            async with self._pending_requests_lock:
-                if api_cache_key in self._pending_requests:
-                    pending_task = self._pending_requests[api_cache_key]
-                    if not pending_task.done():
-                        task_to_await = pending_task
-                    else:
-                        # Task completed, remove it
-                        del self._pending_requests[api_cache_key]
-                        task_to_await = None
-                else:
-                    task_to_await = None
-            
-            # If we found a pending task, await it
-            if task_to_await is not None:
-                _LOGGER.debug(
-                    "Found pending HW price check API request for %d-%02d (late check)",
-                    year,
-                    month,
-                )
-                try:
-                    data = await task_to_await
-                except Exception as err:
-                    _LOGGER.warning(
-                        "Pending HW price check API request failed for %d-%02d: %s",
-                        year,
-                        month,
-                        err,
-                    )
-                    async with self._pending_requests_lock:
-                        if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task_to_await:
-                            del self._pending_requests[api_cache_key]
-                    data = None
-            
-            # If still no data, create a new task
-            if data is None:
-                # Create a task for this request
-                # We'll capture the task reference to use in cleanup
-                task_ref = None
-                
-                async def fetch_hw_price_check_data():
-                    nonlocal task_ref
-                    try:
-                        result = await self.api.get_data(
-                            node_id=self.node_id,
-                            from_time=from_time,
-                            to_time=to_time,
-                            interval="d",
-                            grouping="apartment",
-                            utilities=["HW[price]"],
-                            include_sub_nodes=True,
-                        )
-                        # Cache the result
-                        if result:
-                            self._data_request_cache[api_cache_key] = (result, time.time())
-                        return result
-                    finally:
-                        # Remove from pending requests when done
-                        async with self._pending_requests_lock:
-                            if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task_ref:
-                                del self._pending_requests[api_cache_key]
-                
-                # Create and track the task (with lock protection)
-                # We need to add it to _pending_requests BEFORE starting it to prevent races
-                async with self._pending_requests_lock:
-                    # Final check - did another request create a task while we were waiting?
-                    if api_cache_key in self._pending_requests:
-                        pending_task = self._pending_requests[api_cache_key]
-                        if not pending_task.done():
-                            # Another task exists, use that one
-                            task = pending_task
-                        else:
-                            # Task completed, remove it and create new one
-                            del self._pending_requests[api_cache_key]
-                            task = asyncio.create_task(fetch_hw_price_check_data())
-                            task_ref = task
-                            # Add to dict immediately after creation (still inside lock)
-                            self._pending_requests[api_cache_key] = task
-                    else:
-                        # No pending task, create and add it (all inside lock for atomicity)
-                        task = asyncio.create_task(fetch_hw_price_check_data())
-                        task_ref = task
-                        # Add to dict immediately after creation (still inside lock)
-                        self._pending_requests[api_cache_key] = task
+            return await self.api.get_data(
+                node_id=self.node_id,
+                from_time=from_time,
+                to_time=to_time,
+                interval="d",
+                grouping="apartment",
+                utilities=["HW[price]"],
+                include_sub_nodes=True,
+            )
 
-                # Wait for the result (outside lock to avoid deadlock)
-                try:
-                    data = await task
-                except Exception as err:
-                    _LOGGER.debug(
-                        "Failed to check for actual HW price data: %s",
-                        err,
-                    )
-                    # Clean up on error
-                    async with self._pending_requests_lock:
-                        if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task:
-                            del self._pending_requests[api_cache_key]
-                    data = None
+        # Use request deduplicator to handle caching and deduplication
+        data = await self._request_deduplicator.get_or_fetch(
+            cache_key=api_cache_key,
+            fetch_func=fetch_hw_price_check_data,
+            use_cache=True,
+        )
 
         # Process the data
         has_actual_api_data = False
@@ -2233,42 +1570,42 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self, utility_code: str, year: int, month: int, cache_key: str
     ) -> dict[str, Any] | None:
         """Calculate monthly consumption from cached daily consumption data.
-        
+
         Args:
             utility_code: Utility code (e.g., "HW", "CW")
             year: Year
             month: Month (1-12)
             cache_key: Cache key for storing result
-            
+
         Returns:
             Dict with consumption data or None if not available
         """
         cache_key_daily = f"{utility_code}_all"  # Use aggregate cache key
         daily_values = self._daily_consumption_cache.get(cache_key_daily)
-        
+
         if not daily_values:
             return None
-        
+
         from_time, to_time = self._get_month_timestamps(year, month)
-        
+
         # Filter daily values for this month
         month_values = [
             v for v in daily_values
             if from_time <= v["time"] < to_time and v.get("value") is not None
         ]
-        
+
         if not month_values:
             return None
-        
+
         # Sum all values for the month
         total_value = sum(v["value"] for v in month_values)
         unit = month_values[0].get("unit", "") if month_values else ""
-        
+
         _LOGGER.debug(
             "Calculated monthly consumption for %s %d-%02d from %d cached daily values (reused data!)",
             utility_code, year, month, len(month_values)
         )
-        
+
         result = {
             "value": total_value,
             "unit": unit,
@@ -2286,202 +1623,59 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self, utility_code: str, year: int, month: int, aggregate_type: str, cache_key: str
     ) -> dict[str, Any] | None:
         """Fetch monthly consumption from API.
-        
+
         Args:
             utility_code: Utility code (e.g., "HW", "CW")
             year: Year
             month: Month (1-12)
             aggregate_type: Aggregate type ("con" for consumption)
             cache_key: Cache key for storing result
-            
+
         Returns:
             Dict with consumption data or None if not available
         """
         from_time, to_time = self._get_month_timestamps(year, month)
-        
-        # Defer API calls during startup
-        if self.hass.state == CoreState.starting:
-            _LOGGER.debug(
-                "Deferring API call for monthly aggregate %s[%s] %d-%02d (HA is starting)",
-                utility_code, aggregate_type, year, month
-            )
-            return None
 
         # Query data endpoint for the month
         utilities = [f"{utility_code}[{aggregate_type}]"]
 
         # Create cache key for this request
-        api_cache_key = f"data_{self.node_id}_{from_time}_{to_time}_{utility_code}_{aggregate_type}"
+        api_cache_key = format_cache_key(
+            "data",
+            utility_code=utility_code,
+            from_time=from_time,
+            to_time=to_time,
+            node_id=self.node_id,
+            aggregate_type=aggregate_type,
+        )
 
-        # Check API request cache first
-        data = None
-        if api_cache_key in self._data_request_cache:
-            cached_data, cache_timestamp = self._data_request_cache[api_cache_key]
-            age = time.time() - cache_timestamp
-            if age < self._data_cache_ttl:
-                _LOGGER.debug(
-                    "Using cached API data for %s[%s] %d-%02d (age: %.1f seconds)",
-                    utility_code,
-                    aggregate_type,
-                    year,
-                    month,
-                    age,
-                )
-                data = cached_data
-            else:
-                # Cache expired, remove it
-                del self._data_request_cache[api_cache_key]
-
-        # Use lock to prevent race condition when checking/adding pending requests
-        async with self._pending_requests_lock:
-            # Check if there's already a pending request for this data
-            if data is None and api_cache_key in self._pending_requests:
-                pending_task = self._pending_requests[api_cache_key]
-                if not pending_task.done():
-                    task_to_await = pending_task
-                else:
-                    # Task completed, remove it
-                    del self._pending_requests[api_cache_key]
-                    task_to_await = None
-            else:
-                task_to_await = None
-        
-        # Await outside the lock to avoid deadlock
-        if task_to_await is not None:
+        async def fetch_data() -> list[dict[str, Any]] | None:
+            """Fetch consumption data from API."""
             _LOGGER.debug(
-                "Waiting for pending request for %s[%s] %d-%02d",
+                "Fetching monthly aggregate for %s[%s] %d-%02d from API: from=%s to=%s",
                 utility_code,
                 aggregate_type,
                 year,
                 month,
+                from_time,
+                to_time,
             )
-            try:
-                data = await task_to_await
-            except Exception as err:
-                _LOGGER.warning(
-                    "Pending request failed for %s[%s] %d-%02d: %s",
-                    utility_code,
-                    aggregate_type,
-                    year,
-                    month,
-                    err,
-                )
-                # Remove failed pending request if it's still the same one
-                async with self._pending_requests_lock:
-                    if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task_to_await:
-                        del self._pending_requests[api_cache_key]
-                data = None
+            return await self.api.get_data(
+                node_id=self.node_id,
+                from_time=from_time,
+                to_time=to_time,
+                interval="d",
+                grouping="apartment",
+                utilities=utilities,
+                include_sub_nodes=True,
+            )
 
-        # If no cached data and no pending request, make the API call
-        if data is None:
-            # Check one more time for pending request before creating task (with lock)
-            async with self._pending_requests_lock:
-                if api_cache_key in self._pending_requests:
-                    pending_task = self._pending_requests[api_cache_key]
-                    if not pending_task.done():
-                        task_to_await = pending_task
-                    else:
-                        # Task completed, remove it
-                        del self._pending_requests[api_cache_key]
-                        task_to_await = None
-                else:
-                    task_to_await = None
-            
-            # If we found a pending task, await it
-            if task_to_await is not None:
-                _LOGGER.debug(
-                    "Found pending request for %s[%s] %d-%02d (late check)",
-                    utility_code,
-                    aggregate_type,
-                    year,
-                    month,
-                )
-                try:
-                    data = await task_to_await
-                except Exception as err:
-                    _LOGGER.warning(
-                        "Pending request failed for %s[%s] %d-%02d: %s",
-                        utility_code,
-                        aggregate_type,
-                        year,
-                        month,
-                        err,
-                    )
-                    async with self._pending_requests_lock:
-                        if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task_to_await:
-                            del self._pending_requests[api_cache_key]
-                    data = None
-            
-            # If still no data, create a new task
-            if data is None:
-                # Only log when we're actually going to make an API call
-                _LOGGER.debug(
-                    "Fetching monthly aggregate for %s[%s] %d-%02d from API (cache miss): from=%s to=%s",
-                    utility_code,
-                    aggregate_type,
-                    year,
-                    month,
-                    from_time,
-                    to_time,
-                )
-                # Create a task for this request
-                # We'll capture the task reference to use in cleanup
-                task_ref = None
-                
-                async def fetch_data():
-                    nonlocal task_ref
-                    try:
-                        result = await self.api.get_data(
-                            node_id=self.node_id,
-                            from_time=from_time,
-                            to_time=to_time,
-                            interval="d",
-                            grouping="apartment",
-                            utilities=utilities,
-                            include_sub_nodes=True,
-                        )
-                        # Cache the result
-                        if result:
-                            self._data_request_cache[api_cache_key] = (result, time.time())
-                        return result
-                    finally:
-                        # Remove from pending requests when done
-                        async with self._pending_requests_lock:
-                            if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task_ref:
-                                del self._pending_requests[api_cache_key]
-                
-                # Create and track the task (with lock protection)
-                # We need to add it to _pending_requests BEFORE starting it to prevent races
-                async with self._pending_requests_lock:
-                    # Final check - did another request create a task while we were waiting?
-                    if api_cache_key in self._pending_requests:
-                        pending_task = self._pending_requests[api_cache_key]
-                        if not pending_task.done():
-                            # Another task exists, use that one
-                            task = pending_task
-                        else:
-                            # Task completed, remove it and create new one
-                            del self._pending_requests[api_cache_key]
-                            task = asyncio.create_task(fetch_data())
-                            task_ref = task
-                            # Add to dict immediately after creation (still inside lock)
-                            self._pending_requests[api_cache_key] = task
-                    else:
-                        # No pending task, create and add it (all inside lock for atomicity)
-                        task = asyncio.create_task(fetch_data())
-                        task_ref = task
-                        # Add to dict immediately after creation (still inside lock)
-                        self._pending_requests[api_cache_key] = task
-
-                # Wait for the result (outside lock to avoid deadlock)
-                try:
-                    data = await task
-                except Exception as err:
-                    # Clean up on error
-                    async with self._pending_requests_lock:
-                        if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task:
-                            del self._pending_requests[api_cache_key]
-                    raise
+        # Use request deduplicator to handle caching and deduplication
+        data = await self._request_deduplicator.get_or_fetch(
+            cache_key=api_cache_key,
+            fetch_func=fetch_data,
+            use_cache=True,
+        )
 
         if not data or not isinstance(data, list):
             return None
@@ -2530,7 +1724,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         cost_type: str = "actual",
     ) -> dict[str, Any] | None:
         """Get monthly aggregate for consumption or price.
-        
+
         First checks the monthly aggregate cache. If not found, makes API call and caches result.
 
         Args:
@@ -2550,10 +1744,10 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             cached = self._monthly_aggregate_cache[cache_key]
             _LOGGER.debug("✓ Cache HIT: monthly aggregate %s", cache_key)
             return cached
-        
+
         # Cache miss - will try to calculate from daily cache or fetch from API
         _LOGGER.debug("✗ Cache MISS: monthly aggregate %s, will try daily cache or API", cache_key)
-        
+
         # Wrap calculation in a task for deduplication
         async def _calculate_monthly_aggregate() -> dict[str, Any] | None:
             # For price aggregates
@@ -2563,7 +1757,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     result = await self._get_monthly_price_actual(utility_code, year, month, cache_key)
                     if result:
                         return result
-                
+
                 # Handle CW price (special case)
                 if utility_code == "CW":
                     result = await self._get_monthly_price_cw(utility_code, year, month, cost_type)
@@ -2571,7 +1765,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         self._monthly_aggregate_cache[cache_key] = result
                         self._sync_cache_to_data()
                         return result
-                
+
                 # Handle HW estimated price
                 if utility_code == "HW" and cost_type == "estimated":
                     result = await self._get_monthly_price_hw_estimated(year, month)
@@ -2579,7 +1773,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         self._monthly_aggregate_cache[cache_key] = result
                         self._sync_cache_to_data()
                         return result
-                
+
                 # For HW actual: if we got here, we already checked for actual API data and didn't find it
                 # Don't fall back to billing/spot prices for "actual" - that would be an estimate
                 if utility_code == "HW" and cost_type == "actual":
@@ -2589,14 +1783,14 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         month,
                     )
                     return None
-                
+
                 # For CW or HW estimated (fallback), use billing results
                 result = await self.billing_manager.get_monthly_price_from_billing(
                     utility_code=utility_code,
                     year=year,
                     month=month,
                 )
-                
+
                 if result:
                     result["cost_type"] = cost_type
                     # Mark as estimated if it came from spot prices or billing calculation
@@ -2606,9 +1800,9 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         result["is_estimated"] = False
                     self._monthly_aggregate_cache[cache_key] = result
                     self._sync_cache_to_data()
-                
+
                 return result
-            
+
             # For consumption aggregates
             if aggregate_type == "con":
                 # Try to calculate from cached daily consumption data first
@@ -2617,80 +1811,23 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 if result:
                     return result
-                
+
                 # Fall back to API call
                 return await self._fetch_monthly_consumption_from_api(
                     utility_code, year, month, aggregate_type, cache_key
                 )
-            
-            return None
-        
-        # Use lock to prevent race condition when checking/adding pending requests
-        async with self._pending_requests_lock:
-            # Check if there's already a pending request for this cache key
-            if cache_key in self._pending_requests:
-                pending_task = self._pending_requests[cache_key]
-                if not pending_task.done():
-                    task_to_await = pending_task
-                else:
-                    # Task completed, remove it
-                    del self._pending_requests[cache_key]
-                    task_to_await = None
-            else:
-                task_to_await = None
-        
-        # Await outside the lock to avoid deadlock
-        if task_to_await is not None:
-            _LOGGER.debug(
-                "Waiting for pending monthly aggregate request for %s",
-                cache_key,
-            )
-            try:
-                result = await task_to_await
-                return result
-            except Exception as err:
-                _LOGGER.debug(
-                    "Pending monthly aggregate request failed for %s: %s",
-                    cache_key,
-                    err,
-                )
-                # Remove failed task if it's still the same one
-                async with self._pending_requests_lock:
-                    if cache_key in self._pending_requests and self._pending_requests[cache_key] is task_to_await:
-                        del self._pending_requests[cache_key]
-                # Continue to calculate below
-        
-        # No pending task, create a new one
-        # Create and track the task (with lock protection)
-        # We need to add it to _pending_requests BEFORE starting it to prevent races
-        async with self._pending_requests_lock:
-            # Final check - did another request create a task while we were waiting?
-            if cache_key in self._pending_requests:
-                pending_task = self._pending_requests[cache_key]
-                if not pending_task.done():
-                    # Another task exists, use that one
-                    task = pending_task
-                else:
-                    # Task completed, remove it and create new one
-                    del self._pending_requests[cache_key]
-                    task = asyncio.create_task(_calculate_monthly_aggregate())
-                    # Add to dict immediately after creation (still inside lock)
-                    self._pending_requests[cache_key] = task
-            else:
-                # No pending task, create and add it (all inside lock for atomicity)
-                task = asyncio.create_task(_calculate_monthly_aggregate())
-                # Add to dict immediately after creation (still inside lock)
-                self._pending_requests[cache_key] = task
 
-        # Wait for the result (outside lock to avoid deadlock)
+            return None
+
+        # Use request deduplicator for calculation task (not API call, so use_cache=False)
         try:
-            result = await task
+            result = await self._request_deduplicator.get_or_fetch(
+                cache_key=cache_key,
+                fetch_func=_calculate_monthly_aggregate,
+                use_cache=False,  # Don't cache calculation results, only deduplicate
+            )
             return result
         except Exception as err:
-            # Clean up on error
-            async with self._pending_requests_lock:
-                if cache_key in self._pending_requests and self._pending_requests[cache_key] is task:
-                    del self._pending_requests[cache_key]
             _LOGGER.warning(
                 "Failed to fetch monthly aggregate for %s[%s] %d-%02d: %s",
                 utility_code,
@@ -2700,12 +1837,6 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 err,
             )
             return None
-        finally:
-            # Clean up pending request if still there and it's done
-            async with self._pending_requests_lock:
-                if cache_key in self._pending_requests and self._pending_requests[cache_key].done():
-                    if self._pending_requests[cache_key] is task:
-                        del self._pending_requests[cache_key]
 
     async def get_monthly_aggregate_for_meter(
         self,
@@ -2762,87 +1893,43 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 to_time = int(to_date.timestamp())
 
                 # Create cache key for this request
-                cache_key = f"data_meter_{self.node_id}_{measuring_point_id}_{from_time}_{to_time}_{utility_code}_{aggregate_type}"
+                cache_key = format_cache_key(
+                    "data_meter",
+                    utility_code=utility_code,
+                    measuring_point_id=measuring_point_id,
+                    from_time=from_time,
+                    to_time=to_time,
+                    node_id=self.node_id,
+                    aggregate_type=aggregate_type,
+                )
 
-                # Check cache first
-                if cache_key in self._data_request_cache:
-                    cached_data, cache_timestamp = self._data_request_cache[cache_key]
-                    age = time.time() - cache_timestamp
-                    if age < self._data_cache_ttl:
-                        _LOGGER.debug(
-                            "Using cached price data for meter %d %s[%s] %d-%02d (age: %.1f seconds)",
-                            measuring_point_id,
-                            utility_code,
-                            aggregate_type,
-                            year,
-                            month,
-                            age,
-                        )
-                        data = cached_data
-                    else:
-                        del self._data_request_cache[cache_key]
-                        data = None
-                else:
-                    data = None
-
-                # Check if there's already a pending request
-                if data is None and cache_key in self._pending_requests:
+                async def fetch_data() -> list[dict[str, Any]] | None:
+                    """Fetch price data for specific meter from API."""
+                    utilities = [f"{utility_code}[price]"]
+                    # When querying with measuringpointid, ensure the utility matches the measuring point
+                    # The utility_code comes from the installation's registers, so it should match
                     _LOGGER.debug(
-                        "Waiting for pending price request for meter %d %s[%s] %d-%02d",
+                        "Fetching price data for measuring_point_id=%d with utility=%s (matching utility for this meter)",
                         measuring_point_id,
                         utility_code,
-                        aggregate_type,
-                        year,
-                        month,
                     )
-                    try:
-                        data = await self._pending_requests[cache_key]
-                    except Exception as err:
-                        _LOGGER.warning(
-                            "Pending price request failed for meter %d %s[%s] %d-%02d: %s",
-                            measuring_point_id,
-                            utility_code,
-                            aggregate_type,
-                            year,
-                            month,
-                            err,
-                        )
-                        if cache_key in self._pending_requests:
-                            del self._pending_requests[cache_key]
-                        data = None
+                    return await self.api.get_data(
+                        node_id=self.node_id,
+                        from_time=from_time,
+                        to_time=to_time,
+                        interval="d",
+                        grouping="apartment",
+                        utilities=utilities,
+                        include_sub_nodes=False,  # Don't include sub-nodes when filtering by measuring point
+                        measuring_point_id=measuring_point_id,
+                    )
 
-                # If no cached data and no pending request, make the API call
-                if data is None:
-                    async def fetch_data():
-                        try:
-                            utilities = [f"{utility_code}[price]"]
-                            # When querying with measuringpointid, ensure the utility matches the measuring point
-                            # The utility_code comes from the installation's registers, so it should match
-                            _LOGGER.debug(
-                                "Fetching price data for measuring_point_id=%d with utility=%s (matching utility for this meter)",
-                                measuring_point_id,
-                                utility_code,
-                            )
-                            result = await self.api.get_data(
-                                node_id=self.node_id,
-                                from_time=from_time,
-                                to_time=to_time,
-                                interval="d",
-                                grouping="apartment",
-                                utilities=utilities,
-                                include_sub_nodes=False,  # Don't include sub-nodes when filtering by measuring point
-                                measuring_point_id=measuring_point_id,
-                            )
-                            if result:
-                                self._data_request_cache[cache_key] = (result, time.time())
-                            return result
-                        finally:
-                            if cache_key in self._pending_requests:
-                                del self._pending_requests[cache_key]
-
-                    task = asyncio.create_task(fetch_data())
-                    self._pending_requests[cache_key] = task
-                    data = await task
+                # Use request deduplicator to handle caching and deduplication
+                data = await self._request_deduplicator.get_or_fetch(
+                    cache_key=cache_key,
+                    fetch_func=fetch_data,
+                    use_cache=True,
+                )
 
                 if not data or not isinstance(data, list):
                     _LOGGER.debug(
@@ -2877,7 +1964,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             if result.get("Utl") == utility_code and result.get("Func") == "price":
                                 values = result.get("Values", [])
                                 unit = result.get("Unit", "")
-                                
+
                                 _LOGGER.debug(
                                     "Processing price data for meter %d (%s %d-%02d): found %d value entries",
                                     measuring_point_id,
@@ -2901,7 +1988,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                             zero_count += 1
                                     else:
                                         null_count += 1
-                                
+
                                 _LOGGER.debug(
                                     "Price data summary for meter %d (%s %d-%02d): %d non-null values (%d zeros), %d null values, total=%.2f %s",
                                     measuring_point_id,
@@ -2938,10 +2025,10 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 aggregate_type="con",
                                 cost_type="actual",
                             )
-                            
+
                             if meter_consumption_data and meter_consumption_data.get("value") is not None:
                                 meter_consumption = meter_consumption_data.get("value", 0.0)
-                                
+
                                 if meter_consumption > 0:
                                     # Get total HW consumption and estimated cost for the month
                                     total_hw_consumption_data = await self.get_monthly_aggregate(
@@ -2957,19 +2044,19 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                         aggregate_type="price",
                                         cost_type="estimated",
                                     )
-                                    
+
                                     if total_hw_consumption_data and total_hw_cost_data:
                                         total_hw_consumption = total_hw_consumption_data.get("value", 0.0)
                                         total_hw_cost = total_hw_cost_data.get("value", 0.0)
-                                        
+
                                         if total_hw_consumption > 0 and total_hw_cost > 0:
                                             # Calculate this meter's share of total consumption
                                             consumption_share = meter_consumption / total_hw_consumption
-                                            
+
                                             # Allocate cost proportionally
                                             allocated_cost = total_hw_cost * consumption_share
                                             currency = total_hw_cost_data.get("unit") or self.get_setting("Currency") or "NOK"
-                                            
+
                                             _LOGGER.info(
                                                 "Allocated HW cost for meter %d %d-%02d (from zero API data): %.2f %s (meter: %.2f m3 / total: %.2f m3 = %.1f%%, total cost: %.2f %s)",
                                                 measuring_point_id, year, month,
@@ -2980,7 +2067,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                                 total_hw_cost,
                                                 currency,
                                             )
-                                            
+
                                             return {
                                                 "value": allocated_cost,
                                                 "unit": currency,
@@ -3039,7 +2126,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             aggregate_type="con",
                             cost_type="actual",
                         )
-                        
+
                         # Check if we have consumption data
                         if not meter_consumption_data or meter_consumption_data.get("value") is None:
                             # For HW, still try spot price estimation even without consumption data
@@ -3065,10 +2152,10 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     month=month,
                                     aggregate_type="con",
                                 )
-                                
+
                                 cw_price = cw_price_data.get("value") if cw_price_data else None
                                 cw_consumption = cw_consumption_data.get("value") if cw_consumption_data else None
-                                
+
                                 # Estimate HW price from spot prices (will return 0 if consumption is 0)
                                 hw_estimated_data = await self._get_hw_price_from_spot_prices(
                                     consumption=0.0,
@@ -3077,7 +2164,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     cold_water_price=cw_price,
                                     cold_water_consumption=cw_consumption,
                                 )
-                                
+
                                 if hw_estimated_data:
                                     currency = hw_estimated_data.get("unit") or self.get_setting("Currency") or "NOK"
                                     _LOGGER.debug(
@@ -3107,12 +2194,12 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     measuring_point_id, utility_code
                                 )
                                 return None
-                        
+
                         meter_consumption = meter_consumption_data.get("value", 0.0)
-                        
+
                         # Get rate from billing
                         rate = await self.billing_manager.get_rate_from_billing(utility_code, year, month)
-                        
+
                         if rate is None:
                             # For HW, try proportional allocation from aggregate estimated cost
                             if utility_code == "HW":
@@ -3120,7 +2207,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     "No rate found for HW %d-%02d, trying proportional allocation from aggregate estimated cost",
                                     year, month
                                 )
-                                
+
                                 # Get total HW consumption and estimated cost for the month
                                 total_hw_consumption_data = await self.get_monthly_aggregate(
                                     utility_code="HW",
@@ -3135,19 +2222,19 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     aggregate_type="price",
                                     cost_type="estimated",
                                 )
-                                
+
                                 if total_hw_consumption_data and total_hw_cost_data:
                                     total_hw_consumption = total_hw_consumption_data.get("value", 0.0)
                                     total_hw_cost = total_hw_cost_data.get("value", 0.0)
-                                    
+
                                     if total_hw_consumption > 0 and total_hw_cost > 0:
                                         # Calculate this meter's share of total consumption
                                         consumption_share = meter_consumption / total_hw_consumption
-                                        
+
                                         # Allocate cost proportionally
                                         allocated_cost = total_hw_cost * consumption_share
                                         currency = total_hw_cost_data.get("unit") or self.get_setting("Currency") or "NOK"
-                                        
+
                                         _LOGGER.info(
                                             "Allocated HW cost for meter %d %d-%02d: %.2f %s (meter: %.2f m3 / total: %.2f m3 = %.1f%%, total cost: %.2f %s)",
                                             measuring_point_id, year, month,
@@ -3158,7 +2245,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                             total_hw_cost,
                                             currency,
                                         )
-                                        
+
                                         return {
                                             "value": allocated_cost,
                                             "unit": currency,
@@ -3179,7 +2266,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     _LOGGER.debug(
                                         "Could not get total HW consumption or cost for proportional allocation"
                                     )
-                                
+
                                 # Fallback to spot price estimation if proportional allocation didn't work
                                 _LOGGER.debug(
                                     "Proportional allocation failed, trying spot price estimation for meter %d (HW %d-%02d)",
@@ -3201,10 +2288,10 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     month=month,
                                     aggregate_type="con",
                                 )
-                                
+
                                 cw_price = cw_price_data.get("value") if cw_price_data else None
                                 cw_consumption = cw_consumption_data.get("value") if cw_consumption_data else None
-                                
+
                                 # Estimate HW price from spot prices
                                 _LOGGER.debug(
                                     "Calling spot price estimation for meter %d (HW %d-%02d): consumption=%.2f m3, cw_price=%s, cw_consumption=%s",
@@ -3220,7 +2307,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     cold_water_price=cw_price,
                                     cold_water_consumption=cw_consumption,
                                 )
-                                
+
                                 if hw_estimated_data:
                                     currency = hw_estimated_data.get("unit") or self.get_setting("Currency") or "NOK"
                                     estimated_value = hw_estimated_data.get("value", 0.0)
@@ -3246,17 +2333,17 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                         "Spot price estimation returned None for meter %d (HW %d-%02d) with consumption %.2f m3. Check Nord Pool configuration.",
                                         measuring_point_id, year, month, meter_consumption
                                     )
-                            
+
                             _LOGGER.debug(
                                 "No rate found for %s %d-%02d, cannot calculate estimated cost",
                                 utility_code, year, month
                             )
                             return None
-                        
+
                         # Calculate cost from consumption × rate
                         calculated_cost = meter_consumption * rate
                         currency = self.get_setting("Currency") or "NOK"
-                        
+
                         _LOGGER.info(
                             "Calculated estimated cost for meter %d (%s %d-%02d): %.2f m3 × %.2f = %.2f %s",
                             measuring_point_id,
@@ -3268,7 +2355,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             calculated_cost,
                             currency,
                         )
-                        
+
                         # Warn if we got 0 cost but consumption > 0 (might indicate an issue)
                         if calculated_cost == 0 and meter_consumption > 0:
                             _LOGGER.warning(
@@ -3280,7 +2367,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 meter_consumption,
                                 rate,
                             )
-                        
+
                         return {
                             "value": calculated_cost,
                             "unit": currency,
@@ -3322,15 +2409,15 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             aggregate_type="con",
                             cost_type="actual",
                         )
-                        
+
                         if meter_consumption_data and meter_consumption_data.get("value") is not None:
                             meter_consumption = meter_consumption_data.get("value", 0.0)
                             rate = await self.billing_manager.get_rate_from_billing(utility_code, year, month)
-                            
+
                             if rate is not None:
                                 calculated_cost = meter_consumption * rate
                                 currency = self.get_setting("Currency") or "NOK"
-                                
+
                                 _LOGGER.debug(
                                     "Calculated estimated cost for meter %d (%s %d-%02d) after API error: %.2f m3 × %.2f = %.2f %s",
                                     measuring_point_id,
@@ -3342,7 +2429,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     calculated_cost,
                                     currency,
                                 )
-                                
+
                                 return {
                                     "value": calculated_cost,
                                     "unit": currency,
@@ -3359,7 +2446,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     "No rate found for HW %d-%02d after API error, trying proportional allocation",
                                     year, month
                                 )
-                                
+
                                 if meter_consumption > 0:
                                     # Get total HW consumption and estimated cost for the month
                                     total_hw_consumption_data = await self.get_monthly_aggregate(
@@ -3375,19 +2462,19 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                         aggregate_type="price",
                                         cost_type="estimated",
                                     )
-                                    
+
                                     if total_hw_consumption_data and total_hw_cost_data:
                                         total_hw_consumption = total_hw_consumption_data.get("value", 0.0)
                                         total_hw_cost = total_hw_cost_data.get("value", 0.0)
-                                        
+
                                         if total_hw_consumption > 0 and total_hw_cost > 0:
                                             # Calculate this meter's share of total consumption
                                             consumption_share = meter_consumption / total_hw_consumption
-                                            
+
                                             # Allocate cost proportionally
                                             allocated_cost = total_hw_cost * consumption_share
                                             currency = total_hw_cost_data.get("unit") or self.get_setting("Currency") or "NOK"
-                                            
+
                                             _LOGGER.info(
                                                 "Allocated HW cost for meter %d %d-%02d (after API error): %.2f %s (meter: %.2f m3 / total: %.2f m3 = %.1f%%, total cost: %.2f %s)",
                                                 measuring_point_id, year, month,
@@ -3398,7 +2485,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                                 total_hw_cost,
                                                 currency,
                                             )
-                                            
+
                                             return {
                                                 "value": allocated_cost,
                                                 "unit": currency,
@@ -3409,7 +2496,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                                 "cost_type": "estimated",
                                                 "measuring_point_id": measuring_point_id,
                                             }
-                                
+
                                 # Fallback to spot price estimation if proportional allocation didn't work
                                 _LOGGER.debug(
                                     "Proportional allocation failed, trying spot price estimation for HW %d-%02d after API error",
@@ -3431,10 +2518,10 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     month=month,
                                     aggregate_type="con",
                                 )
-                                
+
                                 cw_price = cw_price_data.get("value") if cw_price_data else None
                                 cw_consumption = cw_consumption_data.get("value") if cw_consumption_data else None
-                                
+
                                 # Estimate HW price from spot prices
                                 hw_estimated_data = await self._get_hw_price_from_spot_prices(
                                     consumption=meter_consumption,
@@ -3443,7 +2530,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     cold_water_price=cw_price,
                                     cold_water_consumption=cw_consumption,
                                 )
-                                
+
                                 if hw_estimated_data:
                                     currency = hw_estimated_data.get("unit") or self.get_setting("Currency") or "NOK"
                                     return {
@@ -3677,43 +2764,6 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return None
 
-    async def _get_nord_pool_spot_price(
-        self,
-        area_code: str,
-        currency: str,
-    ) -> float | None:
-        """Fetch current spot price from Nord Pool using the nordpool library.
-
-        Uses the nordpool Python library (https://github.com/kipe/nordpool) to fetch
-        spot prices directly from Nord Pool API.
-
-        Args:
-            area_code: Nord Pool area code (e.g., "NO1", "NO2", "SE3")
-            currency: Currency code (e.g., "NOK", "SEK", "EUR")
-
-        Returns:
-            Current spot price in currency/kWh, or None if unavailable
-        """
-        if not area_code:
-            return None
-        
-        # Initialize fetcher if not already initialized (lazy initialization)
-        if not self._nord_pool_fetcher:
-            if not NORD_POOL_AVAILABLE:
-                _LOGGER.warning(
-                    "nordpool library not installed. Install it with: pip install nordpool"
-                )
-                return None
-            # Initialize fetcher with shared cache
-            self._nord_pool_fetcher = NordPoolPriceFetcher(price_cache=self._nord_pool_price_cache)
-        
-        timezone_str = self.get_setting("TimeZoneIANA") or "UTC"
-        return await self._nord_pool_fetcher.get_spot_price(
-            area_code=area_code,
-            currency=currency,
-            timezone_str=timezone_str,
-        )
-
     async def _get_hw_price_from_spot_prices(
         self,
         consumption: float,
@@ -3724,11 +2774,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> dict[str, Any] | None:
         """Calculate hot water price using electricity spot prices.
 
-        This method fetches spot prices directly from Nord Pool API, then calculates the cost to heat water.
-
-        Formula: cost = consumption (m3) × energy_per_m3 (kWh/m3) × avg_spot_price (NOK/kWh)
-
-        Typical energy needed: ~40-50 kWh per m3 (heating from ~10°C to ~60°C)
+        Delegates to HWPriceCalculator for the actual calculation.
 
         Args:
             consumption: Hot water consumption in m3
@@ -3740,204 +2786,18 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Returns:
             Dict with price data, or None if spot prices unavailable
         """
-        try:
-            # Default energy factor: kWh needed to heat 1 m3 of water
-            # Typical: 40-50 kWh/m3 (heating from ~10°C to ~60°C, ~50°C rise)
-            # Using 45 kWh/m3 as a reasonable default
-            ENERGY_PER_M3 = 45.0  # kWh per m3
-
-            # Calculate calibration ratio from historical data (once, cached)
-            # Use lock to prevent race conditions when multiple sensors call this simultaneously
-            async with self._hw_calibration_lock:
-                if not self._hw_calibration_calculated:
-                    _LOGGER.info("Calculating HW calibration ratio from historical billing data...")
-                    self._hw_calibration_ratio = await self.billing_manager.calculate_hw_calibration_ratio(months_back=6)
-                    self._hw_calibration_calculated = True
-                    if self._hw_calibration_ratio:
-                        _LOGGER.info(
-                            "✓ Calibration ratio calculated successfully: %.3f (from historical billing data). "
-                            "This will be applied to all HW price calculations.",
-                            self._hw_calibration_ratio,
-                        )
-                    else:
-                        _LOGGER.warning(
-                            "✗ No calibration ratio available! HW prices will be calculated without calibration. "
-                            "This may result in lower than expected prices (typically ~50% of actual cost). "
-                            "Check if billing data and Nord Pool area are configured correctly. "
-                            "The calibration ratio is typically around 1.5-2.5."
-                        )
-
-            spot_price = None
-            price_sensor_entity_id = None
-            currency = None
-
-            # First, try to get spot price from Nord Pool API if area is configured
-            if self.nord_pool_area:
-                # Get currency from EcoGuard settings
-                currency = self.get_setting("Currency") or "NOK"
-
-                spot_price = await self._get_nord_pool_spot_price(
-                    area_code=self.nord_pool_area,
-                    currency=currency,
-                )
-
-                if spot_price is not None:
-                    _LOGGER.info(
-                        "Using Nord Pool API spot price for %s/%s: %.4f %s/kWh",
-                        self.nord_pool_area,
-                        currency,
-                        spot_price,
-                        currency,
-                    )
-                    price_sensor_entity_id = f"nord_pool_api_{self.nord_pool_area}"
-
-            # If no spot price from API, return None
-            if spot_price is None:
-                _LOGGER.debug(
-                    "No spot price available from Nord Pool API (area: %s, currency: %s)",
-                    self.nord_pool_area or "not configured",
-                    currency or "unknown",
-                )
-                return None
-
-            # If we got currency from settings but not from sensor, use it
-            if not currency:
-                currency = self.get_setting("Currency") or "NOK"
-
-            # Calculate total energy needed to heat the water
-            total_energy_kwh = consumption * ENERGY_PER_M3
-
-            # Calculate base heating cost from spot price
-            base_heating_cost = total_energy_kwh * spot_price
-
-            # Apply calibration ratio if available (accounts for system efficiency, fixed costs, etc.)
-            if self._hw_calibration_ratio is not None:
-                heating_cost = base_heating_cost * self._hw_calibration_ratio
-                _LOGGER.info(
-                    "✓ Applied calibration ratio %.3f: base=%.2f NOK → calibrated=%.2f NOK (consumption=%.3f m3, energy=%.2f kWh, spot=%.4f NOK/kWh)",
-                    self._hw_calibration_ratio,
-                    base_heating_cost,
-                    heating_cost,
-                    consumption,
-                    total_energy_kwh,
-                    spot_price,
-                )
-            else:
-                heating_cost = base_heating_cost
-                _LOGGER.warning(
-                    "✗ No calibration ratio available! Using base heating cost only: %.2f NOK (consumption=%.3f m3, energy=%.2f kWh, spot=%.4f NOK/kWh). "
-                    "This may result in lower than expected prices (~50% of actual cost). "
-                    "The calibration ratio should typically be around 1.5-2.5. "
-                    "Check logs for calibration ratio calculation errors.",
-                    base_heating_cost,
-                    consumption,
-                    total_energy_kwh,
-                    spot_price,
-                )
-
-            # Get cold water cost
-            # If we have the current month's CW price, use it directly (more accurate)
-            # Otherwise, calculate from billing rate
-            cold_water_cost = None
-            cold_water_rate = None
-
-            if cold_water_price is not None and cold_water_consumption is not None:
-                # Use the actual current month CW price and consumption (already fetched)
-                if cold_water_consumption > 0:
-                    # Calculate effective rate from actual price
-                    cold_water_rate = cold_water_price / cold_water_consumption
-                    cold_water_cost = consumption * cold_water_rate
-                    _LOGGER.debug(
-                        "Using current month CW price: %.2f NOK for %.2f m3 = %.2f NOK/m3 rate",
-                        cold_water_price,
-                        cold_water_consumption,
-                        cold_water_rate,
-                    )
-
-            # Fallback to billing rate if we don't have current month price
-            if cold_water_cost is None:
-                cold_water_rate = await self.billing_manager.get_rate_from_billing("CW", year, month)
-
-                if cold_water_rate is None:
-                    _LOGGER.debug(
-                        "Could not get cold water rate for HW calculation, using heating cost only"
-                    )
-                    total_cost = heating_cost
-                else:
-                    # Calculate cold water cost (same volume as hot water)
-                    cold_water_cost = consumption * cold_water_rate
-                    _LOGGER.debug(
-                        "Using billing rate for CW: %.2f NOK/m3",
-                        cold_water_rate,
-                    )
-
-            if cold_water_cost is not None:
-                # Total hot water cost = cold water cost + heating cost
-                total_cost = cold_water_cost + heating_cost
-
-                _LOGGER.debug(
-                    "HW cost breakdown: %.2f m3 × %.2f NOK/m3 (CW) + %.2f kWh × %.4f NOK/kWh (heating) = %.2f + %.2f = %.2f NOK",
-                    consumption,
-                    cold_water_rate,
-                    total_energy_kwh,
-                    spot_price,
-                    cold_water_cost,
-                    heating_cost,
-                    total_cost,
-                )
-            else:
-                total_cost = heating_cost
-
-            _LOGGER.debug(
-                "Calculated HW price from spot: %.2f m3, heating: %.2f kWh × %.4f NOK/kWh = %.2f NOK (sensor: %s)",
-                consumption,
-                total_energy_kwh,
-                spot_price,
-                heating_cost if cold_water_rate is None else total_cost,
-                price_sensor_entity_id,
-            )
-
-            # Ensure currency is set
-            if not currency:
-                currency = self.get_setting("Currency") or "NOK"
-
-            result = {
-                "value": round(total_cost, 2),
-                "unit": currency,
-                "year": year,
-                "month": month,
-                "utility_code": "HW",
-                "aggregate_type": "price",
-                "calculation_method": "spot_price_calibrated" if self._hw_calibration_ratio else "spot_price",
-                "energy_per_m3_kwh": ENERGY_PER_M3,
-                "total_energy_kwh": round(total_energy_kwh, 2),
-                "spot_price_per_kwh": round(spot_price, 4),
-                "spot_price_currency": currency,
-                "heating_cost": round(heating_cost, 2),
-            }
-
-            if self._hw_calibration_ratio is not None:
-                result["calibration_ratio"] = round(self._hw_calibration_ratio, 3)
-                result["base_heating_cost"] = round(base_heating_cost, 2)
-
-            if price_sensor_entity_id:
-                result["price_source"] = price_sensor_entity_id
-
-            if self.nord_pool_area:
-                result["nord_pool_area"] = self.nord_pool_area
-                result["price_source"] = "nord_pool_api"
-
-            if cold_water_rate is not None:
-                result["cold_water_rate_nok_per_m3"] = round(cold_water_rate, 2)
-                result["cold_water_cost"] = round(consumption * cold_water_rate, 2)
-
-            return result
-        except Exception as err:
-            _LOGGER.debug(
-                "Failed to calculate HW price from spot prices: %s",
-                err,
-            )
+        if not self._hw_price_calculator:
+            _LOGGER.debug("HW price calculator not available (Nord Pool area not configured)")
             return None
+
+        return await self._hw_price_calculator.calculate_price(
+            consumption=consumption,
+            year=year,
+            month=month,
+            cold_water_price=cold_water_price,
+            cold_water_consumption=cold_water_consumption,
+            nord_pool_area=self.nord_pool_area,
+        )
 
     async def get_current_month_total_cost(
         self,
@@ -4353,7 +3213,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         # Try to get data from cache first
                         daily_values = []
                         latest_data_time = None
-                        
+
                         if data_type == "con":
                             # Check daily consumption cache
                             cache_key = f"{utility_code}_all"
@@ -4372,99 +3232,31 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             # For now, we'll need to make API call for price data
                             # TODO: Add price cache checking similar to consumption
                             pass
-                        
+
                         # If we don't have enough cached data, make API call with deduplication
                         if not daily_values:
                             # Create cache key for deduplication
                             api_cache_key = f"data_{self.node_id}_{from_time}_{to_time}_{utility_code}_{data_type}"
-                            
-                            # Check API request cache first
-                            data = None
-                            if api_cache_key in self._data_request_cache:
-                                cached_data, cache_timestamp = self._data_request_cache[api_cache_key]
-                                age = time.time() - cache_timestamp
-                                if age < self._data_cache_ttl:
-                                    data = cached_data
-                                else:
-                                    del self._data_request_cache[api_cache_key]
-                            
-                            # Use lock to prevent race condition when checking/adding pending requests
-                            async with self._pending_requests_lock:
-                                if data is None and api_cache_key in self._pending_requests:
-                                    pending_task = self._pending_requests[api_cache_key]
-                                    if not pending_task.done():
-                                        task_to_await = pending_task
-                                    else:
-                                        del self._pending_requests[api_cache_key]
-                                        task_to_await = None
-                                else:
-                                    task_to_await = None
-                            
-                            # Await outside the lock to avoid deadlock
-                            if task_to_await is not None:
-                                try:
-                                    data = await task_to_await
-                                except Exception as err:
-                                    _LOGGER.debug(
-                                        "Pending request failed for %s %s: %s",
-                                        utility_code,
-                                        data_type,
-                                        err,
-                                    )
-                                    async with self._pending_requests_lock:
-                                        if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task_to_await:
-                                            del self._pending_requests[api_cache_key]
-                                    data = None
-                            
-                            # If still no data, create a new task
-                            if data is None:
-                                task_ref = None
-                                
-                                async def fetch_data():
-                                    nonlocal task_ref
-                                    try:
-                                        result = await self.api.get_data(
-                                            node_id=self.node_id,
-                                            from_time=from_time,
-                                            to_time=to_time,
-                                            interval="d",
-                                            grouping="apartment",
-                                            utilities=[f"{utility_code}[{data_type}]"],
-                                            include_sub_nodes=True,
-                                        )
-                                        if result:
-                                            self._data_request_cache[api_cache_key] = (result, time.time())
-                                        return result
-                                    finally:
-                                        async with self._pending_requests_lock:
-                                            if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task_ref:
-                                                del self._pending_requests[api_cache_key]
-                                
-                                # Create and track the task (with lock protection)
-                                async with self._pending_requests_lock:
-                                    if api_cache_key in self._pending_requests:
-                                        pending_task = self._pending_requests[api_cache_key]
-                                        if not pending_task.done():
-                                            task = pending_task
-                                        else:
-                                            del self._pending_requests[api_cache_key]
-                                            task = asyncio.create_task(fetch_data())
-                                            task_ref = task
-                                            self._pending_requests[api_cache_key] = task
-                                    else:
-                                        task = asyncio.create_task(fetch_data())
-                                        task_ref = task
-                                        self._pending_requests[api_cache_key] = task
-                                
-                                # Wait for the result
-                                try:
-                                    data = await task
-                                except Exception as err:
-                                    async with self._pending_requests_lock:
-                                        if api_cache_key in self._pending_requests and self._pending_requests[api_cache_key] is task:
-                                            del self._pending_requests[api_cache_key]
-                                    raise
-                            
+
+                            async def fetch_data() -> list[dict[str, Any]] | None:
+                                """Fetch data from API."""
+                                return await self.api.get_data(
+                                    node_id=self.node_id,
+                                    from_time=from_time,
+                                    to_time=to_time,
+                                    interval="d",
+                                    grouping="apartment",
+                                    utilities=[f"{utility_code}[{data_type}]"],
+                                    include_sub_nodes=True,
+                                )
+
+                            # Use request deduplicator to handle caching and deduplication
+                            data = await self._request_deduplicator.get_or_fetch(
+                                cache_key=api_cache_key,
+                                fetch_func=fetch_data,
+                                use_cache=True,
+                            )
+
                             if not data or not isinstance(data, list):
                                 continue
 
@@ -4526,7 +3318,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 hw_price_est_data = estimates["hw_price_estimate"]
                 if isinstance(hw_price_est_data, dict):
                     hw_price_has_data = hw_price_est_data.get("days_with_data", 0) > 0
-            
+
             if not hw_price_has_data:
                 # Try to estimate HW price using spot prices
                 if "hw_con_estimate" in estimates:
@@ -4580,12 +3372,12 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cw_price_est_data = estimates["cw_price_estimate"]
                 if isinstance(cw_price_est_data, dict):
                     cw_price_has_data = cw_price_est_data.get("days_with_data", 0) > 0
-            
+
             if not cw_price_has_data:
                 # Try to get CW price estimate from monthly aggregate
                 if "cw_con_estimate" in estimates:
                     cw_consumption_estimate = estimates["cw_con_estimate"]["estimated_total"]
-                    
+
                     # Try to get estimated price from monthly aggregate
                     cw_price_data = await self.get_monthly_aggregate(
                         utility_code="CW",
@@ -4594,7 +3386,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         aggregate_type="price",
                         cost_type="estimated",
                     )
-                    
+
                     if cw_price_data and cw_price_data.get("value") is not None:
                         cw_price_estimate_value = cw_price_data.get("value", 0)
                         estimates["cw_price_estimate"] = {
@@ -4610,7 +3402,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
 
             _LOGGER.debug("get_end_of_month_estimate[%s]: Finished calculating estimates, now getting other items cost", call_id)
-            
+
             # Get other items cost from last bill
             _LOGGER.debug("get_end_of_month_estimate[%s]: Getting other items cost for year=%d, month=%d", call_id, current_year, current_month)
             other_items_cost = 0
@@ -4629,7 +3421,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 other_items_cost = 0
 
             _LOGGER.debug("get_end_of_month_estimate[%s]: About to calculate total bill estimate", call_id)
-            
+
             # Calculate total estimated bill
             try:
                 hw_price_est = estimates.get("hw_price_estimate", {}).get("estimated_total", 0)
@@ -4753,7 +3545,7 @@ class EcoGuardLatestReceptionCoordinator(DataUpdateCoordinator[list[dict[str, An
 
     async def _async_update_data(self) -> list[dict[str, Any]]:
         """Fetch latest reception data from EcoGuard API.
-        
+
         Note: Latest reception is fetched after Home Assistant has fully started
         (see __init__.py for the startup event listener) to avoid blocking startup.
         During periodic updates, this method will fetch fresh data.

@@ -20,6 +20,9 @@ class RequestDeduplicator:
         hass: Any,
         cache_ttl: float = 60.0,
         defer_during_startup: bool = True,
+        cache: dict[str, tuple[Any, float]] | None = None,
+        pending_requests: dict[str, asyncio.Task] | None = None,
+        lock: asyncio.Lock | None = None,
     ) -> None:
         """Initialize the deduplicator.
         
@@ -27,13 +30,17 @@ class RequestDeduplicator:
             hass: Home Assistant instance
             cache_ttl: Cache TTL in seconds
             defer_during_startup: If True, defer requests during HA startup
+            cache: Optional shared cache dict (if None, creates its own)
+            pending_requests: Optional shared pending requests dict (if None, creates its own)
+            lock: Optional shared lock (if None, creates its own)
         """
         self.hass = hass
         self.cache_ttl = cache_ttl
         self.defer_during_startup = defer_during_startup
-        self._cache: dict[str, tuple[Any, float]] = {}
-        self._pending_requests: dict[str, asyncio.Task] = {}
-        self._lock = asyncio.Lock()
+        self._cache: dict[str, tuple[Any, float]] = cache if cache is not None else {}
+        self._pending_requests: dict[str, asyncio.Task] = pending_requests if pending_requests is not None else {}
+        self._lock = lock if lock is not None else asyncio.Lock()
+        self._owns_resources = cache is None and pending_requests is None and lock is None
     
     async def get_or_fetch(
         self,
