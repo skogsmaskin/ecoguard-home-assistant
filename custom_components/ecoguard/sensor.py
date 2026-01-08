@@ -1124,12 +1124,12 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
         self._attr_name = f'{consumption_daily} - {meter} "{measuring_point_display}" ({utility_name})'
 
         # Build unique_id following pattern: purpose_group_utility_sensor
-        # Home Assistant strips the domain prefix, so we want: consumption_daily_cold_water_kaldtvann_bad
+        # Home Assistant strips the domain prefix, so we want: consumption_daily_metered_cold_water_kaldtvann_bad
         # Use measuring_point_id to ensure uniqueness across nodes
         utility_slug = _utility_code_to_slug(utility_code)
         sensor_name = _slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
         unique_id = (
-            f"{DOMAIN}_consumption_daily_{utility_slug}_{sensor_name}"
+            f"{DOMAIN}_consumption_daily_metered_{utility_slug}_{sensor_name}"
         )
         self._attr_unique_id = unique_id
         _LOGGER.debug("Daily consumption sensor unique_id: %s", unique_id)
@@ -1575,10 +1575,10 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
         self._attr_name = f"{aggregate_name} - {utility_name}"
 
         # Build unique ID following pattern: purpose_group_utility
-        # Home Assistant strips the domain prefix, so we want: consumption_monthly_metered_cold_water
+        # Home Assistant strips the domain prefix, so we want: consumption_monthly_aggregated_cold_water
         utility_slug = _utility_code_to_slug(utility_code)
         if aggregate_type == "con":
-            unique_id_suffix = f"consumption_monthly_metered_{utility_slug}"
+            unique_id_suffix = f"consumption_monthly_aggregated_{utility_slug}"
         elif aggregate_type == "price" and cost_type == "estimated":
             unique_id_suffix = f"cost_monthly_aggregated_estimated_{utility_slug}"
         else:
@@ -2654,13 +2654,14 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
         if utility_name == f"utility.{utility_code.lower()}":  # Fallback if not found
             utility_name = utility_code
 
-        # Format: "Consumption Daily - Utility"
+        # Format: "Consumption Daily Metered - Utility"
         consumption_daily = _get_translation_default("name.consumption_daily")
-        self._attr_name = f"{consumption_daily} - {utility_name}"
+        metered = _get_translation_default("name.metered")
+        self._attr_name = f"{consumption_daily} {metered} - {utility_name}"
 
-        # Build unique_id following pattern: consumption_daily_utility
+        # Build unique_id following pattern: consumption_daily_metered_utility
         utility_slug = _utility_code_to_slug(utility_code)
-        self._attr_unique_id = f"{DOMAIN}_consumption_daily_{utility_slug}"
+        self._attr_unique_id = f"{DOMAIN}_consumption_daily_metered_{utility_slug}"
 
         # Sensor attributes
         device_name = _get_translation_default("name.device_name", node_id=coordinator.node_id)
@@ -2727,7 +2728,8 @@ class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpda
                 utility_name = self._utility_code
 
             consumption_daily = await _async_get_translation(self._hass, "name.consumption_daily")
-            new_name = f"{consumption_daily} - {utility_name}"
+            metered = await _async_get_translation(self._hass, "name.metered")
+            new_name = f"{consumption_daily} {metered} - {utility_name}"
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
@@ -2872,15 +2874,16 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         super().__init__(coordinator)
         self._hass = hass
 
-        # Format: "Consumption Daily - Combined Water"
+        # Format: "Consumption Daily Metered - Combined Water"
         consumption_daily = _get_translation_default("name.consumption_daily")
+        metered = _get_translation_default("name.metered")
         water_name = _get_translation_default("name.combined_water")
         if water_name == "name.combined_water":  # Fallback if not found
             water_name = "Combined Water"
-        self._attr_name = f"{consumption_daily} - {water_name}"
+        self._attr_name = f"{consumption_daily} {metered} - {water_name}"
 
         # Build unique_id
-        self._attr_unique_id = f"{DOMAIN}_consumption_daily_combined_water"
+        self._attr_unique_id = f"{DOMAIN}_consumption_daily_metered_combined_water"
 
         # Sensor attributes
         device_name = _get_translation_default("name.device_name", node_id=coordinator.node_id)
@@ -2953,10 +2956,11 @@ class EcoGuardDailyCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
 
         try:
             consumption_daily = await _async_get_translation(self._hass, "name.consumption_daily")
+            metered = await _async_get_translation(self._hass, "name.metered")
             water_name = await _async_get_translation(self._hass, "name.combined_water")
             if water_name == "name.combined_water":
                 water_name = "Combined Water"
-            new_name = f"{consumption_daily} - {water_name}"
+            new_name = f"{consumption_daily} {metered} - {water_name}"
             if self._attr_name != new_name:
                 self._attr_name = new_name
                 self.async_write_ha_state()
@@ -4092,7 +4096,7 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
         utility_slug = _utility_code_to_slug(utility_code)
         sensor_name = _slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
         if aggregate_type == "con":
-            unique_id_suffix = f"consumption_monthly_{utility_slug}_{sensor_name}"
+            unique_id_suffix = f"consumption_monthly_metered_{utility_slug}_{sensor_name}"
         elif aggregate_type == "price" and cost_type == "estimated":
             unique_id_suffix = f"cost_monthly_aggregated_estimated_{utility_slug}_{sensor_name}"
         else:
@@ -4739,7 +4743,7 @@ class EcoGuardCombinedWaterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinato
 
         # Build unique_id following pattern: purpose_group_combined_water
         if aggregate_type == "con":
-            unique_id_suffix = "consumption_monthly_combined_water"
+            unique_id_suffix = "consumption_monthly_aggregated_combined_water"
         elif aggregate_type == "price" and cost_type == "estimated":
             unique_id_suffix = "cost_monthly_aggregated_estimated_combined_water"
         else:
