@@ -31,6 +31,7 @@ from .billing_manager import BillingManager
 from .request_deduplicator import RequestDeduplicator
 from .meter_aggregate_calculator import MeterAggregateCalculator
 from .data_processor import DataProcessor
+from .end_of_month_estimator import EndOfMonthEstimator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -69,21 +70,26 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._nord_pool_fetcher: NordPoolPriceFetcher | None = None
         if nord_pool_area:
             self._nord_pool_fetcher = NordPoolPriceFetcher(price_cache=self._nord_pool_price_cache)
-
+        
         # Initialize HW price calculator (will be set up after billing_manager is created)
         self._hw_price_calculator: HWPriceCalculator | None = None
         
         # Initialize data processor (will be set up after all attributes are set)
         self._data_processor: DataProcessor | None = None
-
+        
         self._billing_results_cache: dict[str, tuple[list[dict[str, Any]], float]] = {}  # Cache for billing results: key -> (data, timestamp)
         self._billing_cache_ttl: float = 86400.0  # Cache billing data for 24 hours (it's historical and doesn't change)
-
+        
         self._data_request_cache: dict[str, tuple[Any, float]] = {}  # Cache for data API requests: key -> (data, timestamp)
         self._data_cache_ttl: float = 60.0  # Cache data requests for 60 seconds to prevent duplicate calls
         self._pending_requests: dict[str, asyncio.Task] = {}  # Track pending requests to deduplicate simultaneous calls
         self._pending_requests_lock = asyncio.Lock()  # Lock to prevent race conditions when checking/adding pending requests
         self._cache_loaded: bool = False  # Track if we've loaded from cache
+        
+        # Debounce listener updates to prevent excessive sensor updates
+        self._listener_update_task: asyncio.Task | None = None  # Pending listener update task
+        self._listener_update_lock = asyncio.Lock()  # Lock for listener update debouncing
+        self._listener_update_debounce_delay = 0.05  # Debounce delay in seconds (50ms) - reduced for responsiveness
         
         # Initialize request deduplicator for API data requests
         # Shares cache and pending_requests with coordinator for compatibility
@@ -95,22 +101,22 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             pending_requests=self._pending_requests,
             lock=self._pending_requests_lock,
         )
-
+        
         # Caches for sensor data (populated by batch fetching)
         # Key format: f"{utility_code}_{measuring_point_id or 'all'}"
         self._latest_consumption_cache: dict[str, dict[str, Any]] = {}  # Latest consumption by utility/meter
         self._latest_cost_cache: dict[str, dict[str, Any]] = {}  # Latest cost by utility/meter/cost_type
-
+        
         # Daily data cache - stores ALL daily values for reuse (not just latest)
         # Key format: f"{utility_code}_{measuring_point_id or 'all'}"
         # Value: list of daily values sorted by time: [{"time": timestamp, "value": value, "unit": unit}, ...]
         self._daily_consumption_cache: dict[str, list[dict[str, Any]]] = {}  # All daily consumption values
         self._daily_price_cache: dict[str, list[dict[str, Any]]] = {}  # All daily price values
-
+        
         # Key format: f"{utility_code}_{year}_{month}_{aggregate_type}_{cost_type}"
         self._monthly_aggregate_cache: dict[str, dict[str, Any]] = {}  # Monthly aggregates
         self._cache_timestamp: float = 0.0  # When cache was last updated
-
+        
         # Initialize billing manager after all attributes are set
         self.billing_manager = BillingManager(
             api=self.api,
@@ -164,18 +170,30 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             hass=self.hass,
             data=None,  # Will be updated when data is available
         )
+        
+        # Initialize end-of-month estimator
+        self._end_of_month_estimator = EndOfMonthEstimator(
+            node_id=self.node_id,
+            request_deduplicator=self._request_deduplicator,
+            api=self.api,
+            get_setting=self.get_setting,
+            daily_consumption_cache=self._daily_consumption_cache,
+            get_hw_price_from_spot_prices=lambda consumption, year, month, cold_water_price=None, cold_water_consumption=None: self._get_hw_price_from_spot_prices(consumption, year, month, cold_water_price, cold_water_consumption),
+            get_monthly_aggregate=lambda uc, y, m, at, ct: self.get_monthly_aggregate(uc, y, m, at, ct),
+            billing_manager=self.billing_manager,
+        )
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from EcoGuard API.
-
+        
         This method is called:
         - Once on startup (async_config_entry_first_refresh)
         - Periodically based on update_interval (every hour by default)
         """
         from .storage import load_cached_data, save_cached_data
-
+        
         _LOGGER.debug("Coordinator update triggered (cache_loaded=%s)", self._cache_loaded)
-
+        
         try:
             # Load from cache first (only once on startup)
             if not self._cache_loaded and self.entry_id:
@@ -334,9 +352,52 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.data["daily_price_cache"] = self._daily_price_cache
             self.data["monthly_aggregate_cache"] = self._monthly_aggregate_cache
 
+    def async_update_listeners(self) -> None:
+        """Override async_update_listeners with debounced version to prevent excessive sensor updates.
+        
+        This method batches multiple listener update calls together, preventing
+        a feedback loop where sensor updates trigger more coordinator updates.
+        """
+        # Store reference to current task
+        current_task = self._listener_update_task
+        
+        # Cancel any pending update task
+        if current_task is not None:
+            current_task.cancel()
+        
+        # Schedule a new update after debounce delay
+        async def _delayed_update(task_ref: list) -> None:
+            """Delayed update that checks if it's still the current task."""
+            try:
+                await asyncio.sleep(self._listener_update_debounce_delay)
+                # Only update if this task is still the current one (not cancelled/replaced)
+                if self._listener_update_task is task_ref[0]:
+                    _LOGGER.debug("Executing debounced listener update (after %.1fms delay)", self._listener_update_debounce_delay * 1000)
+                    # Call parent class method directly (super() doesn't work in nested functions)
+                    DataUpdateCoordinator.async_update_listeners(self)
+                    self._listener_update_task = None
+                    _LOGGER.debug("Debounced listener update completed")
+                else:
+                    _LOGGER.debug("Skipping debounced listener update (task was replaced)")
+            except asyncio.CancelledError:
+                _LOGGER.debug("Debounced listener update was cancelled")
+                pass
+            except Exception as err:
+                _LOGGER.error("Error in debounced listener update: %s", err, exc_info=True)
+                # Ensure task is cleared even on error
+                if self._listener_update_task is task_ref[0]:
+                    self._listener_update_task = None
+        
+        # Use a list to store task reference that can be checked later
+        task_ref = [None]
+        new_task = self.hass.async_create_task(_delayed_update(task_ref))
+        task_ref[0] = new_task
+        self._listener_update_task = new_task
+        _LOGGER.debug("Scheduled debounced listener update (delay: %.1fms)", self._listener_update_debounce_delay * 1000)
+
     async def _batch_fetch_sensor_data(self) -> None:
         """Batch fetch consumption and price data for all utility codes.
-
+        
         This method fetches data for all utility codes at once, then caches it
         so individual sensors can read from the cache instead of making API calls.
         """
@@ -379,6 +440,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         
         # Force another notification to ensure sensors get the update
         # This is important because sensors might have been added after the processor's notification
+        # The debounced version is now the default, so just call async_update_listeners()
         self.async_update_listeners()
         _LOGGER.debug("Coordinator data synced and listeners notified: %d consumption keys, %d cost keys",
                      len(self._latest_consumption_cache), len(self._latest_cost_cache))
@@ -402,12 +464,12 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             cache_key = f"{utility_code}_{measuring_point_id}"
         else:
             cache_key = f"{utility_code}_all"
-
+        
         if cache_key in self._latest_consumption_cache:
             cached = self._latest_consumption_cache[cache_key]
             _LOGGER.debug("✓ Cache HIT: consumption data for %s (measuring_point_id=%s)", utility_code, measuring_point_id)
             return cached
-
+        
         # Cache miss - fall back to API call (for backward compatibility)
         # This should rarely happen if batch fetch is working
         _LOGGER.debug("✗ Cache MISS: consumption data for %s (measuring_point_id=%s), falling back to API", utility_code, measuring_point_id)
@@ -534,7 +596,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         Helper method that extracts common logic for fetching price data.
         Returns price data if found, None otherwise.
-
+        
         This method deduplicates simultaneous requests for the same parameters
         to prevent multiple API calls when multiple sensors request the same data.
 
@@ -575,84 +637,84 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Create async function for fetching and processing price data
             async def _fetch_price_data() -> dict[str, Any] | None:
-                # Query data endpoint for price
-                # Use measuringpointid in API call if provided for efficiency
-                data = await self.api.get_data(
-                    node_id=self.node_id,
-                    from_time=from_time,
-                    to_time=to_time,
-                    interval="d",
-                    grouping="apartment",
-                    utilities=[f"{utility_code}[price]"],
-                    include_sub_nodes=measuring_point_id is None,  # Only include sub-nodes if not filtering by measuring point
-                    measuring_point_id=measuring_point_id,
-                )
-
-                # Find the latest non-null value from price data
-                # Data structure: [{"ID": ..., "Name": ..., "Result": [{"Utl": "HW", "Func": "price", "Unit": "NOK", "Values": [...]}]}]
-                # If measuringpointid was used, the API should have filtered the data already
-                # But we still check for compatibility and in case external_key filtering is needed
-                total_value = 0.0
-                latest_time = None
-                unit = ""
-                found_price_value = False
-
-                if data and isinstance(data, list):
-                    for node_data in data:
-                        # If measuring_point_id was provided but API didn't filter correctly, do client-side filtering
-                        if measuring_point_id is not None:
-                            node_id = node_data.get("ID")
-                            # Check if this node_data corresponds to the measuring point
-                            if node_id != measuring_point_id:
-                                # Try to match via installations (fallback if API filtering didn't work)
-                                matched = False
-                                for inst in self._installations:
-                                    if inst.get("MeasuringPointID") == measuring_point_id:
-                                        if external_key and inst.get("ExternalKey") == external_key:
-                                            matched = True
-                                            break
-                                        elif not external_key:
-                                            matched = True
-                                            break
-                                if not matched:
-                                    continue
-
-                        results = node_data.get("Result", [])
-                        for result in results:
-                            if result.get("Utl") == utility_code and result.get("Func") == "price":
-                                values = result.get("Values", [])
-                                if not unit:
-                                    unit = result.get("Unit", "")
-
-                                # Find the latest non-null, non-zero value (values are sorted by time)
-                                # API can be a day behind, so we look through all values to find the last one with data
-                                for value_entry in reversed(values):
-                                    value = value_entry.get("Value")
-                                    # Check for both None and 0, as price might be 0 if not yet calculated
-                                    if value is not None and value != 0:
-                                        total_value += value
-                                        found_price_value = True
-                                        current_time = value_entry.get("Time")
-                                        if latest_time is None or (current_time is not None and current_time > latest_time):
-                                            latest_time = current_time
-                                        break  # Only take the latest value for this meter
-
-                # If we found price data, return it
-                if found_price_value:
-                    _LOGGER.debug(
-                        "Found price data for %s: value=%.2f, time=%s",
-                        utility_code,
-                        total_value,
-                        latest_time,
+                    # Query data endpoint for price
+                    # Use measuringpointid in API call if provided for efficiency
+                    data = await self.api.get_data(
+                        node_id=self.node_id,
+                        from_time=from_time,
+                        to_time=to_time,
+                        interval="d",
+                        grouping="apartment",
+                        utilities=[f"{utility_code}[price]"],
+                        include_sub_nodes=measuring_point_id is None,  # Only include sub-nodes if not filtering by measuring point
+                        measuring_point_id=measuring_point_id,
                     )
-                    return {
-                        "value": total_value,
-                        "time": latest_time,
-                        "unit": unit,
-                        "utility_code": utility_code,
-                    }
 
-                return None
+                    # Find the latest non-null value from price data
+                    # Data structure: [{"ID": ..., "Name": ..., "Result": [{"Utl": "HW", "Func": "price", "Unit": "NOK", "Values": [...]}]}]
+                    # If measuringpointid was used, the API should have filtered the data already
+                    # But we still check for compatibility and in case external_key filtering is needed
+                    total_value = 0.0
+                    latest_time = None
+                    unit = ""
+                    found_price_value = False
+
+                    if data and isinstance(data, list):
+                        for node_data in data:
+                            # If measuring_point_id was provided but API didn't filter correctly, do client-side filtering
+                            if measuring_point_id is not None:
+                                node_id = node_data.get("ID")
+                                # Check if this node_data corresponds to the measuring point
+                                if node_id != measuring_point_id:
+                                    # Try to match via installations (fallback if API filtering didn't work)
+                                    matched = False
+                                    for inst in self._installations:
+                                        if inst.get("MeasuringPointID") == measuring_point_id:
+                                            if external_key and inst.get("ExternalKey") == external_key:
+                                                matched = True
+                                                break
+                                            elif not external_key:
+                                                matched = True
+                                                break
+                                    if not matched:
+                                        continue
+
+                            results = node_data.get("Result", [])
+                            for result in results:
+                                if result.get("Utl") == utility_code and result.get("Func") == "price":
+                                    values = result.get("Values", [])
+                                    if not unit:
+                                        unit = result.get("Unit", "")
+
+                                    # Find the latest non-null, non-zero value (values are sorted by time)
+                                    # API can be a day behind, so we look through all values to find the last one with data
+                                    for value_entry in reversed(values):
+                                        value = value_entry.get("Value")
+                                        # Check for both None and 0, as price might be 0 if not yet calculated
+                                        if value is not None and value != 0:
+                                            total_value += value
+                                            found_price_value = True
+                                            current_time = value_entry.get("Time")
+                                            if latest_time is None or (current_time is not None and current_time > latest_time):
+                                                latest_time = current_time
+                                            break  # Only take the latest value for this meter
+
+                    # If we found price data, return it
+                    if found_price_value:
+                        _LOGGER.debug(
+                            "Found price data for %s: value=%.2f, time=%s",
+                            utility_code,
+                            total_value,
+                            latest_time,
+                        )
+                        return {
+                            "value": total_value,
+                            "time": latest_time,
+                            "unit": unit,
+                            "utility_code": utility_code,
+                        }
+
+                    return None
 
             # Use request deduplicator to handle caching and deduplication
             # Note: This doesn't use the data_request_cache since it processes the data
@@ -682,12 +744,12 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             cache_key = f"{utility_code}_{measuring_point_id}_metered"
         else:
             cache_key = f"{utility_code}_all_metered"
-
+        
         if cache_key in self._latest_cost_cache:
             cached = self._latest_cost_cache[cache_key]
             _LOGGER.debug("✓ Cache HIT: metered cost data for %s (measuring_point_id=%s)", utility_code, measuring_point_id)
             return cached
-
+        
         # Cache miss - fall back to API call (for backward compatibility)
         _LOGGER.debug("✗ Cache MISS: metered cost data for %s (measuring_point_id=%s), falling back to API", utility_code, measuring_point_id)
         price_data = await self._get_latest_price_data(
@@ -727,7 +789,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             consumption_cache_key = f"{utility_code}_{measuring_point_id}"
         else:
             consumption_cache_key = f"{utility_code}_all"
-
+        
         """Get the latest estimated cost value.
 
         First attempts to get actual price data from the API. If no price data is available,
@@ -757,9 +819,9 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             consumption_cache_key = f"{utility_code}_{measuring_point_id}"
         else:
             consumption_cache_key = f"{utility_code}_all"
-
+        
         consumption_data = self._latest_consumption_cache.get(consumption_cache_key)
-
+        
         # If not in cache, fetch it
         if not consumption_data:
             consumption_data = await self.get_latest_consumption_value(
@@ -812,7 +874,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     month=month,
                     measuring_point_id=measuring_point_id,
                 )
-
+                
                 # Create async task for calculation
                 async def _calculate_hw_estimated_cost() -> dict[str, Any] | None:
                     _LOGGER.debug("Calculating HW estimated cost: consumption=%.3f m3, year=%d, month=%d, measuring_point_id=%s",
@@ -820,7 +882,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # Try to get CW price and consumption for more accurate calculation
                     cw_price = None
                     cw_consumption = None
-
+                    
                     # Try to get CW price from cache
                     cw_price_cache_key = "CW_all_metered"  # Use aggregate cache key
                     coordinator_data = self.data
@@ -830,14 +892,14 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         if cw_price_data:
                             cw_price = cw_price_data.get("value")
                             _LOGGER.debug("Got CW price from cache: %.2f NOK", cw_price)
-
+                    
                     # Try to get CW consumption from cache
                     cw_consumption_cache_key = "CW_all"
                     cw_consumption_data = self._latest_consumption_cache.get(cw_consumption_cache_key)
                     if cw_consumption_data:
                         cw_consumption = cw_consumption_data.get("value")
                         _LOGGER.debug("Got CW consumption from cache: %.3f m3", cw_consumption)
-
+                    
                     # Calculate HW price using spot prices
                     hw_price_data = await self._get_hw_price_from_spot_prices(
                         consumption=consumption,
@@ -846,10 +908,10 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         cold_water_price=cw_price,
                         cold_water_consumption=cw_consumption,
                     )
-
+                    
                     if hw_price_data:
                         daily_cost = hw_price_data.get("value")
-                        _LOGGER.info("Calculated HW daily estimated cost: %.2f NOK (consumption: %.3f m3, year: %d, month: %d)",
+                        _LOGGER.info("Calculated HW daily estimated cost: %.2f NOK (consumption: %.3f m3, year: %d, month: %d)", 
                                     daily_cost, consumption, year, month)
                         # Convert to daily cost format
                         return {
@@ -862,7 +924,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     else:
                         _LOGGER.debug("Spot price calculation failed for HW, falling back to billing rate")
                         return None
-
+                
                 # Use request deduplicator for calculation task (not API call, so use_cache=False)
                 result = await self._request_deduplicator.get_or_fetch(
                     cache_key=hw_cost_cache_key,
@@ -918,11 +980,11 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _get_month_timestamps(self, year: int, month: int) -> tuple[int, int]:
         """Get start and end timestamps for a month.
-
+        
         Args:
             year: Year
             month: Month (1-12)
-
+            
         Returns:
             Tuple of (from_time, to_time) as Unix timestamps
         """
@@ -932,21 +994,21 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self, utility_code: str, year: int, month: int
     ) -> dict[str, Any] | None:
         """Calculate monthly price from cached daily prices.
-
+        
         Args:
             utility_code: Utility code (e.g., "HW", "CW")
             year: Year
             month: Month (1-12)
-
+            
         Returns:
             Dict with price data or None if not available
         """
         from_time, to_time = self._get_month_timestamps(year, month)
-
+        
         # Try to calculate from cached daily prices (aggregate across all meters)
         total_price = 0.0
         has_cached_data = False
-
+        
         # Sum prices from all meters for this utility
         for cache_key_price, daily_prices in self._daily_price_cache.items():
             if cache_key_price.startswith(f"{utility_code}_") and cache_key_price.endswith("_metered"):
@@ -960,7 +1022,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     meter_total = sum(p["value"] for p in month_prices)
                     total_price += meter_total
                     has_cached_data = True
-
+        
         if has_cached_data:
             currency = self.get_setting("Currency") or ""
             _LOGGER.info(
@@ -977,7 +1039,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "cost_type": "actual",
                 "is_estimated": False,
             }
-
+        
         return None
 
     async def _fetch_monthly_price_from_api(
@@ -994,7 +1056,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             Dict with price data or None if not available
         """
         from_time, to_time = self._get_month_timestamps(year, month)
-        
+
         # Create cache key for this request
         api_cache_key = format_cache_key(
             "data",
@@ -1009,21 +1071,21 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             """Fetch price data from API."""
             _LOGGER.debug(
                 "Fetching monthly price for %s %d-%02d from API: from=%s to=%s",
-                utility_code,
-                year,
-                month,
-                from_time,
-                to_time,
-            )
+                    utility_code,
+                    year,
+                    month,
+                    from_time,
+                    to_time,
+                )
             return await self.api.get_data(
-                node_id=self.node_id,
-                from_time=from_time,
-                to_time=to_time,
-                interval="d",
-                grouping="apartment",
-                utilities=[f"{utility_code}[price]"],
-                include_sub_nodes=True,
-            )
+                            node_id=self.node_id,
+                            from_time=from_time,
+                            to_time=to_time,
+                            interval="d",
+                            grouping="apartment",
+                            utilities=[f"{utility_code}[price]"],
+                            include_sub_nodes=True,
+                        )
         
         # Use request deduplicator to handle caching and deduplication
         data = await self._request_deduplicator.get_or_fetch(
@@ -1031,7 +1093,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             fetch_func=fetch_price_data,
             use_cache=True,
         )
-        
+
         if not data or not isinstance(data, list):
             return None
 
@@ -1061,20 +1123,20 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "cost_type": "actual",
                 "is_estimated": False,
             }
-
+        
         return None
 
     async def _get_monthly_price_actual(
         self, utility_code: str, year: int, month: int, cache_key: str
     ) -> dict[str, Any] | None:
         """Get monthly actual price aggregate.
-
+        
         Args:
             utility_code: Utility code (e.g., "HW", "CW")
             year: Year
             month: Month (1-12)
             cache_key: Cache key for storing result
-
+            
         Returns:
             Dict with price data or None if not available
         """
@@ -1084,18 +1146,18 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._monthly_aggregate_cache[cache_key] = result
             self._sync_cache_to_data()
             return result
-
+        
         _LOGGER.debug(
             "Daily price cache exists but no values for %s %d-%02d (date range mismatch?)",
             utility_code, year, month
         )
-
+        
         # Fall back to API call
         result = await self._fetch_monthly_price_from_api(utility_code, year, month)
         if result:
             self._monthly_aggregate_cache[cache_key] = result
             self._sync_cache_to_data()
-
+        
         return result
 
     async def _get_monthly_price_cw(
@@ -1131,20 +1193,20 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             """Fetch CW price data from API."""
             _LOGGER.debug(
                 "Fetching CW price for %d-%02d from API: from=%s to=%s",
-                year,
-                month,
-                from_time,
-                to_time,
-            )
+                    year,
+                    month,
+                    from_time,
+                    to_time,
+                )
             return await self.api.get_data(
-                node_id=self.node_id,
-                from_time=from_time,
-                to_time=to_time,
-                interval="d",
-                grouping="apartment",
-                utilities=[f"{utility_code}[price]"],
-                include_sub_nodes=True,
-            )
+                            node_id=self.node_id,
+                            from_time=from_time,
+                            to_time=to_time,
+                            interval="d",
+                            grouping="apartment",
+                            utilities=[f"{utility_code}[price]"],
+                            include_sub_nodes=True,
+                        )
         
         # Use request deduplicator to handle caching and deduplication
         data = await self._request_deduplicator.get_or_fetch(
@@ -1155,7 +1217,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         
         if not data or not isinstance(data, list):
             return None
-
+        
         # Process the data
         total_price = 0.0
         has_data = False
@@ -1189,23 +1251,23 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "cost_type": cost_type,
                 "is_estimated": False,
             }
-
+        
         return None
 
     async def _get_monthly_price_hw_estimated(
         self, year: int, month: int
     ) -> dict[str, Any] | None:
         """Get monthly estimated price for HW utility.
-
+        
         Args:
             year: Year
             month: Month (1-12)
-
+            
         Returns:
             Dict with price data or None if not available
         """
         from_time, to_time = self._get_month_timestamps(year, month)
-
+        
         # First check if we have actual price data from API
         # Use the same deduplication pattern as other price fetches
         api_cache_key = format_cache_key(
@@ -1227,14 +1289,14 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 to_time,
             )
             return await self.api.get_data(
-                node_id=self.node_id,
-                from_time=from_time,
-                to_time=to_time,
-                interval="d",
-                grouping="apartment",
-                utilities=["HW[price]"],
-                include_sub_nodes=True,
-            )
+                            node_id=self.node_id,
+                            from_time=from_time,
+                            to_time=to_time,
+                            interval="d",
+                            grouping="apartment",
+                            utilities=["HW[price]"],
+                            include_sub_nodes=True,
+                        )
 
         # Use request deduplicator to handle caching and deduplication
         data = await self._request_deduplicator.get_or_fetch(
@@ -1321,42 +1383,42 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self, utility_code: str, year: int, month: int, cache_key: str
     ) -> dict[str, Any] | None:
         """Calculate monthly consumption from cached daily consumption data.
-
+        
         Args:
             utility_code: Utility code (e.g., "HW", "CW")
             year: Year
             month: Month (1-12)
             cache_key: Cache key for storing result
-
+            
         Returns:
             Dict with consumption data or None if not available
         """
         cache_key_daily = f"{utility_code}_all"  # Use aggregate cache key
         daily_values = self._daily_consumption_cache.get(cache_key_daily)
-
+        
         if not daily_values:
             return None
-
+        
         from_time, to_time = self._get_month_timestamps(year, month)
-
+        
         # Filter daily values for this month
         month_values = [
             v for v in daily_values
             if from_time <= v["time"] < to_time and v.get("value") is not None
         ]
-
+        
         if not month_values:
             return None
-
+        
         # Sum all values for the month
         total_value = sum(v["value"] for v in month_values)
         unit = month_values[0].get("unit", "") if month_values else ""
-
+        
         _LOGGER.debug(
             "Calculated monthly consumption for %s %d-%02d from %d cached daily values (reused data!)",
             utility_code, year, month, len(month_values)
         )
-
+        
         result = {
             "value": total_value,
             "unit": unit,
@@ -1374,14 +1436,14 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self, utility_code: str, year: int, month: int, aggregate_type: str, cache_key: str
     ) -> dict[str, Any] | None:
         """Fetch monthly consumption from API.
-
+        
         Args:
             utility_code: Utility code (e.g., "HW", "CW")
             year: Year
             month: Month (1-12)
             aggregate_type: Aggregate type ("con" for consumption)
             cache_key: Cache key for storing result
-
+            
         Returns:
             Dict with consumption data or None if not available
         """
@@ -1404,22 +1466,22 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             """Fetch consumption data from API."""
             _LOGGER.debug(
                 "Fetching monthly aggregate for %s[%s] %d-%02d from API: from=%s to=%s",
-                utility_code,
-                aggregate_type,
-                year,
-                month,
-                from_time,
-                to_time,
-            )
+                    utility_code,
+                    aggregate_type,
+                    year,
+                    month,
+                    from_time,
+                    to_time,
+                )
             return await self.api.get_data(
-                node_id=self.node_id,
-                from_time=from_time,
-                to_time=to_time,
-                interval="d",
-                grouping="apartment",
-                utilities=utilities,
-                include_sub_nodes=True,
-            )
+                            node_id=self.node_id,
+                            from_time=from_time,
+                            to_time=to_time,
+                            interval="d",
+                            grouping="apartment",
+                            utilities=utilities,
+                            include_sub_nodes=True,
+                        )
 
         # Use request deduplicator to handle caching and deduplication
         data = await self._request_deduplicator.get_or_fetch(
@@ -1475,7 +1537,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         cost_type: str = "actual",
     ) -> dict[str, Any] | None:
         """Get monthly aggregate for consumption or price.
-
+        
         First checks the monthly aggregate cache. If not found, makes API call and caches result.
 
         Args:
@@ -1495,10 +1557,10 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             cached = self._monthly_aggregate_cache[cache_key]
             _LOGGER.debug("✓ Cache HIT: monthly aggregate %s", cache_key)
             return cached
-
+        
         # Cache miss - will try to calculate from daily cache or fetch from API
         _LOGGER.debug("✗ Cache MISS: monthly aggregate %s, will try daily cache or API", cache_key)
-
+        
         # Wrap calculation in a task for deduplication
         async def _calculate_monthly_aggregate() -> dict[str, Any] | None:
             # For price aggregates
@@ -1508,7 +1570,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     result = await self._get_monthly_price_actual(utility_code, year, month, cache_key)
                     if result:
                         return result
-
+                
                 # Handle CW price (special case)
                 if utility_code == "CW":
                     result = await self._get_monthly_price_cw(utility_code, year, month, cost_type)
@@ -1516,7 +1578,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         self._monthly_aggregate_cache[cache_key] = result
                         self._sync_cache_to_data()
                         return result
-
+                
                 # Handle HW estimated price
                 if utility_code == "HW" and cost_type == "estimated":
                     result = await self._get_monthly_price_hw_estimated(year, month)
@@ -1524,7 +1586,7 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         self._monthly_aggregate_cache[cache_key] = result
                         self._sync_cache_to_data()
                         return result
-
+                
                 # For HW actual: if we got here, we already checked for actual API data and didn't find it
                 # Don't fall back to billing/spot prices for "actual" - that would be an estimate
                 if utility_code == "HW" and cost_type == "actual":
@@ -1534,14 +1596,14 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         month,
                     )
                     return None
-
+                
                 # For CW or HW estimated (fallback), use billing results
                 result = await self.billing_manager.get_monthly_price_from_billing(
                     utility_code=utility_code,
                     year=year,
                     month=month,
                 )
-
+                
                 if result:
                     result["cost_type"] = cost_type
                     # Mark as estimated if it came from spot prices or billing calculation
@@ -1551,9 +1613,9 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         result["is_estimated"] = False
                     self._monthly_aggregate_cache[cache_key] = result
                     self._sync_cache_to_data()
-
+                
                 return result
-
+            
             # For consumption aggregates
             if aggregate_type == "con":
                 # Try to calculate from cached daily consumption data first
@@ -1562,14 +1624,14 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 if result:
                     return result
-
+                
                 # Fall back to API call
                 return await self._fetch_monthly_consumption_from_api(
                     utility_code, year, month, aggregate_type, cache_key
                 )
-
+            
             return None
-
+        
         # Use request deduplicator for calculation task (not API call, so use_cache=False)
         try:
             # Check if data was already in cache before fetching
@@ -1609,6 +1671,8 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> dict[str, Any] | None:
         """Get monthly aggregate for consumption or price for a specific meter.
 
+        First checks the monthly aggregate cache. If not found, calculates and caches result.
+
         Args:
             utility_code: Utility code (e.g., "HW", "CW")
             measuring_point_id: Measuring point ID
@@ -1631,15 +1695,68 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.warning("MeterAggregateCalculator not initialized, cannot calculate meter aggregate.")
             return None
         
-        return await self._meter_aggregate_calculator.calculate(
-            utility_code=utility_code,
-            measuring_point_id=measuring_point_id,
-            external_key=external_key,
-            year=year,
-            month=month,
-            aggregate_type=aggregate_type,
-            cost_type=cost_type,
-        )
+        # Check monthly aggregate cache first (per-meter cache key includes measuring_point_id)
+        cache_key = f"{utility_code}_{measuring_point_id}_{year}_{month}_{aggregate_type}_{cost_type}"
+        if cache_key in self._monthly_aggregate_cache:
+            cached = self._monthly_aggregate_cache[cache_key]
+            _LOGGER.debug("✓ Cache HIT: per-meter monthly aggregate %s", cache_key)
+            return cached
+        
+        # Cache miss - will calculate
+        _LOGGER.debug("✗ Cache MISS: per-meter monthly aggregate %s, will calculate", cache_key)
+        
+        # Use request deduplicator to prevent multiple simultaneous calculations
+        async def _calculate_meter_aggregate() -> dict[str, Any] | None:
+            """Calculate the meter aggregate."""
+            # Double-check cache inside the deduplication function
+            # (another call might have cached it while we were waiting)
+            if cache_key in self._monthly_aggregate_cache:
+                cached = self._monthly_aggregate_cache[cache_key]
+                _LOGGER.debug("✓ Cache HIT (during dedup): per-meter monthly aggregate %s", cache_key)
+                return cached
+            
+            result = await self._meter_aggregate_calculator.calculate(
+                                utility_code=utility_code,
+                                measuring_point_id=measuring_point_id,
+                                external_key=external_key,
+                                year=year,
+                                month=month,
+                aggregate_type=aggregate_type,
+                cost_type=cost_type,
+            )
+            
+            # Cache the result (including None) to prevent repeated calculations
+            self._monthly_aggregate_cache[cache_key] = result
+            self._sync_cache_to_data()
+            
+            return result
+        
+        try:
+            # Check if data was already in cache before fetching
+            was_cached = cache_key in self._monthly_aggregate_cache
+            
+            result = await self._request_deduplicator.get_or_fetch(
+                cache_key=f"meter_agg_{cache_key}",
+                fetch_func=_calculate_meter_aggregate,
+                use_cache=False,  # Don't cache calculation results, only deduplicate
+            )
+            
+            # Only notify listeners if new data was cached (not if it was already there)
+            if result and not was_cached and cache_key in self._monthly_aggregate_cache:
+                self.async_update_listeners()
+            
+            return result
+        except Exception as err:
+            _LOGGER.warning(
+                "Failed to fetch monthly aggregate for meter %d %s[%s] %d-%02d: %s",
+                measuring_point_id,
+                utility_code,
+                aggregate_type,
+                year,
+                month,
+                err,
+            )
+            return None
 
     async def _get_hw_price_from_spot_prices(
         self,
@@ -2041,383 +2158,40 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def get_end_of_month_estimate(self) -> dict[str, Any] | None:
         """Calculate end-of-month bill estimate based on current month's data.
 
-        Estimates are calculated using mean daily consumption and price so far this month,
-        projected to the end of the month.
-
-        Returns:
-            Dict with estimated values for:
-            - hw_consumption_estimate: Estimated HW consumption by end of month
-            - hw_price_estimate: Estimated HW price by end of month
-            - cw_consumption_estimate: Estimated CW consumption by end of month
-            - cw_price_estimate: Estimated CW price by end of month
-            - other_items_cost: Other items cost from last bill
-            - total_bill_estimate: Total estimated bill (CW + HW + other fees)
-            - currency: Currency code
-            - year: Current year
-            - month: Current month
-            - days_elapsed: Number of days with data so far
-            - days_remaining: Number of days remaining in month
-            - total_days_in_month: Total days in current month
+        Delegates to EndOfMonthEstimator for the actual calculation.
+        Uses request deduplication to prevent multiple simultaneous calculations.
         """
-        import uuid
-        call_id = str(uuid.uuid4())[:8]
-        _LOGGER.debug("get_end_of_month_estimate[%s]: Method called", call_id)
-        try:
-            now = datetime.now()
-            current_year = now.year
-            current_month = now.month
-            _LOGGER.debug("get_end_of_month_estimate[%s]: Starting for year=%d, month=%d", call_id, current_year, current_month)
-
-            # Get timezone
-            timezone_str = self.get_setting("TimeZoneIANA") or "UTC"
+        if not self._end_of_month_estimator:
+            _LOGGER.error("End-of-month estimator not initialized - this should not happen")
+            return None
+        
+        # Use request deduplication to prevent multiple simultaneous calculations
+        # Cache key includes current year and month so estimates refresh when month changes
+        from datetime import datetime
+        from .helpers import get_timezone
+        
+        timezone_str = self.get_setting("TimeZoneIANA") or "UTC"
+        tz = get_timezone(timezone_str)
+        now_tz = datetime.now(tz)
+        cache_key = f"end_of_month_estimate_{now_tz.year}_{now_tz.month}"
+        
+        async def calculate_estimate() -> dict[str, Any] | None:
+            """Calculate the estimate."""
             try:
-                tz = zoneinfo.ZoneInfo(timezone_str)
-            except Exception:
-                tz = zoneinfo.ZoneInfo("UTC")
-
-            now_tz = datetime.now(tz)
-            current_year = now_tz.year
-            current_month = now_tz.month
-
-            # Calculate month boundaries
-            from_date = datetime(current_year, current_month, 1, tzinfo=tz)
-            if current_month == 12:
-                to_date = datetime(current_year + 1, 1, 1, tzinfo=tz)
-            else:
-                to_date = datetime(current_year, current_month + 1, 1, tzinfo=tz)
-
-            total_days_in_month = (to_date - from_date).days
-            days_elapsed = (now_tz.date() - from_date.date()).days + 1  # +1 to include today
-            days_remaining = total_days_in_month - days_elapsed
-
-            if days_elapsed <= 0:
-                _LOGGER.debug("No days elapsed yet in current month, cannot estimate")
-                return None
-
-            from_time = int(from_date.timestamp())
-            to_time = int(to_date.timestamp())
-
-            currency = self.get_setting("Currency") or "NOK"
-
-            # Fetch daily data for consumption and price for both HW and CW
-            # Use cached data first to avoid unnecessary API calls
-            estimates = {}
-
-            for utility_code in ["HW", "CW"]:
-                for data_type in ["con", "price"]:
-                    try:
-                        # Try to get data from cache first
-                        daily_values = []
-                        latest_data_time = None
-
-                        if data_type == "con":
-                            # Check daily consumption cache
-                            cache_key = f"{utility_code}_all"
-                            cached_values = self._daily_consumption_cache.get(cache_key, [])
-                            if cached_values:
-                                # Filter for current month
-                                for v in cached_values:
-                                    if from_time <= v.get("time", 0) < to_time and v.get("value") is not None and v.get("value") > 0:
-                                        daily_values.append(v.get("value"))
-                                        time_stamp = v.get("time")
-                                        if time_stamp and (latest_data_time is None or time_stamp > latest_data_time):
-                                            latest_data_time = time_stamp
-                        elif data_type == "price":
-                            # Check daily price cache
-                            # Price cache uses different keys per measuring point, but we can check aggregate
-                            # For now, we'll need to make API call for price data
-                            # TODO: Add price cache checking similar to consumption
-                            pass
-
-                        # If we don't have enough cached data, make API call with deduplication
-                        if not daily_values:
-                            # Create cache key for deduplication
-                            api_cache_key = f"data_{self.node_id}_{from_time}_{to_time}_{utility_code}_{data_type}"
-
-                            async def fetch_data() -> list[dict[str, Any]] | None:
-                                """Fetch data from API."""
-                                return await self.api.get_data(
-                                    node_id=self.node_id,
-                                    from_time=from_time,
-                                    to_time=to_time,
-                                    interval="d",
-                                    grouping="apartment",
-                                    utilities=[f"{utility_code}[{data_type}]"],
-                                    include_sub_nodes=True,
-                                )
-
-                            # Use request deduplicator to handle caching and deduplication
-                            data = await self._request_deduplicator.get_or_fetch(
-                                cache_key=api_cache_key,
-                                fetch_func=fetch_data,
-                                use_cache=True,
-                            )
-
-                            if not data or not isinstance(data, list):
-                                continue
-
-                            # Extract daily values with timestamps
-                            for node_data in data:
-                                results = node_data.get("Result", [])
-                                for result in results:
-                                    if result.get("Utl") == utility_code and result.get("Func") == data_type:
-                                        values = result.get("Values", [])
-                                        for value_entry in values:
-                                            value = value_entry.get("Value")
-                                            time_stamp = value_entry.get("Time")
-                                            if value is not None and value > 0:
-                                                daily_values.append(value)
-                                                # Track the latest timestamp with data
-                                                if time_stamp and (latest_data_time is None or time_stamp > latest_data_time):
-                                                    latest_data_time = time_stamp
-
-                        if daily_values:
-                            # Calculate mean daily value based on actual days with data
-                            # This is the key: we only use days where we have actual data
-                            days_with_data = len(daily_values)
-                            mean_daily = sum(daily_values) / days_with_data
-
-                            # Project to end of month using the mean daily rate
-                            # Note: This assumes the mean daily rate continues for the rest of the month
-                            total_so_far = sum(daily_values)
-                            estimated_total = mean_daily * total_days_in_month
-
-                            key = f"{utility_code.lower()}_{data_type}_estimate"
-                            estimates[key] = {
-                                "mean_daily": mean_daily,
-                                "total_so_far": total_so_far,
-                                "estimated_total": estimated_total,
-                                "days_with_data": days_with_data,
-                                "latest_data_time": latest_data_time,
-                            }
-
-                            _LOGGER.debug(
-                                "%s %s: mean daily=%.2f, so far=%.2f, estimated=%.2f (days with data: %d)",
-                                utility_code,
-                                data_type,
-                                mean_daily,
-                                total_so_far,
-                                estimated_total,
-                                len(daily_values),
-                            )
-                    except Exception as err:
-                        _LOGGER.debug(
-                            "Failed to fetch %s %s data for estimate: %s",
-                            utility_code,
-                            data_type,
-                            err,
-                        )
-
-            # If we don't have HW price data, try to estimate it
-            hw_price_has_data = False
-            if "hw_price_estimate" in estimates:
-                hw_price_est_data = estimates["hw_price_estimate"]
-                if isinstance(hw_price_est_data, dict):
-                    hw_price_has_data = hw_price_est_data.get("days_with_data", 0) > 0
-
-            if not hw_price_has_data:
-                # Try to estimate HW price using spot prices
-                if "hw_con_estimate" in estimates:
-                    hw_consumption_estimate = estimates["hw_con_estimate"]["estimated_total"]
-
-                    # Get CW price and consumption estimates (use mean daily if available, otherwise calculate from so_far)
-                    cw_price_estimate_data = estimates.get("cw_price_estimate", {})
-                    cw_con_estimate_data = estimates.get("cw_con_estimate", {})
-
-                    # Use mean daily from estimates if available
-                    # Note: We only use actual data days, not calendar days elapsed
-                    if cw_price_estimate_data.get("mean_daily", 0) > 0:
-                        estimated_cw_price = cw_price_estimate_data["mean_daily"] * total_days_in_month
-                    else:
-                        # Fallback: if no mean daily, we can't reliably estimate
-                        _LOGGER.debug("No CW price mean daily available for HW price estimation")
-                        estimated_cw_price = 0
-
-                    if cw_con_estimate_data.get("mean_daily", 0) > 0:
-                        estimated_cw_consumption = cw_con_estimate_data["mean_daily"] * total_days_in_month
-                    else:
-                        # Fallback: if no mean daily, we can't reliably estimate
-                        _LOGGER.debug("No CW consumption mean daily available for HW price estimation")
-                        estimated_cw_consumption = 0
-
-                    spot_price_data = await self._get_hw_price_from_spot_prices(
-                        consumption=hw_consumption_estimate,
-                        year=current_year,
-                        month=current_month,
-                        cold_water_price=estimated_cw_price if estimated_cw_price > 0 else None,
-                        cold_water_consumption=estimated_cw_consumption if estimated_cw_consumption > 0 else None,
-                    )
-
-                    if spot_price_data:
-                        hw_price_estimate_value = spot_price_data.get("value", 0)
-                        estimates["hw_price_estimate"] = {
-                            "mean_daily": hw_price_estimate_value / total_days_in_month,
-                            "total_so_far": 0,  # Not available from API
-                            "estimated_total": hw_price_estimate_value,
-                            "days_with_data": 0,  # Estimated, not from actual data
-                            "is_estimated": True,
-                        }
-                        _LOGGER.debug(
-                            "Estimated HW price using spot prices: %.2f",
-                            hw_price_estimate_value,
-                        )
-
-            # If we don't have CW price data, try to estimate it from monthly aggregate
-            cw_price_has_data = False
-            if "cw_price_estimate" in estimates:
-                cw_price_est_data = estimates["cw_price_estimate"]
-                if isinstance(cw_price_est_data, dict):
-                    cw_price_has_data = cw_price_est_data.get("days_with_data", 0) > 0
-
-            if not cw_price_has_data:
-                # Try to get CW price estimate from monthly aggregate
-                if "cw_con_estimate" in estimates:
-                    cw_consumption_estimate = estimates["cw_con_estimate"]["estimated_total"]
-
-                    # Try to get estimated price from monthly aggregate
-                    cw_price_data = await self.get_monthly_aggregate(
-                        utility_code="CW",
-                        year=current_year,
-                        month=current_month,
-                        aggregate_type="price",
-                        cost_type="estimated",
-                    )
-
-                    if cw_price_data and cw_price_data.get("value") is not None:
-                        cw_price_estimate_value = cw_price_data.get("value", 0)
-                        estimates["cw_price_estimate"] = {
-                            "mean_daily": cw_price_estimate_value / total_days_in_month,
-                            "total_so_far": 0,  # Not available from daily data
-                            "estimated_total": cw_price_estimate_value,
-                            "days_with_data": 0,  # Estimated, not from actual daily data
-                            "is_estimated": True,
-                        }
-                        _LOGGER.debug(
-                            "Estimated CW price from monthly aggregate: %.2f",
-                            cw_price_estimate_value,
-                        )
-
-            _LOGGER.debug("get_end_of_month_estimate[%s]: Finished calculating estimates, now getting other items cost", call_id)
-
-            # Get other items cost from last bill
-            _LOGGER.debug("get_end_of_month_estimate[%s]: Getting other items cost for year=%d, month=%d", call_id, current_year, current_month)
-            other_items_cost = 0
-            try:
-                other_items_data = await self.billing_manager.get_monthly_other_items_cost(
-                    year=current_year,
-                    month=current_month,
-                )
-                if other_items_data:
-                    other_items_cost = other_items_data.get("value", 0)
-                else:
-                    other_items_cost = 0
-                _LOGGER.debug("get_end_of_month_estimate[%s]: Got other items cost: %.2f", call_id, other_items_cost)
+                return await self._end_of_month_estimator.calculate()
             except Exception as err:
-                _LOGGER.error("get_end_of_month_estimate[%s]: EXCEPTION in get_monthly_other_items_cost: %s", call_id, err, exc_info=True)
-                other_items_cost = 0
-
-            _LOGGER.debug("get_end_of_month_estimate[%s]: About to calculate total bill estimate", call_id)
-
-            # Calculate total estimated bill
-            try:
-                hw_price_est = estimates.get("hw_price_estimate", {}).get("estimated_total", 0)
-                cw_price_est = estimates.get("cw_price_estimate", {}).get("estimated_total", 0)
-                total_bill_estimate = hw_price_est + cw_price_est + other_items_cost
-
-                _LOGGER.debug(
-                    "get_end_of_month_estimate[%s]: Calculating total bill estimate: HW=%.2f, CW=%.2f, Other=%.2f, Total=%.2f",
-                    call_id,
-                    hw_price_est,
-                    cw_price_est,
-                    other_items_cost,
-                    total_bill_estimate,
-                )
-            except Exception as err:
-                _LOGGER.warning("Failed to calculate total bill estimate: %s", err, exc_info=True)
-                # Use safe defaults
-                hw_price_est = 0
-                cw_price_est = 0
-                total_bill_estimate = other_items_cost
-
-            # Calculate maximum days with data across all metrics to show data freshness
-            max_days_with_data = 0
-            latest_data_timestamp = None
-            for key in ["hw_con_estimate", "hw_price_estimate", "cw_con_estimate", "cw_price_estimate"]:
-                estimate_data = estimates.get(key, {})
-                days_with_data = estimate_data.get("days_with_data", 0)
-                if days_with_data > max_days_with_data:
-                    max_days_with_data = days_with_data
-                data_time = estimate_data.get("latest_data_time")
-                if data_time and (latest_data_timestamp is None or data_time > latest_data_timestamp):
-                    latest_data_timestamp = data_time
-
-            # Safely extract values from estimates dictionary
-            def safe_get(key: str, attr: str, default: Any = 0) -> Any:
-                """Safely get nested dictionary value."""
-                try:
-                    data = estimates.get(key, {})
-                    if isinstance(data, dict):
-                        return data.get(attr, default)
-                    return default
-                except (AttributeError, TypeError):
-                    return default
-
-            result = {
-                "hw_consumption_estimate": safe_get("hw_con_estimate", "estimated_total", 0),
-                "hw_price_estimate": hw_price_est,
-                "cw_consumption_estimate": safe_get("cw_con_estimate", "estimated_total", 0),
-                "cw_price_estimate": cw_price_est,
-                "other_items_cost": other_items_cost,
-                "total_bill_estimate": total_bill_estimate,
-                "currency": currency,
-                "year": current_year,
-                "month": current_month,
-                "days_elapsed_calendar": days_elapsed,  # Calendar days since month start
-                "days_with_data": max_days_with_data,  # Actual days with data
-                "days_remaining": days_remaining,
-                "total_days_in_month": total_days_in_month,
-                "latest_data_timestamp": latest_data_timestamp,  # Latest timestamp with data
-                "hw_mean_daily_consumption": safe_get("hw_con_estimate", "mean_daily", 0),
-                "hw_mean_daily_price": safe_get("hw_price_estimate", "mean_daily", 0),
-                "cw_mean_daily_consumption": safe_get("cw_con_estimate", "mean_daily", 0),
-                "cw_mean_daily_price": safe_get("cw_price_estimate", "mean_daily", 0),
-                "hw_consumption_so_far": safe_get("hw_con_estimate", "total_so_far", 0),
-                "hw_price_so_far": safe_get("hw_price_estimate", "total_so_far", 0),
-                "cw_consumption_so_far": safe_get("cw_con_estimate", "total_so_far", 0),
-                "cw_price_so_far": safe_get("cw_price_estimate", "total_so_far", 0),
-                "hw_consumption_days_with_data": safe_get("hw_con_estimate", "days_with_data", 0),
-                "hw_price_days_with_data": safe_get("hw_price_estimate", "days_with_data", 0),
-                "cw_consumption_days_with_data": safe_get("cw_con_estimate", "days_with_data", 0),
-                "cw_price_days_with_data": safe_get("cw_price_estimate", "days_with_data", 0),
-                "hw_price_is_estimated": safe_get("hw_price_estimate", "is_estimated", False),
-            }
-
-            _LOGGER.info(
-                "get_end_of_month_estimate[%s]: End-of-month estimate for %d-%02d: Total=%.2f %s (HW: %.2f, CW: %.2f, Other: %.2f) "
-                "(%d days with data out of %d calendar days elapsed, %d days in month)",
-                call_id,
-                current_year,
-                current_month,
-                total_bill_estimate,
-                currency,
-                hw_price_est,
-                cw_price_est,
-                other_items_cost,
-                max_days_with_data,
-                days_elapsed,
-                total_days_in_month,
-            )
-
-            _LOGGER.debug("get_end_of_month_estimate[%s]: Returning result with %d keys", call_id, len(result))
-            return result
-        except Exception as err:
-            _LOGGER.warning(
-                "get_end_of_month_estimate[%s]: Failed to calculate end-of-month estimate: %s",
-                call_id,
+                _LOGGER.error(
+                    "Error in get_end_of_month_estimate: %s",
                 err,
                 exc_info=True,
             )
             return None
+        
+        return await self._request_deduplicator.get_or_fetch(
+            cache_key=cache_key,
+            fetch_func=calculate_estimate,
+            use_cache=True,
+        )
 
 
 class EcoGuardLatestReceptionCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
@@ -2441,7 +2215,7 @@ class EcoGuardLatestReceptionCoordinator(DataUpdateCoordinator[list[dict[str, An
 
     async def _async_update_data(self) -> list[dict[str, Any]]:
         """Fetch latest reception data from EcoGuard API.
-
+        
         Note: Latest reception is fetched after Home Assistant has fully started
         (see __init__.py for the startup event listener) to avoid blocking startup.
         During periodic updates, this method will fetch fresh data.

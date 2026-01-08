@@ -2407,6 +2407,7 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         self._current_month: int | None = None
         self._days_elapsed_calendar: int | None = None
         self._days_with_data: int | None = None
+        self._fetch_task: asyncio.Task | None = None  # Track pending fetch task to prevent duplicates
         self._days_remaining: int | None = None
         self._total_days_in_month: int | None = None
         self._latest_data_timestamp: int | None = None
@@ -2538,15 +2539,25 @@ class EcoGuardEndOfMonthEstimateSensor(CoordinatorEntity[EcoGuardDataUpdateCoord
         self.async_write_ha_state()
 
         # Trigger async fetch (with delay during startup to avoid blocking)
+        # Only create a new task if one isn't already pending
         if self.hass and not self.hass.is_stopping:
+            # Check if there's already a pending fetch task
+            if self._fetch_task is not None and not self._fetch_task.done():
+                _LOGGER.debug("Skipping duplicate fetch task for %s (task already pending)", self.entity_id)
+                return
+            
             if is_starting:
                 # Delay during startup to avoid blocking
                 async def delayed_fetch():
                     await asyncio.sleep(5)  # Wait 5 seconds after startup
                     await self._async_fetch_value()
-                self.hass.async_create_task(delayed_fetch())
+                    self._fetch_task = None  # Clear task reference when done
+                self._fetch_task = self.hass.async_create_task(delayed_fetch())
             else:
-                self.hass.async_create_task(self._async_fetch_value())
+                async def fetch_and_clear():
+                    await self._async_fetch_value()
+                    self._fetch_task = None  # Clear task reference when done
+                self._fetch_task = self.hass.async_create_task(fetch_and_clear())
 
     async def _async_fetch_value(self) -> None:
         """Fetch end-of-month estimate asynchronously."""
@@ -4481,11 +4492,27 @@ class EcoGuardMonthlyMeterSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator
 
         if aggregate_data:
             raw_value = aggregate_data.get("value")
-            self._attr_native_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            old_value = self._attr_native_value
+            new_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            self._attr_native_value = new_value
             self._attr_native_unit_of_measurement = aggregate_data.get("unit") or default_unit
             self._current_year = aggregate_data.get("year")
             self._current_month = aggregate_data.get("month")
             self._attr_available = True
+            
+            # Log update (always log when we have data, even if value hasn't changed)
+            if old_value != new_value:
+                _LOGGER.info("Updated %s: %s -> %s %s (from cache, year=%d, month=%d)",
+                             self.entity_id, old_value, new_value,
+                             self._attr_native_unit_of_measurement,
+                             self._current_year or year, self._current_month or month)
+            else:
+                # Log at debug level if value hasn't changed (to confirm update path is being taken)
+                _LOGGER.debug("Sensor %s already has correct value: %s %s (from cache, year=%d, month=%d)",
+                             self.entity_id, new_value,
+                             self._attr_native_unit_of_measurement,
+                             self._current_year or year, self._current_month or month)
+            
             self.async_write_ha_state()
             return
 
