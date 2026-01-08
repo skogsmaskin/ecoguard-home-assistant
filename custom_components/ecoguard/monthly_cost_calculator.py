@@ -7,6 +7,8 @@ from typing import Any, Callable, Awaitable
 import zoneinfo
 import logging
 
+from .const import VALID_UTILITY_CODES
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -95,7 +97,7 @@ class MonthlyCostCalculator:
                 registers = installation.get("Registers", [])
                 for register in registers:
                     utility_code = register.get("UtilityCode")
-                    if utility_code and utility_code in ("HW", "CW", "E", "HE"):
+                    if utility_code and utility_code in VALID_UTILITY_CODES:
                         utility_codes.add(utility_code)
 
             if not utility_codes:

@@ -36,6 +36,18 @@ FUNC_CONSUMPTION = "con"
 FUNC_PRICE = "price"
 FUNC_CO2 = "co2"
 
+# Utility Codes
+UTILITY_HOT_WATER = "HW"
+UTILITY_COLD_WATER = "CW"
+UTILITY_ELECTRICITY = "E"
+UTILITY_HEAT = "HE"
+
+# All valid utility codes (for filtering/validation)
+VALID_UTILITY_CODES = (UTILITY_HOT_WATER, UTILITY_COLD_WATER, UTILITY_ELECTRICITY, UTILITY_HEAT)
+
+# Water utilities (for combined water sensors)
+WATER_UTILITIES = (UTILITY_HOT_WATER, UTILITY_COLD_WATER)
+
 # Nord Pool API
 # Using the new Data API endpoint
 NORD_POOL_API_URL = "https://data-api.nordpoolgroup.com/marketdata/page/10"

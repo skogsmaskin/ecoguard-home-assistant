@@ -10,7 +10,7 @@ import asyncio
 from homeassistant.components.sensor import SensorStateClass
 from homeassistant.core import HomeAssistant
 
-from ..const import DOMAIN
+from ..const import DOMAIN, VALID_UTILITY_CODES, WATER_UTILITIES
 from ..coordinator import EcoGuardDataUpdateCoordinator
 from ..helpers import round_to_max_digits
 from ..translations import (
@@ -311,11 +311,11 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
                 registers = installation.get("Registers", [])
                 for register in registers:
                     utility_code = register.get("UtilityCode")
-                    if utility_code and utility_code in ("HW", "CW", "E", "HE"):
+                    if utility_code and utility_code in VALID_UTILITY_CODES:
                         utility_codes.add(utility_code)
 
             for utility_code in sorted(utility_codes):
-                if utility_code in ("CW", "HW"):
+                if utility_code in WATER_UTILITIES:
                     cache_key = f"{utility_code}_{year}_{month}_price_{self._cost_type}"
                     price_data = monthly_cache.get(cache_key)
                     if price_data and price_data.get("value") is not None:
@@ -361,7 +361,7 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
             registers = installation.get("Registers", [])
             for register in registers:
                 utility_code = register.get("UtilityCode")
-                if utility_code and utility_code in ("HW", "CW", "E", "HE"):
+                if utility_code and utility_code in VALID_UTILITY_CODES:
                     utility_codes.add(utility_code)
 
         # Sum costs from individual utilities
@@ -369,7 +369,7 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
         utilities_with_data = []
 
         for utility_code in sorted(utility_codes):
-            if utility_code in ("CW", "HW"):
+            if utility_code in WATER_UTILITIES:
                 price_data = await self.coordinator.get_monthly_aggregate(
                     utility_code=utility_code,
                     year=year,

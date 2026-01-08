@@ -7,6 +7,7 @@ import logging
 
 from homeassistant.core import HomeAssistant
 
+from .const import WATER_UTILITIES
 from .coordinator import EcoGuardDataUpdateCoordinator
 
 if TYPE_CHECKING:
@@ -159,7 +160,7 @@ def create_daily_aggregate_sensors(
 
     # Create daily consumption aggregate sensors for each utility (CW, HW)
     for utility_code in utility_codes:
-        if utility_code in ("CW", "HW"):
+        if utility_code in WATER_UTILITIES:
             daily_aggregate_sensor = EcoGuardDailyConsumptionAggregateSensor(
                 hass=hass,
                 coordinator=coordinator,
@@ -258,7 +259,7 @@ def create_monthly_aggregate_sensors(
 
     # Create monthly aggregate sensors for each utility (CW, HW)
     for utility_code in utility_codes:
-        if utility_code in ("CW", "HW"):
+        if utility_code in WATER_UTILITIES:
             # Monthly consumption sensor
             monthly_con_sensor = EcoGuardMonthlyAggregateSensor(
                 hass=hass,
