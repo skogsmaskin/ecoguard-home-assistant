@@ -211,26 +211,6 @@ async def async_setup_entry(
         runtime_data.entity_registry_update_task = update_task
 
 
-class EcoGuardSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
-    """Base class for EcoGuard sensors."""
-
-    def __init__(
-        self,
-        coordinator: EcoGuardDataUpdateCoordinator,
-        unique_id_suffix: str,
-        name: str,
-    ) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_{coordinator.node_id}_{unique_id_suffix}"
-        self._attr_name = name
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, str(coordinator.node_id))},
-            "name": f"EcoGuard Node {coordinator.node_id}",
-            "manufacturer": "EcoGuard",
-        }
-
-
 class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
     """Sensor for last known daily consumption for a specific meter."""
 
