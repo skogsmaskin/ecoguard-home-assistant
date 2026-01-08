@@ -66,6 +66,19 @@ Major bump because breaking changes. Strictly following semantic versioning.
   - Added `name.all_utilities` for total cost sensors
   - Added `name.combined` and `name.combined_water` for combined sensors
 
+#### Request Deduplication
+- **All API-calling methods now use consistent deduplication pattern**:
+  - `_fetch_monthly_price_from_api`: Added atomic task creation with lock protection
+  - `_get_monthly_price_cw`: Added atomic task creation with lock protection
+  - `_get_monthly_price_hw_estimated`: Added atomic task creation with lock protection
+  - `_fetch_monthly_consumption_from_api`: Added atomic task creation with lock protection
+  - `_get_latest_price_data`: Added atomic task creation with lock protection
+  - `get_monthly_aggregate`: Added atomic task creation with lock protection
+  - `get_end_of_month_estimate`: Now uses daily cache first and deduplicates API calls
+- Tasks are now created and added to `_pending_requests` atomically inside locks
+- Final check for pending tasks before creating new ones to prevent race conditions
+- Moved log messages to only print when API calls are actually made (not when deduplicated)
+
 ### Fixed
 
 #### Translation Issues
@@ -84,6 +97,12 @@ Major bump because breaking changes. Strictly following semantic versioning.
 - Fixed combined water cost sensors to only show value when both hot and cold water data available
 - Fixed estimated daily cost sensors to use metered cost when available (estimated = metered when metered exists)
 
+#### Rate Limit Errors
+- **Eliminated all API rate limit errors** by implementing comprehensive request deduplication
+- Fixed race conditions in task creation that allowed duplicate API calls
+- Added atomic task creation with lock protection to ensure only one request per unique data
+- Fixed `get_end_of_month_estimate` to use daily cache first and add deduplication for API calls
+
 ### Technical Improvements
 
 #### Performance & Startup
@@ -97,6 +116,9 @@ Major bump because breaking changes. Strictly following semantic versioning.
   - Smart cache reuse: monthly aggregates calculated from daily cache data
   - Non-blocking coordinator refresh prevents startup delays
   - Initial 30-day fetch for comprehensive data coverage (async, non-blocking)
+  - **Request deduplication**: Ensures only one API call per unique request, eliminating duplicate requests
+  - **Better cache utilization**: `get_end_of_month_estimate` now uses daily cache before making API calls
+  - **Reduced API calls**: All concurrent requests for the same data now share a single API call
 
 #### Code Quality
 - Standardized entity registry updates to use `unique_id` instead of `entity_id` for better reliability
@@ -105,6 +127,15 @@ Major bump because breaking changes. Strictly following semantic versioning.
 - Updated all tests to reflect new naming conventions and entity formats
 - Migrated to `ConfigEntry.runtime_data` for type-safe runtime data storage
 - Improved error handling with proper resource cleanup (API session closing)
+- Refactored `get_monthly_aggregate` into smaller, focused helper methods for better maintainability:
+  - `_get_month_timestamps`: Calculates month start/end timestamps
+  - `_calculate_monthly_price_from_daily_cache`: Calculates monthly price from cached daily prices
+  - `_fetch_monthly_price_from_api`: Fetches monthly price from API with deduplication
+  - `_get_monthly_price_actual`: Handles fetching/calculating "actual" monthly price
+  - `_get_monthly_price_cw`: Handles CW monthly price with deduplication
+  - `_get_monthly_price_hw_estimated`: Handles HW estimated monthly price with deduplication
+  - `_calculate_monthly_consumption_from_daily_cache`: Calculates monthly consumption from cached daily data
+  - `_fetch_monthly_consumption_from_api`: Fetches monthly consumption from API with deduplication
 
 #### Entity Registry Management
 - Improved entity registry update logic to handle timing issues
