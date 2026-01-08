@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import asyncio
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
@@ -39,10 +38,6 @@ from .sensors import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Counter for staggering sensor data fetches to avoid overwhelming the API
-_sensor_fetch_counter = 0
-_sensor_fetch_lock = asyncio.Lock()
-
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -51,10 +46,6 @@ async def async_setup_entry(
     """Set up EcoGuard sensors from a config entry."""
     # Clear translation cache to ensure fresh translations are loaded
     clear_translation_cache()
-
-    # Reset sensor fetch counter for this setup
-    global _sensor_fetch_counter
-    _sensor_fetch_counter = 0
 
     # Use ConfigEntry.runtime_data (recommended pattern)
     from . import EcoGuardRuntimeData
@@ -165,15 +156,6 @@ async def async_setup_entry(
 
     async_add_entities(sensors, update_before_add=False)
 
-    # Schedule deferred updates after HA is fully started
-    # This prevents API calls during startup
-    # DISABLED: Deferred sensor updates - no API calls during startup
-    # Sensors will show as "Unknown" state initially
-    # async def _deferred_sensor_updates():
-    #     """Defer sensor updates until after HA is fully started."""
-    #     ...
-    # hass.async_create_task(_deferred_sensor_updates())
-
     # Schedule entity registry updates to run after entities are registered
     # This ensures entity_ids match our desired format and individual meter sensors are disabled
     # Define which sensor classes are individual meter sensors (should be disabled by default)
@@ -193,7 +175,5 @@ async def async_setup_entry(
         )
     )
     # Store update task in runtime_data
-    if hasattr(entry, "runtime_data"):
-        from . import EcoGuardRuntimeData
-        runtime_data: EcoGuardRuntimeData = entry.runtime_data
-        runtime_data.entity_registry_update_task = update_task
+    # runtime_data is already available from line 62, no need to check or re-import
+    runtime_data.entity_registry_update_task = update_task

@@ -17,7 +17,6 @@ from ..translations import (
     get_translation_default,
 )
 from ..sensor_helpers import (
-    async_update_entity_registry_name,
     slugify_name,
     utility_code_to_slug,
 )
@@ -325,12 +324,7 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
                 new_name = f'{reception_last_update} - {meter} "{measuring_point_display}" ({utility_name})'
             else:
                 new_name = f'{reception_last_update} - {meter} "{measuring_point_display}"'
-            if self._attr_name != new_name:
-                self._attr_name = new_name
-                self.async_write_ha_state()
-
-                # Also update the entity registry name so it shows correctly in modals
-                await async_update_entity_registry_name(self, new_name)
+            await self._update_name_and_registry(new_name, log_level="debug")
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -439,12 +433,7 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
         self._attr_unique_id = f"{DOMAIN}_consumption_daily_metered_{utility_slug}"
 
         # Sensor attributes
-        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, str(coordinator.node_id))},
-            "name": device_name,
-            "manufacturer": "EcoGuard",
-        }
+        self._attr_device_info = self._get_device_info(coordinator.node_id)
 
         # Set state class
         self._attr_state_class = SensorStateClass.TOTAL_INCREASING
@@ -493,12 +482,7 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
             consumption_daily = await async_get_translation(self._hass, "name.consumption_daily")
             metered = await async_get_translation(self._hass, "name.metered")
             new_name = f"{consumption_daily} {metered} - {utility_name}"
-            if self._attr_name != new_name:
-                self._attr_name = new_name
-                self.async_write_ha_state()
-
-                # Also update the entity registry name so it shows correctly in modals
-                await async_update_entity_registry_name(self, new_name)
+            await self._update_name_and_registry(new_name, log_level="debug")
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -645,12 +629,7 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
         self._attr_unique_id = f"{DOMAIN}_consumption_daily_metered_combined_water"
 
         # Sensor attributes
-        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, str(coordinator.node_id))},
-            "name": device_name,
-            "manufacturer": "EcoGuard",
-        }
+        self._attr_device_info = self._get_device_info(coordinator.node_id)
 
         # Set state class
         self._attr_state_class = SensorStateClass.TOTAL_INCREASING
@@ -708,19 +687,10 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
             if water_name == "name.combined_water":
                 water_name = "Combined Water"
             new_name = f"{consumption_daily} {metered} - {water_name}"
-            if self._attr_name != new_name:
-                self._attr_name = new_name
-                self.async_write_ha_state()
-
-                # Also update the entity registry name so it shows correctly in modals
-                await async_update_entity_registry_name(self, new_name)
+            await self._update_name_and_registry(new_name, log_level="debug")
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
-    def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by reading from cached data."""
-        _LOGGER.debug("Coordinator update received for %s", self.entity_id)
-        self._update_from_coordinator_data()
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -885,13 +855,10 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
         self._attr_unique_id = f"{DOMAIN}_{unique_id_suffix}"
 
         # Sensor attributes
-        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, str(coordinator.node_id))},
-            "name": device_name,
-            "manufacturer": "EcoGuard",
-            "model": installation.get("DeviceTypeDisplay", "Unknown"),
-        }
+        self._attr_device_info = self._get_device_info(
+            coordinator.node_id,
+            model=installation.get("DeviceTypeDisplay", "Unknown"),
+        )
 
         # Disable individual meter sensors by default (users can enable if needed)
         self._attr_entity_registry_enabled_default = False
@@ -949,19 +916,10 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
                 metered = await async_get_translation(self._hass, "name.metered")
                 new_name = f'{cost_daily} {metered} - {meter} "{measuring_point_display}" ({utility_name})'
 
-            if self._attr_name != new_name:
-                self._attr_name = new_name
-                self.async_write_ha_state()
-
-                # Also update the entity registry name so it shows correctly in modals
-                await async_update_entity_registry_name(self, new_name)
+            await self._update_name_and_registry(new_name, log_level="debug")
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
-    def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by reading from cached data."""
-        _LOGGER.debug("_handle_coordinator_update called for %s", self.entity_id)
-        self._update_from_coordinator_data()
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -1121,12 +1079,7 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             self._attr_unique_id = f"{DOMAIN}_cost_daily_metered_{utility_slug}"
 
         # Sensor attributes
-        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, str(coordinator.node_id))},
-            "name": device_name,
-            "manufacturer": "EcoGuard",
-        }
+        self._attr_device_info = self._get_device_info(coordinator.node_id)
 
         # Set state class
         self._attr_state_class = SensorStateClass.MEASUREMENT
@@ -1182,12 +1135,7 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
                 metered = await async_get_translation(self._hass, "name.metered")
                 new_name = f"{cost_daily} {metered} - {utility_name}"
 
-            if self._attr_name != new_name:
-                self._attr_name = new_name
-                self.async_write_ha_state()
-
-                # Also update the entity registry name so it shows correctly in modals
-                await async_update_entity_registry_name(self, new_name)
+            await self._update_name_and_registry(new_name, log_level="debug")
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -1417,12 +1365,7 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
             self._attr_unique_id = f"{DOMAIN}_cost_daily_metered_combined_water"
 
         # Sensor attributes
-        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, str(coordinator.node_id))},
-            "name": device_name,
-            "manufacturer": "EcoGuard",
-        }
+        self._attr_device_info = self._get_device_info(coordinator.node_id)
 
         # Set state class
         self._attr_state_class = SensorStateClass.MEASUREMENT
@@ -1488,18 +1431,10 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
                 metered = await async_get_translation(self._hass, "name.metered")
                 new_name = f"{cost_daily} {metered} - {water_name}"
 
-            if self._attr_name != new_name:
-                self._attr_name = new_name
-                self.async_write_ha_state()
-
-                # Also update the entity registry name so it shows correctly in modals
-                await async_update_entity_registry_name(self, new_name)
+            await self._update_name_and_registry(new_name, log_level="debug")
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
-    def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update by reading from cached data."""
-        self._update_from_coordinator_data()
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""

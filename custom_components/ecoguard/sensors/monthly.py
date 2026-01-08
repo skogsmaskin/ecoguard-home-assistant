@@ -13,14 +13,13 @@ from homeassistant.core import HomeAssistant
 
 from ..const import DOMAIN
 from ..coordinator import EcoGuardDataUpdateCoordinator
-from ..helpers import round_to_max_digits
+from ..helpers import round_to_max_digits, get_timezone
 from ..translations import (
     async_get_translation,
     get_translation_default,
 )
 
 from ..sensor_helpers import (
-    async_update_entity_registry_name,
     slugify_name,
     utility_code_to_slug,
 )
@@ -482,13 +481,10 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
         self._attr_unique_id = f"{DOMAIN}_{unique_id_suffix}"
 
         # Sensor attributes
-        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, str(coordinator.node_id))},
-            "name": device_name,
-            "manufacturer": "EcoGuard",
-            "model": installation.get("DeviceTypeDisplay", "Unknown"),
-        }
+        self._attr_device_info = self._get_device_info(
+            coordinator.node_id,
+            model=installation.get("DeviceTypeDisplay", "Unknown"),
+        )
 
         # Disable individual meter sensors by default (users can enable if needed)
         self._attr_entity_registry_enabled_default = False
@@ -563,12 +559,7 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
 
             meter = await async_get_translation(self._hass, "name.meter")
             new_name = f'{aggregate_name} - {meter} "{measuring_point_display}" ({utility_name})'
-            if self._attr_name != new_name:
-                self._attr_name = new_name
-                self.async_write_ha_state()
-
-                # Also update the entity registry name so it shows correctly in modals
-                await async_update_entity_registry_name(self, new_name)
+            await self._update_name_and_registry(new_name, log_level="debug")
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
@@ -618,7 +609,6 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
             if daily_values:
                 # Get timezone for date calculations
                 timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
-                from .helpers import get_timezone
                 tz = get_timezone(timezone_str)
 
                 # Calculate month boundaries
@@ -729,7 +719,6 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
                         if daily_values:
                             # Get timezone for date calculations
                             timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
-                            from .helpers import get_timezone
                             tz = get_timezone(timezone_str)
 
                             # Calculate month boundaries
@@ -764,7 +753,6 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
 
                         # Get timezone for date calculations
                         timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
-                        from .helpers import get_timezone
                         tz = get_timezone(timezone_str)
 
                         # Calculate month boundaries
@@ -938,7 +926,6 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
 
             if daily_values:
                 timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
-                from .helpers import get_timezone
                 tz = get_timezone(timezone_str)
 
                 from_date = datetime(year, month, 1, tzinfo=tz)
@@ -970,7 +957,6 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
             total_consumption = None
 
             timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
-            from .helpers import get_timezone
             tz = get_timezone(timezone_str)
 
             from_date = datetime(year, month, 1, tzinfo=tz)
@@ -1129,12 +1115,7 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
         self._attr_unique_id = f"{DOMAIN}_{unique_id_suffix}"
 
         # Sensor attributes
-        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, str(coordinator.node_id))},
-            "name": device_name,
-            "manufacturer": "EcoGuard",
-        }
+        self._attr_device_info = self._get_device_info(coordinator.node_id)
 
         # Set state class
         if aggregate_type == "con":
@@ -1194,12 +1175,7 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
                 water_name = "Combined Water"
 
             new_name = f"{aggregate_name} - {water_name}"
-            if self._attr_name != new_name:
-                self._attr_name = new_name
-                self.async_write_ha_state()
-
-                # Also update the entity registry name so it shows correctly in modals
-                await async_update_entity_registry_name(self, new_name)
+            await self._update_name_and_registry(new_name, log_level="debug")
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 

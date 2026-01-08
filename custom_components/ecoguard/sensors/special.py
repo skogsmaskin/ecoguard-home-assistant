@@ -111,10 +111,6 @@ class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
             return
 
         # Try to get from billing results cache (coordinator has this cached)
-        # Check if we have cached billing results first
-        from homeassistant.core import CoreState
-        is_starting = self.hass.state == CoreState.starting
-
         # Try to read from cache first
         now = datetime.now()
         year = now.year
@@ -298,9 +294,6 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
         # This sensor sums costs from multiple utilities, which requires async operations
-        from homeassistant.core import CoreState
-        is_starting = self.hass.state == CoreState.starting
-
         # Try to read from monthly aggregate cache first
         coordinator_data = self.coordinator.data
         if coordinator_data:
