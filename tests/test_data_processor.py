@@ -1,6 +1,6 @@
 """Tests for the data processor."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 import pytest
 from datetime import datetime
 
@@ -33,20 +33,20 @@ def data_processor(
             "Registers": [{"UtilityCode": "HW"}],
         },
     ]
-    
+
     def get_setting(name: str) -> str | None:
         if name == "Currency":
             return "NOK"
         if name == "TimeZoneIANA":
             return "Europe/Oslo"
         return None
-    
+
     latest_consumption_cache = {}
     latest_cost_cache = {}
     daily_consumption_cache = {}
     daily_price_cache = {}
     monthly_aggregate_cache = {}
-    
+
     data = {
         "measuring_points": [],
         "installations": installations,
@@ -56,16 +56,16 @@ def data_processor(
         "node_id": 123,
         "domain": "test",
     }
-    
+
     def async_set_updated_data(updated_data: dict) -> None:
         data.update(updated_data)
-    
+
     def async_update_listeners() -> None:
         pass
-    
+
     def get_listeners() -> list:
         return []
-    
+
     processor = DataProcessor(
         api=mock_api,
         node_id=123,
@@ -91,24 +91,26 @@ async def test_batch_fetch_consumption_data(
 ):
     """Test batch fetching consumption data."""
     # Mock API response
-    mock_api.get_data = AsyncMock(return_value=[
-        {
-            "ID": 1,
-            "Result": [
-                {
-                    "Utl": "CW",
-                    "Func": "con",
-                    "Unit": "m³",
-                    "Values": [
-                        {"Time": int(datetime.now().timestamp()), "Value": 10.0},
-                    ],
-                }
-            ],
-        }
-    ])
-    
+    mock_api.get_data = AsyncMock(
+        return_value=[
+            {
+                "ID": 1,
+                "Result": [
+                    {
+                        "Utl": "CW",
+                        "Func": "con",
+                        "Unit": "m³",
+                        "Values": [
+                            {"Time": int(datetime.now().timestamp()), "Value": 10.0},
+                        ],
+                    }
+                ],
+            }
+        ]
+    )
+
     await data_processor.batch_fetch_sensor_data()
-    
+
     # Verify cache was populated
     assert len(data_processor._latest_consumption_cache) > 0
     assert len(data_processor._daily_consumption_cache) > 0
@@ -122,24 +124,26 @@ async def test_batch_fetch_price_data(
 ):
     """Test batch fetching price data."""
     # Mock API response with price data
-    mock_api.get_data = AsyncMock(return_value=[
-        {
-            "ID": 1,
-            "Result": [
-                {
-                    "Utl": "CW",
-                    "Func": "price",
-                    "Unit": "NOK",
-                    "Values": [
-                        {"Time": int(datetime.now().timestamp()), "Value": 50.0},
-                    ],
-                }
-            ],
-        }
-    ])
-    
+    mock_api.get_data = AsyncMock(
+        return_value=[
+            {
+                "ID": 1,
+                "Result": [
+                    {
+                        "Utl": "CW",
+                        "Func": "price",
+                        "Unit": "NOK",
+                        "Values": [
+                            {"Time": int(datetime.now().timestamp()), "Value": 50.0},
+                        ],
+                    }
+                ],
+            }
+        ]
+    )
+
     await data_processor.batch_fetch_sensor_data()
-    
+
     # Verify cache was populated
     assert len(data_processor._latest_cost_cache) > 0
     assert len(data_processor._daily_price_cache) > 0
@@ -152,42 +156,51 @@ async def test_batch_fetch_aggregates_all_meters(
 ):
     """Test that batch fetch aggregates data across all meters."""
     # Mock API response for multiple meters
-    mock_api.get_data = AsyncMock(side_effect=[
-        # First call (meter 1)
-        [{
-            "ID": 1,
-            "Result": [
+    mock_api.get_data = AsyncMock(
+        side_effect=[
+            # First call (meter 1)
+            [
                 {
-                    "Utl": "CW",
-                    "Func": "con",
-                    "Unit": "m³",
-                    "Values": [
-                        {"Time": int(datetime.now().timestamp()), "Value": 10.0},
+                    "ID": 1,
+                    "Result": [
+                        {
+                            "Utl": "CW",
+                            "Func": "con",
+                            "Unit": "m³",
+                            "Values": [
+                                {
+                                    "Time": int(datetime.now().timestamp()),
+                                    "Value": 10.0,
+                                },
+                            ],
+                        }
                     ],
                 }
             ],
-        }],
-        # Second call (meter 2)
-        [{
-            "ID": 2,
-            "Result": [
+            # Second call (meter 2)
+            [
                 {
-                    "Utl": "HW",
-                    "Func": "con",
-                    "Unit": "m³",
-                    "Values": [
-                        {"Time": int(datetime.now().timestamp()), "Value": 5.0},
+                    "ID": 2,
+                    "Result": [
+                        {
+                            "Utl": "HW",
+                            "Func": "con",
+                            "Unit": "m³",
+                            "Values": [
+                                {"Time": int(datetime.now().timestamp()), "Value": 5.0},
+                            ],
+                        }
                     ],
                 }
             ],
-        }],
-        # Price calls
-        [],
-        [],
-    ])
-    
+            # Price calls
+            [],
+            [],
+        ]
+    )
+
     await data_processor.batch_fetch_sensor_data()
-    
+
     # Verify "all" cache entries exist
     assert "CW_all" in data_processor._latest_consumption_cache
     assert "CW_all" in data_processor._daily_consumption_cache
@@ -199,31 +212,38 @@ async def test_batch_fetch_handles_hw_zero_prices(
 ):
     """Test that HW zero prices are handled correctly (treated as Unknown)."""
     # Mock API response with all-zero HW prices
-    mock_api.get_data = AsyncMock(return_value=[
-        {
-            "ID": 2,
-            "Result": [
-                {
-                    "Utl": "HW",
-                    "Func": "price",
-                    "Unit": "NOK",
-                    "Values": [
-                        {"Time": int(datetime.now().timestamp()), "Value": 0.0},
-                        {"Time": int(datetime.now().timestamp()) - 86400, "Value": 0.0},
-                    ],
-                }
-            ],
-        }
-    ])
-    
+    mock_api.get_data = AsyncMock(
+        return_value=[
+            {
+                "ID": 2,
+                "Result": [
+                    {
+                        "Utl": "HW",
+                        "Func": "price",
+                        "Unit": "NOK",
+                        "Values": [
+                            {"Time": int(datetime.now().timestamp()), "Value": 0.0},
+                            {
+                                "Time": int(datetime.now().timestamp()) - 86400,
+                                "Value": 0.0,
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+    )
+
     await data_processor.batch_fetch_sensor_data()
-    
+
     # HW with all zeros should not be cached (treated as Unknown)
     # Verify that HW price is not in cache (or is None)
     hw_cache_key = "HW_2_metered"
     # The implementation skips caching when all prices are 0 for HW
-    assert hw_cache_key not in data_processor._latest_cost_cache or \
-           data_processor._latest_cost_cache.get(hw_cache_key) is None
+    assert (
+        hw_cache_key not in data_processor._latest_cost_cache
+        or data_processor._latest_cost_cache.get(hw_cache_key) is None
+    )
 
 
 async def test_batch_fetch_no_installations(
@@ -231,10 +251,10 @@ async def test_batch_fetch_no_installations(
 ):
     """Test that batch fetch handles empty installations gracefully."""
     data_processor._installations = []
-    
+
     # Should not raise an error
     await data_processor.batch_fetch_sensor_data()
-    
+
     # Caches should remain empty
     assert len(data_processor._latest_consumption_cache) == 0
     assert len(data_processor._latest_cost_cache) == 0

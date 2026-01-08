@@ -30,7 +30,9 @@ def get_timezone(timezone_str: str | None) -> zoneinfo.ZoneInfo:
         return zoneinfo.ZoneInfo("UTC")
 
 
-def get_month_timestamps(year: int, month: int, tz: zoneinfo.ZoneInfo) -> tuple[int, int]:
+def get_month_timestamps(
+    year: int, month: int, tz: zoneinfo.ZoneInfo
+) -> tuple[int, int]:
     """Get start and end timestamps for a month.
 
     Args:
@@ -77,7 +79,7 @@ def get_date_range_timestamps(
     to_time = int(tomorrow_start.timestamp())
 
     # Calculate from_time as start of day N days ago
-    from_date = (now_tz.date() - timedelta(days=days))
+    from_date = now_tz.date() - timedelta(days=days)
     from_start = datetime.combine(from_date, datetime.min.time(), tz)
     from_time = int(from_start.timestamp())
 
@@ -114,35 +116,35 @@ def format_cache_key(
         Formatted cache key string
     """
     parts = [prefix]
-    
+
     if utility_code:
         parts.append(utility_code)
-    
+
     if measuring_point_id is not None:
         parts.append(str(measuring_point_id))
     elif measuring_point_id is None and utility_code:
         parts.append("all")
-    
+
     if from_time is not None:
         parts.append(str(from_time))
     if to_time is not None:
         parts.append(str(to_time))
-    
+
     if aggregate_type:
         parts.append(aggregate_type)
     if cost_type:
         parts.append(cost_type)
-    
+
     if year is not None:
         parts.append(str(year))
     if month is not None:
         parts.append(f"{month:02d}")
-    
+
     # Add any additional kwargs
     for key, value in sorted(kwargs.items()):
         if value is not None:
             parts.append(f"{key}_{value}")
-    
+
     return "_".join(parts)
 
 
@@ -184,7 +186,11 @@ def log_static_info_summary(
         if properties:
             _LOGGER.debug("  Properties:")
             for prop in properties:
-                _LOGGER.debug("    - %s: %s", prop.get("Name", "Unknown"), prop.get("Value", "N/A"))
+                _LOGGER.debug(
+                    "    - %s: %s",
+                    prop.get("Name", "Unknown"),
+                    prop.get("Value", "N/A"),
+                )
 
         # Measuring Points
         measuring_points_data = node_data.get("MeasuringPoints", [])
@@ -207,11 +213,17 @@ def log_static_info_summary(
             for contract in contracts:
                 contract_date = contract.get("Date")
                 if contract_date:
-                    date_str = datetime.fromtimestamp(contract_date).strftime("%Y-%m-%d")
+                    date_str = datetime.fromtimestamp(contract_date).strftime(
+                        "%Y-%m-%d"
+                    )
                 else:
                     date_str = "N/A"
-                _LOGGER.debug("    - ID: %s, Date: %s, Code: %s",
-                             contract.get("ID"), date_str, contract.get("ContractCode"))
+                _LOGGER.debug(
+                    "    - ID: %s, Date: %s, Code: %s",
+                    contract.get("ID"),
+                    date_str,
+                    contract.get("ContractCode"),
+                )
     else:
         _LOGGER.debug("NODE DATA: Not available")
 
@@ -245,8 +257,12 @@ def log_static_info_summary(
                 to_str = "Active"
                 status = "Active"
 
-            _LOGGER.debug("  - MeasuringPointID: %s, DeviceType: %s, ExternalKey: %s",
-                         mp_id, device_type, external_key)
+            _LOGGER.debug(
+                "  - MeasuringPointID: %s, DeviceType: %s, ExternalKey: %s",
+                mp_id,
+                device_type,
+                external_key,
+            )
             _LOGGER.debug("    Status: %s, From: %s, To: %s", status, from_str, to_str)
 
             # Registers (utility codes)

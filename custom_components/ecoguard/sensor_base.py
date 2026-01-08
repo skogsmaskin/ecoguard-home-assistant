@@ -2,21 +2,31 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 import logging
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import EcoGuardDataUpdateCoordinator
-from .translations import async_get_translation
+from .translations import async_get_translation, get_translation_default
 from .sensor_helpers import async_update_entity_registry_name
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class EcoGuardBaseSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
+@dataclass(kw_only=True)
+class EcoGuardSensorEntityDescription(SensorEntityDescription):
+    """Describes EcoGuard sensor entity with description support."""
+
+    description: str | None = None
+
+
+class EcoGuardBaseSensor(
+    CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity
+):
     """Base class for EcoGuard sensors with common functionality.
 
     This class provides:
@@ -30,15 +40,20 @@ class EcoGuardBaseSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], Senso
         self,
         coordinator: EcoGuardDataUpdateCoordinator,
         hass: Any | None = None,
+        description_key: str | None = None,
     ) -> None:
         """Initialize the base sensor.
 
         Args:
             coordinator: The data update coordinator
             hass: Home Assistant instance (optional, can be set later)
+            description_key: Translation key for the sensor description (optional)
         """
         super().__init__(coordinator)
         self._hass = hass
+        self._description_key = description_key
+        self._description_text: str | None = None
+        # Entity description will be set by _set_entity_description() after name and unique_id are set
 
     async def async_added_to_hass(self) -> None:
         """When entity is added to hass, update translations and set Unknown state.
@@ -57,7 +72,42 @@ class EcoGuardBaseSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], Senso
         self._attr_native_value = None
         self._attr_available = True
         self.async_write_ha_state()
-        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
+        _LOGGER.debug(
+            "Sensor %s added to hass (Unknown state, no API calls)", self.entity_id
+        )
+
+    def _set_entity_description(self) -> None:
+        """Set the entity description in __init__ after name and unique_id are set.
+
+        This should be called at the end of each subclass's __init__ method,
+        after _attr_unique_id and _attr_name have been set.
+
+        Uses EcoGuardSensorEntityDescription which extends SensorEntityDescription
+        with a description field, following the pattern from Home Assistant docs.
+        """
+        if not self._description_key or not self._attr_unique_id or not self._attr_name:
+            return
+
+        # Get default English description for now (will be updated with translations later)
+        description_text = get_translation_default(self._description_key)
+        self._description_text = description_text
+
+        # Use custom entity description class with description support
+        self._attr_entity_description = EcoGuardSensorEntityDescription(
+            key=self._attr_unique_id,
+            name=self._attr_name,
+            description=description_text,
+        )
+        _LOGGER.debug(
+            "Set entity description for %s (unique_id: %s, description: %s)",
+            self._attr_name,
+            self._attr_unique_id,
+            (
+                description_text[:50] + "..."
+                if len(description_text) > 50
+                else description_text
+            ),
+        )
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings.
@@ -71,9 +121,42 @@ class EcoGuardBaseSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], Senso
         3. Update self._attr_name if changed
         4. Call async_update_entity_registry_name() to update the registry
         5. Update device name if needed
+        6. Update entity description with translated description
         """
         # Default implementation does nothing - subclasses should override
-        pass
+        # But we can update the description here if a key was provided
+        if self._description_key and self._hass:
+            await self._async_update_description()
+
+    async def _async_update_description(self) -> None:
+        """Update the sensor description from translations.
+
+        This method updates the description text with the translated version.
+        Should be called from _async_update_translated_name() after translations are loaded.
+        """
+        if not self._description_key or not self._hass:
+            return
+
+        try:
+            description_text = await async_get_translation(
+                self._hass, self._description_key
+            )
+            self._description_text = description_text
+
+            # Update entity description with translated description
+            if self._attr_entity_description and isinstance(
+                self._attr_entity_description, EcoGuardSensorEntityDescription
+            ):
+                self._attr_entity_description = EcoGuardSensorEntityDescription(
+                    key=self._attr_unique_id,
+                    name=self._attr_name,
+                    description=description_text,
+                )
+
+            self.async_write_ha_state()  # Update state to reflect new description in attributes
+            _LOGGER.debug("Updated sensor description for %s", self.entity_id)
+        except Exception as e:
+            _LOGGER.debug("Failed to update sensor description: %s", e)
 
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update by reading from cached data.
@@ -84,8 +167,11 @@ class EcoGuardBaseSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], Senso
         Subclasses should implement _update_from_coordinator_data() to
         handle sensor-specific data extraction.
         """
-        _LOGGER.debug("Coordinator update received for %s (data available: %s)",
-                     self.entity_id, self.coordinator.data is not None)
+        _LOGGER.debug(
+            "Coordinator update received for %s (data available: %s)",
+            self.entity_id,
+            self.coordinator.data is not None,
+        )
         self._update_from_coordinator_data()
 
     def _update_from_coordinator_data(self) -> None:
@@ -101,7 +187,34 @@ class EcoGuardBaseSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], Senso
         self._attr_available = True
         self.async_write_ha_state()
 
-    def _get_device_info(self, node_id: int, model: str | None = None) -> dict[str, Any]:
+    def _get_base_extra_state_attributes(self) -> dict[str, Any]:
+        """Get base extra state attributes including description.
+
+        Subclasses should call this and merge with their own attributes.
+        The description is also stored in the entity description, but we include it
+        in attributes as well to ensure it's visible in the UI.
+        """
+        attrs: dict[str, Any] = {}
+
+        # Get description from entity description if available, otherwise use stored text
+        description = None
+        if self._attr_entity_description and isinstance(
+            self._attr_entity_description, EcoGuardSensorEntityDescription
+        ):
+            description = self._attr_entity_description.description
+
+        if not description and self._description_text:
+            description = self._description_text
+
+        # Add description to attributes so it's visible in the UI
+        if description:
+            attrs["description"] = description
+
+        return attrs
+
+    def _get_device_info(
+        self, node_id: int, model: str | None = None
+    ) -> dict[str, Any]:
         """Get standard device info for EcoGuard sensors.
 
         Args:
@@ -146,9 +259,13 @@ class EcoGuardBaseSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], Senso
             self._attr_name = new_name
             self.async_write_ha_state()
             if log_level == "info":
-                _LOGGER.info("Updated sensor name from '%s' to '%s'", old_name, new_name)
+                _LOGGER.info(
+                    "Updated sensor name from '%s' to '%s'", old_name, new_name
+                )
             else:
-                _LOGGER.debug("Updated sensor name from '%s' to '%s'", old_name, new_name)
+                _LOGGER.debug(
+                    "Updated sensor name from '%s' to '%s'", old_name, new_name
+                )
 
         # Always update the entity registry name so it shows correctly in modals
         await async_update_entity_registry_name(self, new_name)

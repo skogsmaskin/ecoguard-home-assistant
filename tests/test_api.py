@@ -37,9 +37,7 @@ async def test_authenticate_success(api, mock_session):
     """Test successful authentication."""
     response = MagicMock()
     response.status = 200
-    response.json = AsyncMock(
-        return_value={"Authentication Tenant": "test_token"}
-    )
+    response.json = AsyncMock(return_value={"Authentication Tenant": "test_token"})
     response.text = AsyncMock(return_value="")
     response.__aenter__ = AsyncMock(return_value=response)
     response.__aexit__ = AsyncMock(return_value=None)
@@ -112,9 +110,7 @@ async def test_authenticate_token_cached(api, mock_session):
 
     response = MagicMock()
     response.status = 200
-    response.json = AsyncMock(
-        return_value={"Authentication Tenant": "new_token"}
-    )
+    response.json = AsyncMock(return_value={"Authentication Tenant": "new_token"})
     response.text = AsyncMock(return_value="")
     response.__aenter__ = AsyncMock(return_value=response)
     response.__aexit__ = AsyncMock(return_value=None)
@@ -127,6 +123,7 @@ async def test_authenticate_token_cached(api, mock_session):
     # Second call should use cached token (if not expired)
     # We need to set expires_at to future
     from datetime import datetime, timedelta
+
     api._token_expires_at = datetime.now() + timedelta(hours=1)
 
     result2 = await api.authenticate()
@@ -140,6 +137,7 @@ async def test_get_user_info(api, mock_session):
     # Set up token and expiration
     api._access_token = "test_token"
     from datetime import datetime, timedelta
+
     api._token_expires_at = datetime.now() + timedelta(hours=1)
 
     response = MagicMock()
@@ -160,6 +158,7 @@ async def test_get_nodes(api, mock_session):
     """Test getting nodes."""
     api._access_token = "test_token"
     from datetime import datetime, timedelta
+
     api._token_expires_at = datetime.now() + timedelta(hours=1)
 
     response = MagicMock()
@@ -180,8 +179,9 @@ async def test_get_nodes_with_node_id(api, mock_session):
     """Test getting nodes with specific node_id."""
     api._access_token = "test_token"
     from datetime import datetime, timedelta
+
     api._token_expires_at = datetime.now() + timedelta(hours=1)
-    
+
     # Mock _get_session to return our mock_session
     api._session = mock_session
 
@@ -207,6 +207,7 @@ async def test_get_data(api, mock_session):
     """Test getting consumption data."""
     api._access_token = "test_token"
     from datetime import datetime, timedelta
+
     api._token_expires_at = datetime.now() + timedelta(hours=1)
 
     response = MagicMock()
@@ -245,9 +246,7 @@ async def test_request_401_refresh_token(api, mock_session):
     # Refresh token response
     refresh_response = MagicMock()
     refresh_response.status = 200
-    refresh_response.json = AsyncMock(
-        return_value={"Refresh Token": "new_token"}
-    )
+    refresh_response.json = AsyncMock(return_value={"Refresh Token": "new_token"})
     refresh_response.text = AsyncMock(return_value="")
     refresh_response.__aenter__ = AsyncMock(return_value=refresh_response)
     refresh_response.__aexit__ = AsyncMock(return_value=None)
@@ -278,6 +277,7 @@ async def test_request_429_rate_limit(api, mock_session):
     """Test handling of 429 rate limit errors with retry."""
     api._access_token = "test_token"
     from datetime import datetime, timedelta
+
     api._token_expires_at = datetime.now() + timedelta(hours=1)
 
     # First two requests return 429, third succeeds
@@ -309,6 +309,7 @@ async def test_request_network_error_retry(api, mock_session):
     """Test retry on network errors."""
     api._access_token = "test_token"
     from datetime import datetime, timedelta
+
     api._token_expires_at = datetime.now() + timedelta(hours=1)
 
     # First request fails, second succeeds

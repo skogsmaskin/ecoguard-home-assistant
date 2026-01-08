@@ -5,24 +5,28 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 
-from custom_components.ecoguard import DOMAIN, async_setup, async_setup_entry, async_unload_entry
+from custom_components.ecoguard import (
+    async_setup,
+    async_setup_entry,
+    async_unload_entry,
+)
 
 # Import pytest-homeassistant-custom-component fixtures
 pytest_plugins = ("pytest_homeassistant_custom_component",)
+
 
 async def test_async_setup(hass: HomeAssistant):
     """Test async_setup."""
     result = await async_setup(hass, {})
 
     assert result is True
-    assert DOMAIN in hass.data
+    # async_setup no longer sets hass.data[DOMAIN] - it just returns True
+    # Data is now stored in entry.runtime_data instead
 
 
 async def test_async_setup_entry(hass: HomeAssistant, mock_config_entry: ConfigEntry):
     """Test async_setup_entry."""
-    with patch(
-        "custom_components.ecoguard.EcoGuardAPI"
-    ) as mock_api_class, patch(
+    with patch("custom_components.ecoguard.EcoGuardAPI") as mock_api_class, patch(
         "custom_components.ecoguard.EcoGuardDataUpdateCoordinator"
     ) as mock_coord_class, patch(
         "custom_components.ecoguard.EcoGuardLatestReceptionCoordinator"
@@ -44,19 +48,19 @@ async def test_async_setup_entry(hass: HomeAssistant, mock_config_entry: ConfigE
         await hass.async_block_till_done()
 
         assert result is True
-        assert mock_config_entry.entry_id in hass.data[DOMAIN]
-        assert "coordinator" in hass.data[DOMAIN][mock_config_entry.entry_id]
-        assert "latest_reception_coordinator" in hass.data[DOMAIN][mock_config_entry.entry_id]
-        assert "api" in hass.data[DOMAIN][mock_config_entry.entry_id]
+        # Data is now stored in entry.runtime_data instead of hass.data[DOMAIN]
+        assert hasattr(mock_config_entry, "runtime_data")
+        assert mock_config_entry.runtime_data is not None
+        assert hasattr(mock_config_entry.runtime_data, "coordinator")
+        assert hasattr(mock_config_entry.runtime_data, "latest_reception_coordinator")
+        assert hasattr(mock_config_entry.runtime_data, "api")
         mock_forward.assert_called_once_with(mock_config_entry, ["sensor"])
 
 
 async def test_async_unload_entry(hass: HomeAssistant, mock_config_entry: ConfigEntry):
     """Test async_unload_entry."""
     # Set up the entry first
-    with patch(
-        "custom_components.ecoguard.EcoGuardAPI"
-    ) as mock_api_class, patch(
+    with patch("custom_components.ecoguard.EcoGuardAPI") as mock_api_class, patch(
         "custom_components.ecoguard.EcoGuardDataUpdateCoordinator"
     ) as mock_coord_class, patch(
         "custom_components.ecoguard.EcoGuardLatestReceptionCoordinator"
@@ -88,15 +92,19 @@ async def test_async_unload_entry(hass: HomeAssistant, mock_config_entry: Config
         assert result is True
         mock_unload.assert_called_once_with(mock_config_entry, ["sensor"])
         mock_api.async_close.assert_called_once()
-        assert mock_config_entry.entry_id not in hass.data[DOMAIN]
+        # runtime_data should be cleared after unload
+        assert (
+            not hasattr(mock_config_entry, "runtime_data")
+            or mock_config_entry.runtime_data is None
+        )
 
 
-async def test_async_unload_entry_failure(hass: HomeAssistant, mock_config_entry: ConfigEntry):
+async def test_async_unload_entry_failure(
+    hass: HomeAssistant, mock_config_entry: ConfigEntry
+):
     """Test async_unload_entry when unload fails."""
     # Set up the entry first
-    with patch(
-        "custom_components.ecoguard.EcoGuardAPI"
-    ) as mock_api_class, patch(
+    with patch("custom_components.ecoguard.EcoGuardAPI") as mock_api_class, patch(
         "custom_components.ecoguard.EcoGuardDataUpdateCoordinator"
     ) as mock_coord_class, patch(
         "custom_components.ecoguard.EcoGuardLatestReceptionCoordinator"
@@ -128,5 +136,5 @@ async def test_async_unload_entry_failure(hass: HomeAssistant, mock_config_entry
         assert result is False
         # API should not be closed if unload failed
         mock_api.async_close.assert_not_called()
-        # Entry should still be in hass.data
-        assert mock_config_entry.entry_id in hass.data[DOMAIN]
+        # runtime_data should still exist if unload failed
+        assert hasattr(mock_config_entry, "runtime_data")

@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 import logging
-import zoneinfo
 
 from .helpers import get_timezone, format_cache_key
 
@@ -21,8 +20,13 @@ class MeterAggregateCalculator:
         request_deduplicator: Any,  # RequestDeduplicator
         api: Any,  # EcoGuardAPI
         get_setting: Callable[[str], str | None],
-        get_monthly_aggregate: Callable[[str, int, int, str, str], Awaitable[dict[str, Any] | None]],
-        get_hw_price_from_spot_prices: Callable[[float, int, int, float | None, float | None], Awaitable[dict[str, Any] | None]],
+        get_monthly_aggregate: Callable[
+            [str, int, int, str, str], Awaitable[dict[str, Any] | None]
+        ],
+        get_hw_price_from_spot_prices: Callable[
+            [float, int, int, float | None, float | None],
+            Awaitable[dict[str, Any] | None],
+        ],
         billing_manager: Any,  # BillingManager
         installations: list[dict[str, Any]],
     ) -> None:
@@ -191,7 +195,10 @@ class MeterAggregateCalculator:
                 for node_data in data:
                     results = node_data.get("Result", [])
                     for result in results:
-                        if result.get("Utl") == utility_code and result.get("Func") == "price":
+                        if (
+                            result.get("Utl") == utility_code
+                            and result.get("Func") == "price"
+                        ):
                             values = result.get("Values", [])
                             unit = result.get("Unit", "")
 
@@ -235,7 +242,11 @@ class MeterAggregateCalculator:
             if has_data:
                 # For hot water: if all values are 0, treat as "Unknown" (no metered price data)
                 # HW prices are typically calculated from spot prices, not from API metered data
-                if total_value == 0.0 and utility_code == "HW" and cost_type == "actual":
+                if (
+                    total_value == 0.0
+                    and utility_code == "HW"
+                    and cost_type == "actual"
+                ):
                     _LOGGER.debug(
                         "All HW price entries are 0 for meter %d (%s %d-%02d), treating as Unknown (no metered price data)",
                         measuring_point_id,
@@ -451,7 +462,10 @@ class MeterAggregateCalculator:
                 # Aggregate values for this meter
                 results = node_data.get("Result", [])
                 for result in results:
-                    if result.get("Utl") == utility_code and result.get("Func") == "con":
+                    if (
+                        result.get("Utl") == utility_code
+                        and result.get("Func") == "con"
+                    ):
                         values = result.get("Values", [])
                         unit = result.get("Unit", "")
 
@@ -557,7 +571,9 @@ class MeterAggregateCalculator:
 
             # Allocate cost proportionally
             allocated_cost = total_hw_cost * consumption_share
-            currency = total_hw_cost_data.get("unit") or self._get_setting("Currency") or "NOK"
+            currency = (
+                total_hw_cost_data.get("unit") or self._get_setting("Currency") or "NOK"
+            )
 
             _LOGGER.info(
                 "Allocated HW cost for meter %d %d-%02d: %.2f %s (meter: %.2f m3 / total: %.2f m3 = %.1f%%, total cost: %.2f %s)",
@@ -641,7 +657,9 @@ class MeterAggregateCalculator:
         meter_consumption = meter_consumption_data.get("value", 0.0)
 
         # Get rate from billing
-        rate = await self._billing_manager.get_rate_from_billing(utility_code, year, month)
+        rate = await self._billing_manager.get_rate_from_billing(
+            utility_code, year, month
+        )
 
         if rate is None:
             # For HW, try proportional allocation from aggregate estimated cost
@@ -748,7 +766,9 @@ class MeterAggregateCalculator:
         )
 
         cw_price = cw_price_data.get("value") if cw_price_data else None
-        cw_consumption = cw_consumption_data.get("value") if cw_consumption_data else None
+        cw_consumption = (
+            cw_consumption_data.get("value") if cw_consumption_data else None
+        )
 
         # Estimate HW price from spot prices
         _LOGGER.debug(
@@ -769,7 +789,9 @@ class MeterAggregateCalculator:
         )
 
         if hw_estimated_data:
-            currency = hw_estimated_data.get("unit") or self._get_setting("Currency") or "NOK"
+            currency = (
+                hw_estimated_data.get("unit") or self._get_setting("Currency") or "NOK"
+            )
             estimated_value = hw_estimated_data.get("value", 0.0)
             _LOGGER.info(
                 "Estimated HW cost for meter %d %d-%02d: %.2f %s (consumption: %.2f m3, method: %s)",

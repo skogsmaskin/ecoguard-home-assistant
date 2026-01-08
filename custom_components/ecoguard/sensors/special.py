@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 import logging
 import asyncio
@@ -22,6 +22,7 @@ from ..sensor_base import EcoGuardBaseSensor
 
 _LOGGER = logging.getLogger(__name__)
 
+
 class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
     """Sensor for other items (general fees) from billing results.
 
@@ -34,7 +35,11 @@ class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
         coordinator: EcoGuardDataUpdateCoordinator,
     ) -> None:
         """Initialize the other items sensor."""
-        super().__init__(coordinator, hass=hass)
+        super().__init__(
+            coordinator,
+            hass=hass,
+            description_key="description.cost_monthly_other_items",
+        )
         self._hass = hass
 
         # Use "Cost Monthly Other Items" format to ensure entity_id starts with "cost_monthly_other_items"
@@ -42,9 +47,7 @@ class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
         self._attr_name = get_translation_default("name.cost_monthly_other_items")
         # Build unique_id following pattern: purpose_group_sensor
         # Home Assistant strips the domain prefix, so we want: cost_monthly_other_items
-        self._attr_unique_id = (
-            f"{DOMAIN}_cost_monthly_other_items"
-        )
+        self._attr_unique_id = f"{DOMAIN}_cost_monthly_other_items"
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
@@ -62,13 +65,19 @@ class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
         self._item_count: int | None = None
         self._items: list[dict[str, Any]] = []
 
+        # Set entity description (must be called after name and unique_id are set)
+        self._set_entity_description()
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        attrs = {
-            "sensor_type": "other_items_cost",
-            "note": "Uses last bill's values (most recent billing period available)",
-        }
+        attrs = self._get_base_extra_state_attributes()
+        attrs.update(
+            {
+                "sensor_type": "other_items_cost",
+                "note": "Uses last bill's values (most recent billing period available)",
+            }
+        )
 
         if self._current_year is not None and self._current_month is not None:
             attrs["year"] = self._current_year
@@ -91,11 +100,15 @@ class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
         try:
             # Keep "Cost Monthly Other Items" format to maintain entity_id starting with "cost_monthly_other_items"
             # The translation key might be used for display, but we keep the name format consistent
-            new_name = await async_get_translation(self._hass, "name.cost_monthly_other_items")
+            new_name = await async_get_translation(
+                self._hass, "name.cost_monthly_other_items"
+            )
             await self._update_name_and_registry(new_name, log_level="debug")
+
+            # Update description
+            await self._async_update_description()
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
-
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -123,7 +136,9 @@ class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
             # Use cached data
             cost_data = cached_result.get("cost_data")
             if cost_data and cost_data.get("value") is not None:
-                self._attr_native_value = round_to_max_digits(cost_data.get("value", 0.0))
+                self._attr_native_value = round_to_max_digits(
+                    cost_data.get("value", 0.0)
+                )
                 currency = self.coordinator.get_setting("Currency") or ""
                 self._attr_native_unit_of_measurement = currency
                 self._current_year = cost_data.get("year")
@@ -143,12 +158,18 @@ class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
 
         # Only trigger async fetch if HA is fully started (not during startup)
         from homeassistant.core import CoreState
-        if self.hass and not self.hass.is_stopping and self.hass.state != CoreState.starting:
+
+        if (
+            self.hass
+            and not self.hass.is_stopping
+            and self.hass.state != CoreState.starting
+        ):
             # Add a small delay to avoid immediate API calls during sensor creation
             async def _deferred_fetch():
                 await asyncio.sleep(5.0)  # Wait 5 seconds after HA starts
                 if not self.hass.is_stopping:
                     await self._async_fetch_value()
+
             self.hass.async_create_task(_deferred_fetch())
 
     async def _async_fetch_value(self) -> None:
@@ -167,9 +188,15 @@ class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
 
         if cost_data:
             raw_value = cost_data.get("value")
-            self._attr_native_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            self._attr_native_value = (
+                round_to_max_digits(raw_value)
+                if isinstance(raw_value, (int, float))
+                else raw_value
+            )
             # Use unit from data, or fall back to default currency
-            self._attr_native_unit_of_measurement = cost_data.get("unit") or default_currency
+            self._attr_native_unit_of_measurement = (
+                cost_data.get("unit") or default_currency
+            )
             self._current_year = cost_data.get("year")
             self._current_month = cost_data.get("month")
             self._item_count = cost_data.get("item_count")
@@ -185,7 +212,6 @@ class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
 
         # Notify Home Assistant that the state has changed
         self.async_write_ha_state()
-
 
 
 class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
@@ -211,31 +237,34 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
             coordinator: The coordinator instance
             cost_type: "actual" for metered API data, "estimated" for estimated costs
         """
-        super().__init__(coordinator, hass=hass)
+        description_key = (
+            "description.cost_monthly_total_estimated"
+            if cost_type == "estimated"
+            else "description.cost_monthly_total_metered"
+        )
+        super().__init__(coordinator, hass=hass, description_key=description_key)
         self._hass = hass
 
         self._cost_type = cost_type  # "actual" (displayed as "Metered") or "estimated"
 
         # Use "Cost Monthly Aggregated" format with "All Utilities" suffix
         # This will be updated in async_added_to_hass with proper translations
-        cost_monthly_aggregated = get_translation_default("name.cost_monthly_aggregated")
+        cost_monthly_aggregated = get_translation_default(
+            "name.cost_monthly_aggregated"
+        )
         all_utilities = get_translation_default("name.all_utilities")
         if cost_type == "estimated":
             estimated = get_translation_default("name.estimated")
             self._attr_name = f"{cost_monthly_aggregated} {estimated} - {all_utilities}"
             # Build unique_id following pattern: purpose_group_total_type
             # Home Assistant strips the domain prefix, so we want: cost_monthly_total_estimated
-            self._attr_unique_id = (
-                f"{DOMAIN}_cost_monthly_total_estimated"
-            )
+            self._attr_unique_id = f"{DOMAIN}_cost_monthly_total_estimated"
         else:
             metered = get_translation_default("name.metered")
             self._attr_name = f"{cost_monthly_aggregated} {metered} - {all_utilities}"
             # Build unique_id following pattern: purpose_group_total_type
             # Home Assistant strips the domain prefix, so we want: cost_monthly_total_metered
-            self._attr_unique_id = (
-                f"{DOMAIN}_cost_monthly_total_metered"
-            )
+            self._attr_unique_id = f"{DOMAIN}_cost_monthly_total_metered"
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
@@ -252,12 +281,18 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
         self._current_month: int | None = None
         self._utilities: list[str] = []
 
+        # Set entity description (must be called after name and unique_id are set)
+        self._set_entity_description()
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        attrs = {
-            "sensor_type": "total_monthly_cost",
-        }
+        attrs = self._get_base_extra_state_attributes()
+        attrs.update(
+            {
+                "sensor_type": "total_monthly_cost",
+            }
+        )
 
         if self._current_year is not None and self._current_month is not None:
             attrs["year"] = self._current_year
@@ -267,7 +302,9 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
         if self._utilities:
             attrs["utilities"] = self._utilities
 
-        attrs["cost_type"] = "metered" if self._cost_type == "actual" else self._cost_type
+        attrs["cost_type"] = (
+            "metered" if self._cost_type == "actual" else self._cost_type
+        )
 
         return attrs
 
@@ -278,8 +315,12 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
 
         try:
             # Use "Cost Monthly Aggregated" format with "All Utilities" suffix
-            cost_monthly_aggregated = await async_get_translation(self._hass, "name.cost_monthly_aggregated")
-            all_utilities = await async_get_translation(self._hass, "name.all_utilities")
+            cost_monthly_aggregated = await async_get_translation(
+                self._hass, "name.cost_monthly_aggregated"
+            )
+            all_utilities = await async_get_translation(
+                self._hass, "name.all_utilities"
+            )
             if self._cost_type == "estimated":
                 estimated = await async_get_translation(self._hass, "name.estimated")
                 new_name = f"{cost_monthly_aggregated} {estimated} - {all_utilities}"
@@ -287,9 +328,11 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
                 metered = await async_get_translation(self._hass, "name.metered")
                 new_name = f"{cost_monthly_aggregated} {metered} - {all_utilities}"
             await self._update_name_and_registry(new_name, log_level="debug")
+
+            # Update description
+            await self._async_update_description()
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
-
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -340,12 +383,18 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
 
         # Only trigger async fetch if HA is fully started (not during startup)
         from homeassistant.core import CoreState
-        if self.hass and not self.hass.is_stopping and self.hass.state != CoreState.starting:
+
+        if (
+            self.hass
+            and not self.hass.is_stopping
+            and self.hass.state != CoreState.starting
+        ):
             # Add a small delay to avoid immediate API calls during sensor creation
             async def _deferred_fetch():
                 await asyncio.sleep(5.0)  # Wait 5 seconds after HA starts
                 if not self.hass.is_stopping:
                     await self._async_fetch_value()
+
             self.hass.async_create_task(_deferred_fetch())
 
     async def _async_fetch_value(self) -> None:
@@ -389,7 +438,11 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
         if utilities_with_data:
             raw_value = total_cost
 
-            self._attr_native_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            self._attr_native_value = (
+                round_to_max_digits(raw_value)
+                if isinstance(raw_value, (int, float))
+                else raw_value
+            )
             self._attr_native_unit_of_measurement = currency
             self._current_year = year
             self._current_month = month
@@ -406,7 +459,6 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
         self.async_write_ha_state()
 
 
-
 class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
     """Sensor for end-of-month bill estimate.
 
@@ -420,17 +472,21 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
         coordinator: EcoGuardDataUpdateCoordinator,
     ) -> None:
         """Initialize the end-of-month estimate sensor."""
-        super().__init__(coordinator, hass=hass)
+        super().__init__(
+            coordinator,
+            hass=hass,
+            description_key="description.cost_monthly_estimated_final_settlement",
+        )
         self._hass = hass
 
         # Use "Cost Monthly Estimated Final Settlement" format to ensure entity_id starts with "cost_monthly_estimated_final_settlement_"
         # This will be updated in async_added_to_hass with proper translations
-        self._attr_name = get_translation_default("name.cost_monthly_estimated_final_settlement")
+        self._attr_name = get_translation_default(
+            "name.cost_monthly_estimated_final_settlement"
+        )
         # Build unique_id following pattern: purpose_group_sensor
         # Home Assistant strips the domain prefix, so we want: cost_monthly_estimated_final_settlement
-        self._attr_unique_id = (
-            f"{DOMAIN}_cost_monthly_estimated_final_settlement"
-        )
+        self._attr_unique_id = f"{DOMAIN}_cost_monthly_estimated_final_settlement"
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
@@ -447,7 +503,9 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
         self._current_month: int | None = None
         self._days_elapsed_calendar: int | None = None
         self._days_with_data: int | None = None
-        self._fetch_task: asyncio.Task | None = None  # Track pending fetch task to prevent duplicates
+        self._fetch_task: asyncio.Task | None = (
+            None  # Track pending fetch task to prevent duplicates
+        )
         self._days_remaining: int | None = None
         self._total_days_in_month: int | None = None
         self._latest_data_timestamp: int | None = None
@@ -466,12 +524,18 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
         self._cw_price_so_far: float | None = None
         self._hw_price_is_estimated: bool = False
 
+        # Set entity description (must be called after name and unique_id are set)
+        self._set_entity_description()
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        attrs = {
-            "sensor_type": "end_of_month_estimate",
-        }
+        attrs = self._get_base_extra_state_attributes()
+        attrs.update(
+            {
+                "sensor_type": "end_of_month_estimate",
+            }
+        )
 
         if self._current_year is not None and self._current_month is not None:
             attrs["year"] = self._current_year
@@ -491,37 +555,54 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
             # Also add a human-readable date
             try:
                 from datetime import datetime
+
                 latest_date = datetime.fromtimestamp(self._latest_data_timestamp)
                 attrs["latest_data_date"] = latest_date.isoformat()
             except Exception:
                 pass
 
         if self._hw_consumption_estimate is not None:
-            attrs["hw_consumption_estimate"] = round_to_max_digits(self._hw_consumption_estimate)
+            attrs["hw_consumption_estimate"] = round_to_max_digits(
+                self._hw_consumption_estimate
+            )
         if self._hw_price_estimate is not None:
             attrs["hw_price_estimate"] = round_to_max_digits(self._hw_price_estimate)
         if self._cw_consumption_estimate is not None:
-            attrs["cw_consumption_estimate"] = round_to_max_digits(self._cw_consumption_estimate)
+            attrs["cw_consumption_estimate"] = round_to_max_digits(
+                self._cw_consumption_estimate
+            )
         if self._cw_price_estimate is not None:
             attrs["cw_price_estimate"] = round_to_max_digits(self._cw_price_estimate)
         if self._other_items_cost is not None:
             attrs["other_items_cost"] = round_to_max_digits(self._other_items_cost)
 
         if self._hw_mean_daily_consumption is not None:
-            attrs["hw_mean_daily_consumption"] = round_to_max_digits(self._hw_mean_daily_consumption)
+            attrs["hw_mean_daily_consumption"] = round_to_max_digits(
+                self._hw_mean_daily_consumption
+            )
         if self._hw_mean_daily_price is not None:
-            attrs["hw_mean_daily_price"] = round_to_max_digits(self._hw_mean_daily_price)
+            attrs["hw_mean_daily_price"] = round_to_max_digits(
+                self._hw_mean_daily_price
+            )
         if self._cw_mean_daily_consumption is not None:
-            attrs["cw_mean_daily_consumption"] = round_to_max_digits(self._cw_mean_daily_consumption)
+            attrs["cw_mean_daily_consumption"] = round_to_max_digits(
+                self._cw_mean_daily_consumption
+            )
         if self._cw_mean_daily_price is not None:
-            attrs["cw_mean_daily_price"] = round_to_max_digits(self._cw_mean_daily_price)
+            attrs["cw_mean_daily_price"] = round_to_max_digits(
+                self._cw_mean_daily_price
+            )
 
         if self._hw_consumption_so_far is not None:
-            attrs["hw_consumption_so_far"] = round_to_max_digits(self._hw_consumption_so_far)
+            attrs["hw_consumption_so_far"] = round_to_max_digits(
+                self._hw_consumption_so_far
+            )
         if self._hw_price_so_far is not None:
             attrs["hw_price_so_far"] = round_to_max_digits(self._hw_price_so_far)
         if self._cw_consumption_so_far is not None:
-            attrs["cw_consumption_so_far"] = round_to_max_digits(self._cw_consumption_so_far)
+            attrs["cw_consumption_so_far"] = round_to_max_digits(
+                self._cw_consumption_so_far
+            )
         if self._cw_price_so_far is not None:
             attrs["cw_price_so_far"] = round_to_max_digits(self._cw_price_so_far)
 
@@ -536,16 +617,21 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
 
         try:
             # Keep "Cost Monthly Estimated Final Settlement" format to maintain entity_id starting with "cost_monthly_estimated_final_settlement"
-            new_name = await async_get_translation(self._hass, "name.cost_monthly_estimated_final_settlement")
+            new_name = await async_get_translation(
+                self._hass, "name.cost_monthly_estimated_final_settlement"
+            )
             await self._update_name_and_registry(new_name, log_level="debug")
+
+            # Update description
+            await self._async_update_description()
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
-
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
         # This sensor calculates end-of-month estimate, which requires async operations
         from homeassistant.core import CoreState
+
         is_starting = self.hass.state == CoreState.starting
 
         # Try to read from cache if available (coordinator may cache this)
@@ -561,7 +647,10 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
         if self.hass and not self.hass.is_stopping:
             # Check if there's already a pending fetch task
             if self._fetch_task is not None and not self._fetch_task.done():
-                _LOGGER.debug("Skipping duplicate fetch task for %s (task already pending)", self.entity_id)
+                _LOGGER.debug(
+                    "Skipping duplicate fetch task for %s (task already pending)",
+                    self.entity_id,
+                )
                 return
 
             if is_starting:
@@ -570,22 +659,38 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
                     await asyncio.sleep(5)  # Wait 5 seconds after startup
                     await self._async_fetch_value()
                     self._fetch_task = None  # Clear task reference when done
+
                 self._fetch_task = self.hass.async_create_task(delayed_fetch())
             else:
+
                 async def fetch_and_clear():
                     await self._async_fetch_value()
                     self._fetch_task = None  # Clear task reference when done
+
                 self._fetch_task = self.hass.async_create_task(fetch_and_clear())
 
     async def _async_fetch_value(self) -> None:
         """Fetch end-of-month estimate asynchronously."""
-        _LOGGER.info("Starting async fetch for sensor.cost_monthly_estimated_final_settlement")
+        _LOGGER.info(
+            "Starting async fetch for sensor.cost_monthly_estimated_final_settlement"
+        )
         try:
             _LOGGER.debug("Calling coordinator.get_end_of_month_estimate()")
             estimate_data = await self.coordinator.get_end_of_month_estimate()
-            _LOGGER.debug("coordinator.get_end_of_month_estimate() returned: %s", "None" if estimate_data is None else f"dict with {len(estimate_data)} keys")
+            _LOGGER.debug(
+                "coordinator.get_end_of_month_estimate() returned: %s",
+                (
+                    "None"
+                    if estimate_data is None
+                    else f"dict with {len(estimate_data)} keys"
+                ),
+            )
         except Exception as err:
-            _LOGGER.error("Exception in get_end_of_month_estimate for sensor.cost_monthly_estimated_final_settlement: %s", err, exc_info=True)
+            _LOGGER.error(
+                "Exception in get_end_of_month_estimate for sensor.cost_monthly_estimated_final_settlement: %s",
+                err,
+                exc_info=True,
+            )
             estimate_data = None
 
         # Always set currency unit to prevent statistics issues
@@ -601,9 +706,15 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
                 estimate_data.get("other_items_cost", 0),
             )
             raw_value = estimate_data.get("total_bill_estimate")
-            self._attr_native_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            self._attr_native_value = (
+                round_to_max_digits(raw_value)
+                if isinstance(raw_value, (int, float))
+                else raw_value
+            )
             # Use currency from data, or fall back to default
-            self._attr_native_unit_of_measurement = estimate_data.get("currency") or default_currency
+            self._attr_native_unit_of_measurement = (
+                estimate_data.get("currency") or default_currency
+            )
 
             self._current_year = estimate_data.get("year")
             self._current_month = estimate_data.get("month")
@@ -617,15 +728,21 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
             self._cw_consumption_estimate = estimate_data.get("cw_consumption_estimate")
             self._cw_price_estimate = estimate_data.get("cw_price_estimate")
             self._other_items_cost = estimate_data.get("other_items_cost")
-            self._hw_mean_daily_consumption = estimate_data.get("hw_mean_daily_consumption")
+            self._hw_mean_daily_consumption = estimate_data.get(
+                "hw_mean_daily_consumption"
+            )
             self._hw_mean_daily_price = estimate_data.get("hw_mean_daily_price")
-            self._cw_mean_daily_consumption = estimate_data.get("cw_mean_daily_consumption")
+            self._cw_mean_daily_consumption = estimate_data.get(
+                "cw_mean_daily_consumption"
+            )
             self._cw_mean_daily_price = estimate_data.get("cw_mean_daily_price")
             self._hw_consumption_so_far = estimate_data.get("hw_consumption_so_far")
             self._hw_price_so_far = estimate_data.get("hw_price_so_far")
             self._cw_consumption_so_far = estimate_data.get("cw_consumption_so_far")
             self._cw_price_so_far = estimate_data.get("cw_price_so_far")
-            self._hw_price_is_estimated = estimate_data.get("hw_price_is_estimated", False)
+            self._hw_price_is_estimated = estimate_data.get(
+                "hw_price_is_estimated", False
+            )
         else:
             self._attr_native_value = None
             # Always set unit even when no data to maintain consistency for statistics
@@ -656,6 +773,3 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
             )
 
         self.async_write_ha_state()
-
-
-

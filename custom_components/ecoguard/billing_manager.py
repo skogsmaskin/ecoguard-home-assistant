@@ -7,7 +7,6 @@ from typing import Any, Callable, Coroutine
 import logging
 import time
 import asyncio
-import zoneinfo
 import requests
 
 from homeassistant.core import HomeAssistant, CoreState
@@ -32,8 +31,19 @@ class BillingManager:
         pending_requests_lock: asyncio.Lock,
         get_setting: Callable[[str], str | None],
         billing_cache_ttl: float = 86400.0,
-        get_monthly_aggregate: Callable[[str, int, int, str, str], Coroutine[Any, Any, dict[str, Any] | None]] | None = None,
-        get_hw_price_from_spot_prices: Callable[[float, int, int, float | None, float | None], Coroutine[Any, Any, dict[str, Any] | None]] | None = None,
+        get_monthly_aggregate: (
+            Callable[
+                [str, int, int, str, str], Coroutine[Any, Any, dict[str, Any] | None]
+            ]
+            | None
+        ) = None,
+        get_hw_price_from_spot_prices: (
+            Callable[
+                [float, int, int, float | None, float | None],
+                Coroutine[Any, Any, dict[str, Any] | None],
+            ]
+            | None
+        ) = None,
         nord_pool_area: str | None = None,
     ) -> None:
         """Initialize the billing manager.
@@ -146,7 +156,7 @@ class BillingManager:
         if self.hass.state == CoreState.starting:
             _LOGGER.debug(
                 "Deferring billing results API call for key %s (HA is starting, using cached data if available)",
-                cache_key
+                cache_key,
             )
             # Return expired cached data if available, or empty list
             if cache_key in self._billing_cache:
@@ -200,7 +210,7 @@ class BillingManager:
 
         try:
             return await task
-        except Exception as err:
+        except Exception:
             # Clean up on error
             async with self._pending_requests_lock:
                 if cache_key in self._pending_requests:
@@ -262,9 +272,7 @@ class BillingManager:
             # Find the most recent billing result that has rate information for this utility
             # Sort by end time descending to get most recent billing period first
             sorted_results = sorted(
-                billing_results,
-                key=lambda x: x.get("End", 0),
-                reverse=True
+                billing_results, key=lambda x: x.get("End", 0), reverse=True
             )
 
             for billing_result in sorted_results:
@@ -287,10 +295,18 @@ class BillingManager:
                             rate_unit = item.get("RateUnit", "")
 
                             # Look for variable charges (C1 type) with m3 unit
-                            if component_type in ("C1", "C2") and rate_unit == "m3" and rate is not None:
+                            if (
+                                component_type in ("C1", "C2")
+                                and rate_unit == "m3"
+                                and rate is not None
+                            ):
                                 # Convert billing period timestamps to readable dates for logging
-                                billing_start_date = datetime.fromtimestamp(billing_start, tz=tz).strftime("%Y-%m-%d")
-                                billing_end_date = datetime.fromtimestamp(billing_end, tz=tz).strftime("%Y-%m-%d")
+                                billing_start_date = datetime.fromtimestamp(
+                                    billing_start, tz=tz
+                                ).strftime("%Y-%m-%d")
+                                billing_end_date = datetime.fromtimestamp(
+                                    billing_end, tz=tz
+                                ).strftime("%Y-%m-%d")
 
                                 _LOGGER.debug(
                                     "Found rate for %s: %.2f %s (from billing period %s to %s)",
@@ -358,9 +374,7 @@ class BillingManager:
 
             # Sort by end date descending to get most recent first
             sorted_results = sorted(
-                billing_results,
-                key=lambda x: x.get("End", 0),
-                reverse=True
+                billing_results, key=lambda x: x.get("End", 0), reverse=True
             )
 
             # Find the most recent billing result with "other items" (Øvrig)
@@ -393,17 +407,24 @@ class BillingManager:
 
                             for item in items:
                                 item_total = item.get("Total", 0)
-                                if isinstance(item_total, (int, float)) and item_total > 0:
+                                if (
+                                    isinstance(item_total, (int, float))
+                                    and item_total > 0
+                                ):
                                     total_cost += item_total
 
                                     # Collect item details for logging
-                                    item_name = item.get("PriceComponent", {}).get("Name", "Unknown")
+                                    item_name = item.get("PriceComponent", {}).get(
+                                        "Name", "Unknown"
+                                    )
                                     item_rate = item.get("Rate", 0)
-                                    item_details.append({
-                                        "name": item_name,
-                                        "rate": item_rate,
-                                        "total": item_total,
-                                    })
+                                    item_details.append(
+                                        {
+                                            "name": item_name,
+                                            "rate": item_rate,
+                                            "total": item_total,
+                                        }
+                                    )
 
                             if total_cost > 0:
                                 # Apply rounding from the part to match the actual bill
@@ -422,8 +443,20 @@ class BillingManager:
                                     currency,
                                     year,
                                     month,
-                                    datetime.fromtimestamp(billing_start, tz=tz).strftime("%Y-%m-%d") if billing_start else "unknown",
-                                    datetime.fromtimestamp(billing_end, tz=tz).strftime("%Y-%m-%d") if billing_end else "unknown",
+                                    (
+                                        datetime.fromtimestamp(
+                                            billing_start, tz=tz
+                                        ).strftime("%Y-%m-%d")
+                                        if billing_start
+                                        else "unknown"
+                                    ),
+                                    (
+                                        datetime.fromtimestamp(
+                                            billing_end, tz=tz
+                                        ).strftime("%Y-%m-%d")
+                                        if billing_end
+                                        else "unknown"
+                                    ),
                                     len(item_details),
                                     rounding,
                                 )
@@ -444,7 +477,9 @@ class BillingManager:
                                     "rounding": rounding,
                                 }
 
-            _LOGGER.debug("No other items found in billing results for %d-%02d", year, month)
+            _LOGGER.debug(
+                "No other items found in billing results for %d-%02d", year, month
+            )
             return None
 
         except Exception as err:
@@ -500,7 +535,9 @@ class BillingManager:
             # For CW, try billing results first, then fall back to calculation
             if utility_code == "HW":
                 if not self._get_monthly_aggregate:
-                    _LOGGER.warning("get_monthly_aggregate callback not provided, cannot calculate HW price")
+                    _LOGGER.warning(
+                        "get_monthly_aggregate callback not provided, cannot calculate HW price"
+                    )
                     return None
 
                 # Get monthly consumption
@@ -513,7 +550,9 @@ class BillingManager:
                 )
 
                 if not consumption_data:
-                    _LOGGER.debug("No consumption data for %s %d-%02d", utility_code, year, month)
+                    _LOGGER.debug(
+                        "No consumption data for %s %d-%02d", utility_code, year, month
+                    )
                     return None
 
                 consumption = consumption_data.get("value")
@@ -523,7 +562,7 @@ class BillingManager:
                 # Try to calculate using spot prices for current month
                 # This gives more accurate pricing for recent consumption
                 now = datetime.now(tz)
-                is_current_month = (year == now.year and month == now.month)
+                is_current_month = year == now.year and month == now.month
 
                 if is_current_month and self._get_hw_price_from_spot_prices:
                     _LOGGER.debug(
@@ -541,7 +580,9 @@ class BillingManager:
                         aggregate_type="price",
                         cost_type="actual",
                     )
-                    cold_water_price = cw_price_data.get("value") if cw_price_data else None
+                    cold_water_price = (
+                        cw_price_data.get("value") if cw_price_data else None
+                    )
 
                     # Also get CW consumption to avoid fetching it again in the spot price function
                     cw_consumption_data = await self._get_monthly_aggregate(
@@ -551,7 +592,11 @@ class BillingManager:
                         aggregate_type="con",
                         cost_type="actual",
                     )
-                    cw_consumption = cw_consumption_data.get("value") if cw_consumption_data else None
+                    cw_consumption = (
+                        cw_consumption_data.get("value")
+                        if cw_consumption_data
+                        else None
+                    )
 
                     spot_price_data = await self._get_hw_price_from_spot_prices(
                         consumption=consumption,
@@ -583,7 +628,9 @@ class BillingManager:
                 # Fall back to billing rate (for historical months or if spot prices unavailable)
                 rate = await self.get_rate_from_billing(utility_code, year, month)
                 if rate is None:
-                    _LOGGER.debug("No rate found for %s %d-%02d", utility_code, year, month)
+                    _LOGGER.debug(
+                        "No rate found for %s %d-%02d", utility_code, year, month
+                    )
                     return None
 
                 # Calculate price using billing rate
@@ -645,7 +692,10 @@ class BillingManager:
                                             has_data = True
 
                                     # Apply rounding from the part to match the actual bill
-                                    if isinstance(part_rounding, (int, float)) and has_data:
+                                    if (
+                                        isinstance(part_rounding, (int, float))
+                                        and has_data
+                                    ):
                                         total_price += part_rounding
 
                 if has_data:
@@ -660,9 +710,14 @@ class BillingManager:
                     }
 
             # Fallback for CW: calculate from consumption × rate
-            _LOGGER.debug("No billing price found for %s, calculating from consumption × rate", utility_code)
+            _LOGGER.debug(
+                "No billing price found for %s, calculating from consumption × rate",
+                utility_code,
+            )
             if not self._get_monthly_aggregate:
-                _LOGGER.warning("get_monthly_aggregate callback not provided, cannot calculate CW price")
+                _LOGGER.warning(
+                    "get_monthly_aggregate callback not provided, cannot calculate CW price"
+                )
                 return None
 
             consumption_data = await self._get_monthly_aggregate(
@@ -736,11 +791,15 @@ class BillingManager:
             Calibration ratio (typically 0.5-2.0), or None if insufficient data
         """
         if not self.nord_pool_area:
-            _LOGGER.debug("Nord Pool area not configured, cannot calculate calibration ratio")
+            _LOGGER.debug(
+                "Nord Pool area not configured, cannot calculate calibration ratio"
+            )
             return None
 
         if not NORD_POOL_AVAILABLE:
-            _LOGGER.debug("nordpool library not available, cannot calculate calibration ratio")
+            _LOGGER.debug(
+                "nordpool library not available, cannot calculate calibration ratio"
+            )
             return None
 
         try:
@@ -755,8 +814,16 @@ class BillingManager:
             start_date = (now - timedelta(days=months_back * 30)).date()
 
             # Fetch billing results for the period
-            start_timestamp = int(datetime.combine(start_date, datetime.min.time()).replace(tzinfo=tz).timestamp())
-            end_timestamp = int(datetime.combine(end_date, datetime.max.time()).replace(tzinfo=tz).timestamp())
+            start_timestamp = int(
+                datetime.combine(start_date, datetime.min.time())
+                .replace(tzinfo=tz)
+                .timestamp()
+            )
+            end_timestamp = int(
+                datetime.combine(end_date, datetime.max.time())
+                .replace(tzinfo=tz)
+                .timestamp()
+            )
 
             _LOGGER.debug(
                 "Calculating HW calibration ratio from billing data: %s to %s",
@@ -808,7 +875,11 @@ class BillingManager:
                         rate = item.get("Rate")
                         rate_unit = item.get("RateUnit", "")
 
-                        if component_type in ("C1", "C2") and rate_unit == "m3" and rate is not None:
+                        if (
+                            component_type in ("C1", "C2")
+                            and rate_unit == "m3"
+                            and rate is not None
+                        ):
                             if part_code == "HW":
                                 hw_rate = float(rate)
                             elif part_code == "CW":
@@ -856,6 +927,7 @@ class BillingManager:
                     if not NORD_POOL_AVAILABLE:
                         return None
                     from nordpool import elspot
+
                     prices_spot = elspot.Prices(currency)
                     loop = asyncio.get_event_loop()
 
@@ -863,7 +935,9 @@ class BillingManager:
                         try:
                             result = prices_spot.fetch(
                                 areas=[self.nord_pool_area],
-                                end_date=date_class(period_date.year, period_date.month, period_date.day),
+                                end_date=date_class(
+                                    period_date.year, period_date.month, period_date.day
+                                ),
                             )
                             return result
                         except Exception as e:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 import logging
 import asyncio
@@ -26,6 +26,7 @@ from ..sensor_helpers import (
 from ..sensor_base import EcoGuardBaseSensor
 
 _LOGGER = logging.getLogger(__name__)
+
 
 class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
     """Sensor for monthly aggregate consumption or price."""
@@ -54,7 +55,13 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
             natural in English. This distinction is intentional: "price" for API/internal use,
             "cost" for user-facing display.
         """
-        super().__init__(coordinator, hass=hass)
+        if aggregate_type == "con":
+            description_key = "description.consumption_monthly_aggregated"
+        elif cost_type == "estimated":
+            description_key = "description.cost_monthly_aggregated_estimated"
+        else:
+            description_key = "description.cost_monthly_aggregated_metered"
+        super().__init__(coordinator, hass=hass, description_key=description_key)
         self._hass = hass
         self._utility_code = utility_code
         self._aggregate_type = aggregate_type
@@ -68,7 +75,9 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
 
         if aggregate_type == "con":
             # Use "Consumption Monthly Aggregated" format to ensure entity_id starts with "consumption_monthly_aggregated_"
-            aggregate_name = get_translation_default("name.consumption_monthly_aggregated")
+            aggregate_name = get_translation_default(
+                "name.consumption_monthly_aggregated"
+            )
         else:
             # Use "Cost Monthly Aggregated" format to ensure entity_id starts with "cost_monthly_aggregated_"
             aggregate_name = get_translation_default("name.cost_monthly_aggregated")
@@ -96,9 +105,7 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
             # For "actual" cost_type, use "metered" in the ID for clarity
             unique_id_suffix = f"cost_monthly_aggregated_metered_{utility_slug}"
 
-        self._attr_unique_id = (
-            f"{DOMAIN}_{unique_id_suffix}"
-        )
+        self._attr_unique_id = f"{DOMAIN}_{unique_id_suffix}"
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
@@ -122,14 +129,22 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
         self._current_year: int | None = None
         self._current_month: int | None = None
 
+        # Set entity description (must be called after name and unique_id are set)
+        self._set_entity_description()
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        attrs = {
-            "utility_code": self._utility_code,
-            "aggregate_type": self._aggregate_type,
-            "cost_type": "metered" if self._cost_type == "actual" else self._cost_type,
-        }
+        attrs = self._get_base_extra_state_attributes()
+        attrs.update(
+            {
+                "utility_code": self._utility_code,
+                "aggregate_type": self._aggregate_type,
+                "cost_type": (
+                    "metered" if self._cost_type == "actual" else self._cost_type
+                ),
+            }
+        )
 
         if self._current_year is not None and self._current_month is not None:
             attrs["year"] = self._current_year
@@ -148,10 +163,14 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
 
             if self._aggregate_type == "con":
                 # Keep "Consumption Monthly Aggregated" format to maintain entity_id starting with "consumption_monthly_aggregated_"
-                aggregate_name = await async_get_translation(self._hass, "name.consumption_monthly_aggregated")
+                aggregate_name = await async_get_translation(
+                    self._hass, "name.consumption_monthly_aggregated"
+                )
             else:
                 # Keep "Cost Monthly Aggregated" format to maintain entity_id starting with "cost_monthly_aggregated_"
-                aggregate_name = await async_get_translation(self._hass, "name.cost_monthly_aggregated")
+                aggregate_name = await async_get_translation(
+                    self._hass, "name.cost_monthly_aggregated"
+                )
 
             if self._aggregate_type == "price" and self._cost_type == "estimated":
                 estimated = await async_get_translation(self._hass, "name.estimated")
@@ -164,9 +183,11 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
             # This groups similar sensors together when sorted alphabetically
             new_name = f"{aggregate_name} - {utility_name}"
             await self._update_name_and_registry(new_name, log_level="debug")
+
+            # Update description
+            await self._async_update_description()
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
-
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -222,8 +243,10 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
 
                     # Filter daily values for this month
                     month_values = [
-                        v for v in daily_values
-                        if from_time <= v.get("time", 0) < to_time and v.get("value") is not None
+                        v
+                        for v in daily_values
+                        if from_time <= v.get("time", 0) < to_time
+                        and v.get("value") is not None
                     ]
 
                     if month_values:
@@ -239,8 +262,12 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
                             "utility_code": self._utility_code,
                             "aggregate_type": self._aggregate_type,
                         }
-                        _LOGGER.debug("Calculated monthly consumption for %s from daily cache: %.2f %s",
-                                     self.entity_id, total_value, unit)
+                        _LOGGER.debug(
+                            "Calculated monthly consumption for %s from daily cache: %.2f %s",
+                            self.entity_id,
+                            total_value,
+                            unit,
+                        )
 
             elif self._aggregate_type == "price" and self._cost_type == "actual":
                 # Calculate monthly price from daily price cache
@@ -269,11 +296,16 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
                 unit = ""
 
                 for cache_key_price, daily_prices in daily_price_cache.items():
-                    if cache_key_price.startswith(f"{self._utility_code}_") and cache_key_price.endswith("_metered"):
+                    if cache_key_price.startswith(
+                        f"{self._utility_code}_"
+                    ) and cache_key_price.endswith("_metered"):
                         # Filter daily prices for this month
                         month_prices = [
-                            p for p in daily_prices
-                            if from_time <= p.get("time", 0) < to_time and p.get("value") is not None and p.get("value", 0) > 0
+                            p
+                            for p in daily_prices
+                            if from_time <= p.get("time", 0) < to_time
+                            and p.get("value") is not None
+                            and p.get("value", 0) > 0
                         ]
                         if month_prices:
                             # Sum prices for this meter
@@ -294,8 +326,12 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
                         "aggregate_type": "price",
                         "cost_type": "actual",
                     }
-                    _LOGGER.debug("Calculated monthly price for %s from daily cache: %.2f %s",
-                                 self.entity_id, total_price, currency)
+                    _LOGGER.debug(
+                        "Calculated monthly price for %s from daily cache: %.2f %s",
+                        self.entity_id,
+                        total_price,
+                        currency,
+                    )
 
         # Always set a default unit to prevent statistics issues
         default_unit = ""
@@ -304,32 +340,62 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
 
         if aggregate_data:
             raw_value = aggregate_data.get("value")
-            self._attr_native_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            self._attr_native_value = (
+                round_to_max_digits(raw_value)
+                if isinstance(raw_value, (int, float))
+                else raw_value
+            )
             # Use unit from data, or fall back to default
-            self._attr_native_unit_of_measurement = aggregate_data.get("unit") or default_unit
+            self._attr_native_unit_of_measurement = (
+                aggregate_data.get("unit") or default_unit
+            )
             self._current_year = aggregate_data.get("year")
             self._current_month = aggregate_data.get("month")
             self._attr_available = True
 
-            _LOGGER.info("Updated %s: %s %s (from cache, year=%d, month=%d)",
-                         self.entity_id, self._attr_native_value, self._attr_native_unit_of_measurement,
-                         self._current_year or year, self._current_month or month)
+            _LOGGER.info(
+                "Updated %s: %s %s (from cache, year=%d, month=%d)",
+                self.entity_id,
+                self._attr_native_value,
+                self._attr_native_unit_of_measurement,
+                self._current_year or year,
+                self._current_month or month,
+            )
         else:
             # No data available yet
             # For estimated costs (especially HW), trigger async fetch to calculate using spot prices
             if self._aggregate_type == "price" and self._cost_type == "estimated":
                 from homeassistant.core import CoreState
-                if self.hass and not self.hass.is_stopping and self.hass.state != CoreState.starting:
+
+                if (
+                    self.hass
+                    and not self.hass.is_stopping
+                    and self.hass.state != CoreState.starting
+                ):
                     # Trigger async fetch in background (non-blocking)
                     async def _fetch_estimated_cost():
                         try:
-                            _LOGGER.debug("Starting async fetch for estimated monthly aggregate: %s", self.entity_id)
+                            _LOGGER.debug(
+                                "Starting async fetch for estimated monthly aggregate: %s",
+                                self.entity_id,
+                            )
                             await self._async_fetch_value()
                         except Exception as err:
-                            _LOGGER.warning("Error in async fetch for %s: %s", self.entity_id, err, exc_info=True)
+                            _LOGGER.warning(
+                                "Error in async fetch for %s: %s",
+                                self.entity_id,
+                                err,
+                                exc_info=True,
+                            )
+
                     self.hass.async_create_task(_fetch_estimated_cost())
-                    _LOGGER.debug("Created async task for estimated monthly aggregate fetch: %s (utility: %s, year: %d, month: %d)",
-                                 self.entity_id, self._utility_code, year, month)
+                    _LOGGER.debug(
+                        "Created async task for estimated monthly aggregate fetch: %s (utility: %s, year: %d, month: %d)",
+                        self.entity_id,
+                        self._utility_code,
+                        year,
+                        month,
+                    )
 
             # No data available yet, but keep sensor available
             self._attr_native_value = None
@@ -339,8 +405,12 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
             self._current_month = None
             self._attr_available = True
 
-            _LOGGER.debug("No cached monthly aggregate for %s (cache_key: %s, available keys: %s)",
-                          self.entity_id, cache_key, list(monthly_cache.keys())[:5])
+            _LOGGER.debug(
+                "No cached monthly aggregate for %s (cache_key: %s, available keys: %s)",
+                self.entity_id,
+                cache_key,
+                list(monthly_cache.keys())[:5],
+            )
 
         self.async_write_ha_state()
 
@@ -350,9 +420,18 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
         year = now.year
         month = now.month
 
-        cost_type_to_use = self._cost_type if self._aggregate_type == "price" else "actual"
-        _LOGGER.debug("Fetching monthly aggregate for %s: utility=%s, type=%s, cost_type=%s, year=%d, month=%d",
-                     self.entity_id, self._utility_code, self._aggregate_type, cost_type_to_use, year, month)
+        cost_type_to_use = (
+            self._cost_type if self._aggregate_type == "price" else "actual"
+        )
+        _LOGGER.debug(
+            "Fetching monthly aggregate for %s: utility=%s, type=%s, cost_type=%s, year=%d, month=%d",
+            self.entity_id,
+            self._utility_code,
+            self._aggregate_type,
+            cost_type_to_use,
+            year,
+            month,
+        )
 
         aggregate_data = await self.coordinator.get_monthly_aggregate(
             utility_code=self._utility_code,
@@ -371,16 +450,28 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
 
         if aggregate_data:
             raw_value = aggregate_data.get("value")
-            self._attr_native_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            self._attr_native_value = (
+                round_to_max_digits(raw_value)
+                if isinstance(raw_value, (int, float))
+                else raw_value
+            )
             # Use unit from data, or fall back to default
-            self._attr_native_unit_of_measurement = aggregate_data.get("unit") or default_unit
+            self._attr_native_unit_of_measurement = (
+                aggregate_data.get("unit") or default_unit
+            )
             self._current_year = aggregate_data.get("year")
             self._current_month = aggregate_data.get("month")
             self._attr_available = True
 
-            _LOGGER.info("Updated %s (async fetch): %s %s (year=%d, month=%d, cost_type=%s)",
-                        self.entity_id, self._attr_native_value, self._attr_native_unit_of_measurement,
-                        self._current_year or year, self._current_month or month, cost_type_to_use)
+            _LOGGER.info(
+                "Updated %s (async fetch): %s %s (year=%d, month=%d, cost_type=%s)",
+                self.entity_id,
+                self._attr_native_value,
+                self._attr_native_unit_of_measurement,
+                self._current_year or year,
+                self._current_month or month,
+                cost_type_to_use,
+            )
 
             # Note: We don't trigger coordinator updates here because per-meter sensors are now
             # self-sufficient - they fetch aggregate data directly when needed for proportional allocation
@@ -391,12 +482,15 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
             self._current_year = None
             self._current_month = None
             self._attr_available = True
-            _LOGGER.debug("No monthly aggregate data returned for %s (utility=%s, cost_type=%s)",
-                          self.entity_id, self._utility_code, cost_type_to_use)
+            _LOGGER.debug(
+                "No monthly aggregate data returned for %s (utility=%s, cost_type=%s)",
+                self.entity_id,
+                self._utility_code,
+                cost_type_to_use,
+            )
 
         # Notify Home Assistant that the state has changed
         self.async_write_ha_state()
-
 
 
 class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
@@ -432,7 +526,13 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
             natural in English. This distinction is intentional: "price" for API/internal use,
             "cost" for user-facing display.
         """
-        super().__init__(coordinator, hass=hass)
+        if aggregate_type == "con":
+            description_key = "description.consumption_monthly_meter"
+        elif cost_type == "estimated":
+            description_key = "description.cost_monthly_meter_estimated"
+        else:
+            description_key = "description.cost_monthly_meter_metered"
+        super().__init__(coordinator, hass=hass, description_key=description_key)
         self._hass = hass
         self._installation = installation
         self._utility_code = utility_code
@@ -445,14 +545,18 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
         if measuring_point_name:
             measuring_point_display = measuring_point_name
         else:
-            measuring_point_display = get_translation_default("name.measuring_point", id=measuring_point_id)
+            measuring_point_display = get_translation_default(
+                "name.measuring_point", id=measuring_point_id
+            )
 
         utility_name = get_translation_default(f"utility.{utility_code.lower()}")
         if utility_name == f"utility.{utility_code.lower()}":  # Fallback if not found
             utility_name = utility_code
 
         if aggregate_type == "con":
-            aggregate_name = get_translation_default("name.consumption_monthly_aggregated")
+            aggregate_name = get_translation_default(
+                "name.consumption_monthly_aggregated"
+            )
         else:
             aggregate_name = get_translation_default("name.cost_monthly_aggregated")
 
@@ -466,17 +570,25 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
 
         # Format: "Aggregate Name - Meter "Measuring Point" (Utility)"
         meter = get_translation_default("name.meter")
-        self._attr_name = f'{aggregate_name} - {meter} "{measuring_point_display}" ({utility_name})'
+        self._attr_name = (
+            f'{aggregate_name} - {meter} "{measuring_point_display}" ({utility_name})'
+        )
 
         # Build unique_id following pattern: purpose_group_utility_sensor
         utility_slug = utility_code_to_slug(utility_code)
         sensor_name = slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
         if aggregate_type == "con":
-            unique_id_suffix = f"consumption_monthly_metered_{utility_slug}_{sensor_name}"
+            unique_id_suffix = (
+                f"consumption_monthly_metered_{utility_slug}_{sensor_name}"
+            )
         elif aggregate_type == "price" and cost_type == "estimated":
-            unique_id_suffix = f"cost_monthly_aggregated_estimated_{utility_slug}_{sensor_name}"
+            unique_id_suffix = (
+                f"cost_monthly_aggregated_estimated_{utility_slug}_{sensor_name}"
+            )
         else:
-            unique_id_suffix = f"cost_monthly_aggregated_metered_{utility_slug}_{sensor_name}"
+            unique_id_suffix = (
+                f"cost_monthly_aggregated_metered_{utility_slug}_{sensor_name}"
+            )
 
         self._attr_unique_id = f"{DOMAIN}_{unique_id_suffix}"
 
@@ -504,17 +616,23 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
         self._current_year: int | None = None
         self._current_month: int | None = None
 
+        # Set entity description (must be called after name and unique_id are set)
+        self._set_entity_description()
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        attrs = {
-            "measuring_point_id": self._measuring_point_id,
-            "utility_code": self._utility_code,
-            "external_key": self._installation.get("ExternalKey"),
-            "device_type": self._installation.get("DeviceTypeDisplay"),
-            "sensor_type": "monthly_meter",
-            "aggregate_type": self._aggregate_type,
-        }
+        attrs = self._get_base_extra_state_attributes()
+        attrs.update(
+            {
+                "measuring_point_id": self._measuring_point_id,
+                "utility_code": self._utility_code,
+                "external_key": self._installation.get("ExternalKey"),
+                "device_type": self._installation.get("DeviceTypeDisplay"),
+                "sensor_type": "monthly_meter",
+                "aggregate_type": self._aggregate_type,
+            }
+        )
 
         if self._current_year is not None and self._current_month is not None:
             attrs["year"] = self._current_year
@@ -546,9 +664,13 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
                 utility_name = self._utility_code
 
             if self._aggregate_type == "con":
-                aggregate_name = await async_get_translation(self._hass, "name.consumption_monthly_aggregated")
+                aggregate_name = await async_get_translation(
+                    self._hass, "name.consumption_monthly_aggregated"
+                )
             else:
-                aggregate_name = await async_get_translation(self._hass, "name.cost_monthly_aggregated")
+                aggregate_name = await async_get_translation(
+                    self._hass, "name.cost_monthly_aggregated"
+                )
 
             if self._aggregate_type == "price" and self._cost_type == "estimated":
                 estimated = await async_get_translation(self._hass, "name.estimated")
@@ -560,9 +682,11 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
             meter = await async_get_translation(self._hass, "name.meter")
             new_name = f'{aggregate_name} - {meter} "{measuring_point_display}" ({utility_name})'
             await self._update_name_and_registry(new_name, log_level="debug")
+
+            # Update description
+            await self._async_update_description()
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
-
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -591,12 +715,17 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
         # Also check per-meter cache
         per_meter_cache_key = f"{self._utility_code}_{self._measuring_point_id}_{year}_{month}_{self._aggregate_type}_{self._cost_type if self._aggregate_type == 'price' else 'actual'}"
 
-        aggregate_data = monthly_cache.get(cache_key) or monthly_cache.get(per_meter_cache_key)
+        aggregate_data = monthly_cache.get(cache_key) or monthly_cache.get(
+            per_meter_cache_key
+        )
 
         _LOGGER.debug(
             "Per-meter sensor %s checking cache: cache_key=%s, per_meter_key=%s, found=%s, value=%s",
-            self.entity_id, cache_key, per_meter_cache_key, aggregate_data is not None,
-            aggregate_data.get("value") if aggregate_data else None
+            self.entity_id,
+            cache_key,
+            per_meter_cache_key,
+            aggregate_data is not None,
+            aggregate_data.get("value") if aggregate_data else None,
         )
 
         # If not in monthly cache, try to calculate from daily cache (smart reuse!)
@@ -623,8 +752,10 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
 
                 # Filter daily values for this month
                 month_values = [
-                    v for v in daily_values
-                    if from_time <= v.get("time", 0) < to_time and v.get("value") is not None
+                    v
+                    for v in daily_values
+                    if from_time <= v.get("time", 0) < to_time
+                    and v.get("value") is not None
                 ]
 
                 if month_values:
@@ -634,7 +765,11 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
 
                     _LOGGER.debug(
                         "Calculated monthly consumption for meter %d (%s) %d-%02d from %d cached daily values (reused data!)",
-                        self._measuring_point_id, self._utility_code, year, month, len(month_values)
+                        self._measuring_point_id,
+                        self._utility_code,
+                        year,
+                        month,
+                        len(month_values),
                     )
 
                     # Create aggregate data structure
@@ -657,28 +792,42 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
             # Try proportional allocation if we don't have direct data
             if not has_direct_data:
                 # Get aggregate estimated cost for this utility - check cache first, then fetch if needed
-                aggregate_cost_key = f"{self._utility_code}_{year}_{month}_price_estimated"
+                aggregate_cost_key = (
+                    f"{self._utility_code}_{year}_{month}_price_estimated"
+                )
                 aggregate_cost_data = monthly_cache.get(aggregate_cost_key)
 
                 _LOGGER.debug(
                     "Checking proportional allocation for %s: aggregate_cost_key=%s, found_in_cache=%s",
-                    self.entity_id, aggregate_cost_key, aggregate_cost_data is not None
+                    self.entity_id,
+                    aggregate_cost_key,
+                    aggregate_cost_data is not None,
                 )
 
                 # If not in cache, fetch it directly (self-sufficient approach)
                 if not aggregate_cost_data:
                     from homeassistant.core import CoreState
-                    if self.hass and not self.hass.is_stopping and self.hass.state != CoreState.starting:
+
+                    if (
+                        self.hass
+                        and not self.hass.is_stopping
+                        and self.hass.state != CoreState.starting
+                    ):
                         # Fetch aggregate data asynchronously
                         async def _fetch_aggregate_and_calculate():
                             try:
-                                _LOGGER.debug("Fetching aggregate estimated cost for %s to calculate proportional allocation", self.entity_id)
-                                aggregate_cost_data = await self.coordinator.get_monthly_aggregate(
-                                    utility_code=self._utility_code,
-                                    year=year,
-                                    month=month,
-                                    aggregate_type="price",
-                                    cost_type="estimated",
+                                _LOGGER.debug(
+                                    "Fetching aggregate estimated cost for %s to calculate proportional allocation",
+                                    self.entity_id,
+                                )
+                                aggregate_cost_data = (
+                                    await self.coordinator.get_monthly_aggregate(
+                                        utility_code=self._utility_code,
+                                        year=year,
+                                        month=month,
+                                        aggregate_type="price",
+                                        cost_type="estimated",
+                                    )
                                 )
 
                                 if aggregate_cost_data:
@@ -687,8 +836,12 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
                                         aggregate_cost_data, year, month
                                     )
                             except Exception as err:
-                                _LOGGER.warning("Error fetching aggregate data for proportional allocation in %s: %s",
-                                              self.entity_id, err, exc_info=True)
+                                _LOGGER.warning(
+                                    "Error fetching aggregate data for proportional allocation in %s: %s",
+                                    self.entity_id,
+                                    err,
+                                    exc_info=True,
+                                )
 
                         self.hass.async_create_task(_fetch_aggregate_and_calculate())
                         # Return early - will update when fetch completes
@@ -699,7 +852,9 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
                     total_estimated_cost = aggregate_cost_data.get("value")
                     _LOGGER.debug(
                         "Found aggregate cost data for %s: value=%s, unit=%s - calculating proportional allocation",
-                        self.entity_id, total_estimated_cost, aggregate_cost_data.get("unit")
+                        self.entity_id,
+                        total_estimated_cost,
+                        aggregate_cost_data.get("unit"),
                     )
 
                     # Calculate proportional allocation synchronously (since we have the data)
@@ -712,13 +867,19 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
                         per_meter_consumption = per_meter_con_data.get("value")
                     else:
                         # Calculate from daily consumption cache
-                        daily_cache = coordinator_data.get("daily_consumption_cache", {})
-                        cache_key_daily = f"{self._utility_code}_{self._measuring_point_id}"
+                        daily_cache = coordinator_data.get(
+                            "daily_consumption_cache", {}
+                        )
+                        cache_key_daily = (
+                            f"{self._utility_code}_{self._measuring_point_id}"
+                        )
                         daily_values = daily_cache.get(cache_key_daily)
 
                         if daily_values:
                             # Get timezone for date calculations
-                            timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+                            timezone_str = (
+                                self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+                            )
                             tz = get_timezone(timezone_str)
 
                             # Calculate month boundaries
@@ -733,26 +894,36 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
 
                             # Filter daily values for this month
                             month_values = [
-                                v for v in daily_values
-                                if from_time <= v.get("time", 0) < to_time and v.get("value") is not None
+                                v
+                                for v in daily_values
+                                if from_time <= v.get("time", 0) < to_time
+                                and v.get("value") is not None
                             ]
 
                             if month_values:
-                                per_meter_consumption = sum(v["value"] for v in month_values)
+                                per_meter_consumption = sum(
+                                    v["value"] for v in month_values
+                                )
 
                     # Get total consumption for this utility (aggregate)
-                    total_consumption_key = f"{self._utility_code}_{year}_{month}_con_actual"
+                    total_consumption_key = (
+                        f"{self._utility_code}_{year}_{month}_con_actual"
+                    )
                     total_consumption_data = monthly_cache.get(total_consumption_key)
 
                     if total_consumption_data:
                         total_consumption = total_consumption_data.get("value")
                     else:
                         # Calculate total consumption from daily cache
-                        daily_cache = coordinator_data.get("daily_consumption_cache", {})
+                        daily_cache = coordinator_data.get(
+                            "daily_consumption_cache", {}
+                        )
                         total_consumption = None
 
                         # Get timezone for date calculations
-                        timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+                        timezone_str = (
+                            self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+                        )
                         tz = get_timezone(timezone_str)
 
                         # Calculate month boundaries
@@ -770,11 +941,15 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
                         if aggregate_cache_key in daily_cache:
                             daily_values = daily_cache[aggregate_cache_key]
                             month_values = [
-                                v for v in daily_values
-                                if from_time <= v.get("time", 0) < to_time and v.get("value") is not None
+                                v
+                                for v in daily_values
+                                if from_time <= v.get("time", 0) < to_time
+                                and v.get("value") is not None
                             ]
                             if month_values:
-                                total_consumption = sum(v["value"] for v in month_values)
+                                total_consumption = sum(
+                                    v["value"] for v in month_values
+                                )
 
                         # If no aggregate key, sum all meters for this utility
                         if total_consumption is None:
@@ -783,17 +958,23 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
                                 if cache_key.startswith(f"{self._utility_code}_"):
                                     # Filter daily values for this month
                                     month_values = [
-                                        v for v in daily_values
-                                        if from_time <= v.get("time", 0) < to_time and v.get("value") is not None
+                                        v
+                                        for v in daily_values
+                                        if from_time <= v.get("time", 0) < to_time
+                                        and v.get("value") is not None
                                     ]
                                     if month_values:
-                                        total_consumption += sum(v["value"] for v in month_values)
+                                        total_consumption += sum(
+                                            v["value"] for v in month_values
+                                        )
 
                     # Calculate proportional cost
-                    if (per_meter_consumption is not None and
-                        total_consumption is not None and
-                        total_consumption > 0 and
-                        total_estimated_cost is not None):
+                    if (
+                        per_meter_consumption is not None
+                        and total_consumption is not None
+                        and total_consumption > 0
+                        and total_estimated_cost is not None
+                    ):
 
                         proportion = per_meter_consumption / total_consumption
                         per_meter_cost = total_estimated_cost * proportion
@@ -801,9 +982,15 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
                         _LOGGER.info(
                             "Calculated per-meter estimated cost for meter %d (%s) %d-%02d: "
                             "%.3f / %.3f = %.1f%% of %.2f = %.2f (proportional allocation)",
-                            self._measuring_point_id, self._utility_code, year, month,
-                            per_meter_consumption, total_consumption, proportion * 100,
-                            total_estimated_cost, per_meter_cost
+                            self._measuring_point_id,
+                            self._utility_code,
+                            year,
+                            month,
+                            per_meter_consumption,
+                            total_consumption,
+                            proportion * 100,
+                            total_estimated_cost,
+                            per_meter_cost,
                         )
 
                         # Create aggregate data structure
@@ -820,7 +1007,10 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
                     else:
                         _LOGGER.debug(
                             "Cannot calculate proportional cost for %s: per_meter_consumption=%s, total_consumption=%s, total_estimated_cost=%s",
-                            self.entity_id, per_meter_consumption, total_consumption, total_estimated_cost
+                            self.entity_id,
+                            per_meter_consumption,
+                            total_consumption,
+                            total_estimated_cost,
                         )
 
         default_unit = ""
@@ -830,25 +1020,40 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
         if aggregate_data:
             raw_value = aggregate_data.get("value")
             old_value = self._attr_native_value
-            new_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            new_value = (
+                round_to_max_digits(raw_value)
+                if isinstance(raw_value, (int, float))
+                else raw_value
+            )
             self._attr_native_value = new_value
-            self._attr_native_unit_of_measurement = aggregate_data.get("unit") or default_unit
+            self._attr_native_unit_of_measurement = (
+                aggregate_data.get("unit") or default_unit
+            )
             self._current_year = aggregate_data.get("year")
             self._current_month = aggregate_data.get("month")
             self._attr_available = True
 
             # Log update (always log when we have data, even if value hasn't changed)
             if old_value != new_value:
-                _LOGGER.info("Updated %s: %s -> %s %s (from cache, year=%d, month=%d)",
-                             self.entity_id, old_value, new_value,
-                             self._attr_native_unit_of_measurement,
-                             self._current_year or year, self._current_month or month)
+                _LOGGER.info(
+                    "Updated %s: %s -> %s %s (from cache, year=%d, month=%d)",
+                    self.entity_id,
+                    old_value,
+                    new_value,
+                    self._attr_native_unit_of_measurement,
+                    self._current_year or year,
+                    self._current_month or month,
+                )
             else:
                 # Log at debug level if value hasn't changed (to confirm update path is being taken)
-                _LOGGER.debug("Sensor %s already has correct value: %s %s (from cache, year=%d, month=%d)",
-                             self.entity_id, new_value,
-                             self._attr_native_unit_of_measurement,
-                             self._current_year or year, self._current_month or month)
+                _LOGGER.debug(
+                    "Sensor %s already has correct value: %s %s (from cache, year=%d, month=%d)",
+                    self.entity_id,
+                    new_value,
+                    self._attr_native_unit_of_measurement,
+                    self._current_year or year,
+                    self._current_month or month,
+                )
 
             self.async_write_ha_state()
             return
@@ -863,17 +1068,27 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
         # This makes the sensor self-sufficient - it doesn't depend on other sensors
         if self._aggregate_type == "price" and self._cost_type == "estimated":
             from homeassistant.core import CoreState
-            if self.hass and not self.hass.is_stopping and self.hass.state != CoreState.starting:
+
+            if (
+                self.hass
+                and not self.hass.is_stopping
+                and self.hass.state != CoreState.starting
+            ):
                 # Fetch aggregate data directly (self-sufficient approach)
                 async def _fetch_and_calculate_proportional():
                     try:
-                        _LOGGER.debug("Fetching aggregate estimated cost for %s to calculate proportional allocation", self.entity_id)
-                        aggregate_cost_data = await self.coordinator.get_monthly_aggregate(
-                            utility_code=self._utility_code,
-                            year=year,
-                            month=month,
-                            aggregate_type="price",
-                            cost_type="estimated",
+                        _LOGGER.debug(
+                            "Fetching aggregate estimated cost for %s to calculate proportional allocation",
+                            self.entity_id,
+                        )
+                        aggregate_cost_data = (
+                            await self.coordinator.get_monthly_aggregate(
+                                utility_code=self._utility_code,
+                                year=year,
+                                month=month,
+                                aggregate_type="price",
+                                cost_type="estimated",
+                            )
                         )
 
                         if aggregate_cost_data:
@@ -881,10 +1096,17 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
                                 aggregate_cost_data, year, month
                             )
                         else:
-                            _LOGGER.debug("No aggregate estimated cost data available for %s", self.entity_id)
+                            _LOGGER.debug(
+                                "No aggregate estimated cost data available for %s",
+                                self.entity_id,
+                            )
                     except Exception as err:
-                        _LOGGER.warning("Error fetching aggregate data for proportional allocation in %s: %s",
-                                      self.entity_id, err, exc_info=True)
+                        _LOGGER.warning(
+                            "Error fetching aggregate data for proportional allocation in %s: %s",
+                            self.entity_id,
+                            err,
+                            exc_info=True,
+                        )
 
                 self.hass.async_create_task(_fetch_and_calculate_proportional())
                 # For estimated costs, proportional allocation handles the update, so we don't need _async_fetch_value
@@ -893,12 +1115,18 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
         # For non-estimated costs (or if proportional allocation didn't trigger), try to fetch per-meter data
         # Only trigger async fetch if HA is fully started (not during startup)
         from homeassistant.core import CoreState
-        if self.hass and not self.hass.is_stopping and self.hass.state != CoreState.starting:
+
+        if (
+            self.hass
+            and not self.hass.is_stopping
+            and self.hass.state != CoreState.starting
+        ):
             # Add a small delay to avoid immediate API calls during sensor creation
             async def _deferred_fetch():
                 await asyncio.sleep(5.0)  # Wait 5 seconds after HA starts
                 if not self.hass.is_stopping:
                     await self._async_fetch_value()
+
             self.hass.async_create_task(_deferred_fetch())
 
     async def _calculate_and_update_proportional_allocation(
@@ -914,7 +1142,9 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
 
         # Get per-meter consumption
         per_meter_consumption = None
-        per_meter_con_key = f"{self._utility_code}_{self._measuring_point_id}_{year}_{month}_con_actual"
+        per_meter_con_key = (
+            f"{self._utility_code}_{self._measuring_point_id}_{year}_{month}_con_actual"
+        )
         per_meter_con_data = monthly_cache.get(per_meter_con_key)
         if per_meter_con_data:
             per_meter_consumption = per_meter_con_data.get("value")
@@ -938,8 +1168,10 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
                 to_time = int(to_date.timestamp())
 
                 month_values = [
-                    v for v in daily_values
-                    if from_time <= v.get("time", 0) < to_time and v.get("value") is not None
+                    v
+                    for v in daily_values
+                    if from_time <= v.get("time", 0) < to_time
+                    and v.get("value") is not None
                 ]
 
                 if month_values:
@@ -972,8 +1204,10 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
             if aggregate_cache_key in daily_cache:
                 daily_values = daily_cache[aggregate_cache_key]
                 month_values = [
-                    v for v in daily_values
-                    if from_time <= v.get("time", 0) < to_time and v.get("value") is not None
+                    v
+                    for v in daily_values
+                    if from_time <= v.get("time", 0) < to_time
+                    and v.get("value") is not None
                 ]
                 if month_values:
                     total_consumption = sum(v["value"] for v in month_values)
@@ -983,17 +1217,21 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
                 for cache_key, daily_values in daily_cache.items():
                     if cache_key.startswith(f"{self._utility_code}_"):
                         month_values = [
-                            v for v in daily_values
-                            if from_time <= v.get("time", 0) < to_time and v.get("value") is not None
+                            v
+                            for v in daily_values
+                            if from_time <= v.get("time", 0) < to_time
+                            and v.get("value") is not None
                         ]
                         if month_values:
                             total_consumption += sum(v["value"] for v in month_values)
 
         # Calculate proportional cost
-        if (per_meter_consumption is not None and
-            total_consumption is not None and
-            total_consumption > 0 and
-            total_estimated_cost is not None):
+        if (
+            per_meter_consumption is not None
+            and total_consumption is not None
+            and total_consumption > 0
+            and total_estimated_cost is not None
+        ):
 
             proportion = per_meter_consumption / total_consumption
             per_meter_cost = total_estimated_cost * proportion
@@ -1001,15 +1239,23 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
             _LOGGER.debug(
                 "Calculated per-meter estimated cost for meter %d (%s) %d-%02d: "
                 "%.3f / %.3f = %.1f%% of %.2f = %.2f (proportional allocation)",
-                self._measuring_point_id, self._utility_code, year, month,
-                per_meter_consumption, total_consumption, proportion * 100,
-                total_estimated_cost, per_meter_cost
+                self._measuring_point_id,
+                self._utility_code,
+                year,
+                month,
+                per_meter_consumption,
+                total_consumption,
+                proportion * 100,
+                total_estimated_cost,
+                per_meter_cost,
             )
 
             # Update sensor state
             default_unit = self.coordinator.get_setting("Currency") or "NOK"
             self._attr_native_value = round_to_max_digits(per_meter_cost)
-            self._attr_native_unit_of_measurement = aggregate_cost_data.get("unit", default_unit)
+            self._attr_native_unit_of_measurement = aggregate_cost_data.get(
+                "unit", default_unit
+            )
             self._current_year = year
             self._current_month = month
             self._attr_available = True
@@ -1017,7 +1263,10 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
         else:
             _LOGGER.debug(
                 "Cannot calculate proportional cost for %s: per_meter_consumption=%s, total_consumption=%s, total_estimated_cost=%s",
-                self.entity_id, per_meter_consumption, total_consumption, total_estimated_cost
+                self.entity_id,
+                per_meter_consumption,
+                total_consumption,
+                total_estimated_cost,
             )
 
     async def _async_fetch_value(self) -> None:
@@ -1042,8 +1291,14 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
 
         if aggregate_data:
             raw_value = aggregate_data.get("value")
-            self._attr_native_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
-            self._attr_native_unit_of_measurement = aggregate_data.get("unit") or default_unit
+            self._attr_native_value = (
+                round_to_max_digits(raw_value)
+                if isinstance(raw_value, (int, float))
+                else raw_value
+            )
+            self._attr_native_unit_of_measurement = (
+                aggregate_data.get("unit") or default_unit
+            )
             self._current_year = aggregate_data.get("year")
             self._current_month = aggregate_data.get("month")
         else:
@@ -1053,7 +1308,6 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
             self._current_month = None
 
         self.async_write_ha_state()
-
 
 
 class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
@@ -1081,13 +1335,21 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
             natural in English. This distinction is intentional: "price" for API/internal use,
             "cost" for user-facing display.
         """
-        super().__init__(coordinator, hass=hass)
+        if aggregate_type == "con":
+            description_key = "description.consumption_monthly_combined_water"
+        elif cost_type == "estimated":
+            description_key = "description.cost_monthly_combined_water_estimated"
+        else:
+            description_key = "description.cost_monthly_combined_water_metered"
+        super().__init__(coordinator, hass=hass, description_key=description_key)
         self._hass = hass
         self._aggregate_type = aggregate_type
         self._cost_type = cost_type
 
         if aggregate_type == "con":
-            aggregate_name = get_translation_default("name.consumption_monthly_aggregated")
+            aggregate_name = get_translation_default(
+                "name.consumption_monthly_aggregated"
+            )
         else:
             aggregate_name = get_translation_default("name.cost_monthly_aggregated")
 
@@ -1133,14 +1395,20 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
         self._current_year: int | None = None
         self._current_month: int | None = None
 
+        # Set entity description (must be called after name and unique_id are set)
+        self._set_entity_description()
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        attrs = {
-            "sensor_type": "combined_water",
-            "aggregate_type": self._aggregate_type,
-            "utilities": ["HW", "CW"],
-        }
+        attrs = self._get_base_extra_state_attributes()
+        attrs.update(
+            {
+                "sensor_type": "combined_water",
+                "aggregate_type": self._aggregate_type,
+                "utilities": ["HW", "CW"],
+            }
+        )
 
         if self._current_year is not None and self._current_month is not None:
             attrs["year"] = self._current_year
@@ -1159,9 +1427,13 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
 
         try:
             if self._aggregate_type == "con":
-                aggregate_name = await async_get_translation(self._hass, "name.consumption_monthly_aggregated")
+                aggregate_name = await async_get_translation(
+                    self._hass, "name.consumption_monthly_aggregated"
+                )
             else:
-                aggregate_name = await async_get_translation(self._hass, "name.cost_monthly_aggregated")
+                aggregate_name = await async_get_translation(
+                    self._hass, "name.cost_monthly_aggregated"
+                )
 
             if self._aggregate_type == "price" and self._cost_type == "estimated":
                 estimated = await async_get_translation(self._hass, "name.estimated")
@@ -1176,9 +1448,11 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
 
             new_name = f"{aggregate_name} - {water_name}"
             await self._update_name_and_registry(new_name, log_level="debug")
+
+            # Update description
+            await self._async_update_description()
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
-
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -1220,7 +1494,11 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
                     default_unit = "m³"
 
                 # Use unit from one of the data sources, or fall back to default
-                unit = (hw_data.get("unit") if hw_data else None) or (cw_data.get("unit") if cw_data else None) or default_unit
+                unit = (
+                    (hw_data.get("unit") if hw_data else None)
+                    or (cw_data.get("unit") if cw_data else None)
+                    or default_unit
+                )
 
                 self._attr_native_value = round_to_max_digits(total_value)
                 self._attr_native_unit_of_measurement = unit
@@ -1232,8 +1510,12 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
             else:
                 # Missing data for one or both utilities - show Unknown
                 if self._aggregate_type == "price" and self._cost_type == "actual":
-                    _LOGGER.debug("Missing data for monthly combined water cost: %s (hw_value=%s, cw_value=%s) - showing Unknown",
-                                 self.entity_id, hw_value, cw_value)
+                    _LOGGER.debug(
+                        "Missing data for monthly combined water cost: %s (hw_value=%s, cw_value=%s) - showing Unknown",
+                        self.entity_id,
+                        hw_value,
+                        cw_value,
+                    )
                 self._attr_native_value = None
                 default_unit = ""
                 if self._aggregate_type == "price":
@@ -1260,12 +1542,18 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
 
         # Only trigger async fetch if HA is fully started (not during startup)
         from homeassistant.core import CoreState
-        if self.hass and not self.hass.is_stopping and self.hass.state != CoreState.starting:
+
+        if (
+            self.hass
+            and not self.hass.is_stopping
+            and self.hass.state != CoreState.starting
+        ):
             # Add a small delay to avoid immediate API calls during sensor creation
             async def _deferred_fetch():
                 await asyncio.sleep(5.0)  # Wait 5 seconds after HA starts
                 if not self.hass.is_stopping:
                     await self._async_fetch_value()
+
             self.hass.async_create_task(_deferred_fetch())
 
     async def _async_fetch_value(self) -> None:
@@ -1328,4 +1616,3 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
             self._current_month = None
 
         self.async_write_ha_state()
-

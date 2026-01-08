@@ -16,7 +16,9 @@ API_SETTINGS = "/api/{domaincode}/settings"
 
 # Update Intervals
 UPDATE_INTERVAL_DATA = 3600  # 1 hour for consumption data
-UPDATE_INTERVAL_LATEST_RECEPTION = 300  # 5 minutes for latest reception (meters update frequently)
+UPDATE_INTERVAL_LATEST_RECEPTION = (
+    300  # 5 minutes for latest reception (meters update frequently)
+)
 UPDATE_INTERVAL_BILLING = 86400  # 24 hours for billing data
 
 # Data Query Defaults
@@ -43,7 +45,12 @@ UTILITY_ELECTRICITY = "E"
 UTILITY_HEAT = "HE"
 
 # All valid utility codes (for filtering/validation)
-VALID_UTILITY_CODES = (UTILITY_HOT_WATER, UTILITY_COLD_WATER, UTILITY_ELECTRICITY, UTILITY_HEAT)
+VALID_UTILITY_CODES = (
+    UTILITY_HOT_WATER,
+    UTILITY_COLD_WATER,
+    UTILITY_ELECTRICITY,
+    UTILITY_HEAT,
+)
 
 # Water utilities (for combined water sensors)
 WATER_UTILITIES = (UTILITY_HOT_WATER, UTILITY_COLD_WATER)

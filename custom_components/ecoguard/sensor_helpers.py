@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 import logging
 
 from homeassistant.components.sensor import SensorEntity
@@ -25,10 +24,10 @@ async def async_update_entity_registry_name(
         sensor: The sensor entity instance
         new_name: The new name to set in the entity registry
     """
-    if not hasattr(sensor, '_attr_unique_id') or not sensor._attr_unique_id:
+    if not hasattr(sensor, "_attr_unique_id") or not sensor._attr_unique_id:
         return
 
-    if not hasattr(sensor, 'hass') or not sensor.hass:
+    if not hasattr(sensor, "hass") or not sensor.hass:
         return
 
     try:
@@ -39,7 +38,9 @@ async def async_update_entity_registry_name(
             entity_entry = entity_registry.async_get(entity_id)
             if entity_entry and entity_entry.name != new_name:
                 entity_registry.async_update_entity(entity_id, name=new_name)
-                _LOGGER.debug("Updated entity registry name for %s to '%s'", entity_id, new_name)
+                _LOGGER.debug(
+                    "Updated entity registry name for %s to '%s'", entity_id, new_name
+                )
     except Exception as e:
         _LOGGER.debug("Failed to update entity registry name: %s", e)
 

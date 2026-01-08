@@ -107,6 +107,8 @@ async def migrate_cache_from_domain(
         try:
             store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}_{domain}")
             await store.async_remove()
-            _LOGGER.debug("Successfully migrated and removed old cache for domain %s", domain)
+            _LOGGER.debug(
+                "Successfully migrated and removed old cache for domain %s", domain
+            )
         except Exception as err:
             _LOGGER.warning("Failed to remove old cache for domain %s: %s", domain, err)

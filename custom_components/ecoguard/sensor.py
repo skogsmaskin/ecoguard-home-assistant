@@ -38,6 +38,7 @@ from .sensors import (
 
 _LOGGER = logging.getLogger(__name__)
 
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -68,12 +69,21 @@ async def async_setup_entry(
     # Create sensors for each active installation
     sensors: list[SensorEntity] = []
     active_installations = coordinator.get_active_installations()
-    _LOGGER.info("Found %d active installations for sensor creation (coordinator data available: %s)",
-                 len(active_installations), coordinator.data is not None)
+    _LOGGER.info(
+        "Found %d active installations for sensor creation (coordinator data available: %s)",
+        len(active_installations),
+        coordinator.data is not None,
+    )
     if not active_installations:
-        _LOGGER.warning("No active installations found! Coordinator data: %s, installations: %s",
-                       coordinator.data is not None,
-                       len(coordinator._installations) if hasattr(coordinator, '_installations') else 0)
+        _LOGGER.warning(
+            "No active installations found! Coordinator data: %s, installations: %s",
+            coordinator.data is not None,
+            (
+                len(coordinator._installations)
+                if hasattr(coordinator, "_installations")
+                else 0
+            ),
+        )
 
     # Track measuring points for which we've already created latest reception sensors
     measuring_points_with_reception_sensor = set()
@@ -145,14 +155,20 @@ async def async_setup_entry(
 
     _LOGGER.info("Creating %d EcoGuard sensors", len(sensors))
     if len(sensors) < 10:
-        _LOGGER.warning("Only %d sensors created, expected many more! Sensor types: %s",
-                       len(sensors),
-                       [type(s).__name__ for s in sensors[:10]])
+        _LOGGER.warning(
+            "Only %d sensors created, expected many more! Sensor types: %s",
+            len(sensors),
+            [type(s).__name__ for s in sensors[:10]],
+        )
 
     # Log sensor details for debugging
     for i, sensor in enumerate(sensors[:5]):  # Log first 5 sensors
-        _LOGGER.debug("Sensor %d: %s (unique_id: %s)", i+1, type(sensor).__name__,
-                     getattr(sensor, '_attr_unique_id', 'N/A'))
+        _LOGGER.debug(
+            "Sensor %d: %s (unique_id: %s)",
+            i + 1,
+            type(sensor).__name__,
+            getattr(sensor, "_attr_unique_id", "N/A"),
+        )
 
     async_add_entities(sensors, update_before_add=False)
 

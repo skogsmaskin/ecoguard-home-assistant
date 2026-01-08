@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 from typing import Any, Callable, Awaitable
 import asyncio
 import logging
-import zoneinfo
 
-from .nord_pool import NordPoolPriceFetcher, NORD_POOL_AVAILABLE
-from .helpers import get_timezone
+from .nord_pool import NordPoolPriceFetcher
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -81,7 +78,9 @@ class HWPriceCalculator:
                             self._calibration_ratio,
                         )
                     else:
-                        _LOGGER.debug("No calibration ratio available, using default calculation")
+                        _LOGGER.debug(
+                            "No calibration ratio available, using default calculation"
+                        )
 
             spot_price = None
             price_sensor_entity_id = None
@@ -89,8 +88,12 @@ class HWPriceCalculator:
 
             # First, try to get spot price from Nord Pool API if area is configured
             if nord_pool_area and self._nord_pool_fetcher:
-                currency = (self._get_setting("Currency") if self._get_setting else None) or "NOK"
-                timezone_str = (self._get_setting("TimeZoneIANA") if self._get_setting else None) or "UTC"
+                currency = (
+                    self._get_setting("Currency") if self._get_setting else None
+                ) or "NOK"
+                timezone_str = (
+                    self._get_setting("TimeZoneIANA") if self._get_setting else None
+                ) or "UTC"
 
                 spot_price = await self._nord_pool_fetcher.get_spot_price(
                     area_code=nord_pool_area,
@@ -119,7 +122,9 @@ class HWPriceCalculator:
 
             # If we got currency from settings but not from sensor, use it
             if not currency:
-                currency = (self._get_setting("Currency") if self._get_setting else None) or "NOK"
+                currency = (
+                    self._get_setting("Currency") if self._get_setting else None
+                ) or "NOK"
 
             # Calculate total energy needed to heat the water
             total_energy_kwh = consumption * self.ENERGY_PER_M3
@@ -195,7 +200,9 @@ class HWPriceCalculator:
             )
 
             if not currency:
-                currency = (self._get_setting("Currency") if self._get_setting else None) or "NOK"
+                currency = (
+                    self._get_setting("Currency") if self._get_setting else None
+                ) or "NOK"
 
             result = {
                 "value": round(total_cost, 2),
@@ -204,7 +211,9 @@ class HWPriceCalculator:
                 "month": month,
                 "utility_code": "HW",
                 "aggregate_type": "price",
-                "calculation_method": "spot_price_calibrated" if self._calibration_ratio else "spot_price",
+                "calculation_method": (
+                    "spot_price_calibrated" if self._calibration_ratio else "spot_price"
+                ),
                 "energy_per_m3_kwh": self.ENERGY_PER_M3,
                 "total_energy_kwh": round(total_energy_kwh, 2),
                 "spot_price_per_kwh": round(spot_price, 4),

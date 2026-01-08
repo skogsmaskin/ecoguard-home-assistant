@@ -6,7 +6,9 @@ from datetime import datetime
 
 from homeassistant.core import HomeAssistant
 
-from custom_components.ecoguard.meter_aggregate_calculator import MeterAggregateCalculator
+from custom_components.ecoguard.meter_aggregate_calculator import (
+    MeterAggregateCalculator,
+)
 from custom_components.ecoguard.request_deduplicator import RequestDeduplicator
 
 
@@ -45,30 +47,40 @@ def meter_aggregate_calculator(
             "Registers": [{"UtilityCode": "HW"}],
         },
     ]
-    
+
     def get_setting(name: str) -> str | None:
         if name == "Currency":
             return "NOK"
         if name == "TimeZoneIANA":
             return "Europe/Oslo"
         return None
-    
-    async def get_monthly_aggregate(utility_code, year, month, aggregate_type, cost_type):
+
+    async def get_monthly_aggregate(
+        utility_code, year, month, aggregate_type, cost_type
+    ):
         if utility_code == "HW" and aggregate_type == "con":
             return {"value": 100.0, "unit": "m³", "year": year, "month": month}
-        if utility_code == "HW" and aggregate_type == "price" and cost_type == "estimated":
+        if (
+            utility_code == "HW"
+            and aggregate_type == "price"
+            and cost_type == "estimated"
+        ):
             return {"value": 500.0, "unit": "NOK", "year": year, "month": month}
         return None
-    
-    async def get_hw_price_from_spot_prices(consumption, year, month, cw_price, cw_consumption):
+
+    async def get_hw_price_from_spot_prices(
+        consumption, year, month, cw_price, cw_consumption
+    ):
         return {
             "value": consumption * 50.0,
             "unit": "NOK",
         }
-    
+
     mock_billing_manager = MagicMock()
-    mock_billing_manager.get_rate_from_billing = AsyncMock(return_value=10.0)  # 10 NOK/m3
-    
+    mock_billing_manager.get_rate_from_billing = AsyncMock(
+        return_value=10.0
+    )  # 10 NOK/m3
+
     calculator = MeterAggregateCalculator(
         node_id=123,
         request_deduplicator=mock_request_deduplicator,
@@ -88,23 +100,28 @@ async def test_calculate_consumption_aggregate(
 ):
     """Test calculating consumption aggregate for a specific meter."""
     # Mock request deduplicator to return consumption data
-    mock_request_deduplicator.get_or_fetch = AsyncMock(return_value=[
-        {
-            "ID": 1,  # Matching measuring_point_id
-            "Result": [
-                {
-                    "Utl": "CW",
-                    "Func": "con",
-                    "Unit": "m³",
-                    "Values": [
-                        {"Time": int(datetime.now().timestamp()), "Value": 10.0},
-                        {"Time": int(datetime.now().timestamp()) - 86400, "Value": 9.0},
-                    ],
-                }
-            ],
-        }
-    ])
-    
+    mock_request_deduplicator.get_or_fetch = AsyncMock(
+        return_value=[
+            {
+                "ID": 1,  # Matching measuring_point_id
+                "Result": [
+                    {
+                        "Utl": "CW",
+                        "Func": "con",
+                        "Unit": "m³",
+                        "Values": [
+                            {"Time": int(datetime.now().timestamp()), "Value": 10.0},
+                            {
+                                "Time": int(datetime.now().timestamp()) - 86400,
+                                "Value": 9.0,
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+    )
+
     result = await meter_aggregate_calculator.calculate(
         utility_code="CW",
         measuring_point_id=1,
@@ -113,7 +130,7 @@ async def test_calculate_consumption_aggregate(
         month=1,
         aggregate_type="con",
     )
-    
+
     assert result is not None
     assert result["value"] == 19.0  # 10.0 + 9.0
     assert result["unit"] == "m³"
@@ -128,23 +145,28 @@ async def test_calculate_price_aggregate_metered(
 ):
     """Test calculating price aggregate (metered) for a specific meter."""
     # Mock request deduplicator to return price data
-    mock_request_deduplicator.get_or_fetch = AsyncMock(return_value=[
-        {
-            "ID": 1,
-            "Result": [
-                {
-                    "Utl": "CW",
-                    "Func": "price",
-                    "Unit": "NOK",
-                    "Values": [
-                        {"Time": int(datetime.now().timestamp()), "Value": 50.0},
-                        {"Time": int(datetime.now().timestamp()) - 86400, "Value": 45.0},
-                    ],
-                }
-            ],
-        }
-    ])
-    
+    mock_request_deduplicator.get_or_fetch = AsyncMock(
+        return_value=[
+            {
+                "ID": 1,
+                "Result": [
+                    {
+                        "Utl": "CW",
+                        "Func": "price",
+                        "Unit": "NOK",
+                        "Values": [
+                            {"Time": int(datetime.now().timestamp()), "Value": 50.0},
+                            {
+                                "Time": int(datetime.now().timestamp()) - 86400,
+                                "Value": 45.0,
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+    )
+
     result = await meter_aggregate_calculator.calculate(
         utility_code="CW",
         measuring_point_id=1,
@@ -154,7 +176,7 @@ async def test_calculate_price_aggregate_metered(
         aggregate_type="price",
         cost_type="actual",
     )
-    
+
     assert result is not None
     assert result["value"] == 95.0  # 50.0 + 45.0
     assert result["unit"] == "NOK"
@@ -168,7 +190,7 @@ async def test_calculate_price_aggregate_estimated_fallback(
     """Test calculating estimated price when API returns no data."""
     # Mock API to return no data
     mock_api.get_data = AsyncMock(return_value=[])
-    
+
     # Mock consumption calculation to return data
     with patch.object(
         meter_aggregate_calculator,
@@ -185,7 +207,7 @@ async def test_calculate_price_aggregate_estimated_fallback(
             aggregate_type="price",
             cost_type="estimated",
         )
-        
+
         # Should calculate from consumption × rate
         assert result is not None
         assert result["value"] == 100.0  # 10.0 m³ × 10 NOK/m³
@@ -202,7 +224,8 @@ async def test_calculate_hw_proportional_allocation(
         "calculate",
         new_callable=AsyncMock,
         side_effect=lambda **kwargs: (
-            {"value": 20.0, "unit": "m³"} if kwargs.get("aggregate_type") == "con"
+            {"value": 20.0, "unit": "m³"}
+            if kwargs.get("aggregate_type") == "con"
             else None
         ),
     ):
@@ -212,7 +235,7 @@ async def test_calculate_hw_proportional_allocation(
             year=2024,
             month=1,
         )
-        
+
         # Meter consumption: 20 m³
         # Total consumption: 100 m³
         # Total cost: 500 NOK

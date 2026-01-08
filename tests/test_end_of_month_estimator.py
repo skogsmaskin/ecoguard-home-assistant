@@ -1,6 +1,6 @@
 """Tests for the end-of-month estimator."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 import pytest
 from datetime import datetime
 
@@ -35,39 +35,61 @@ def end_of_month_estimator(
     """Create an end-of-month estimator instance for testing."""
     daily_consumption_cache = {
         "HW_all": [
-            {"time": int(datetime.now().timestamp()) - 86400, "value": 5.0, "unit": "m³"},
-            {"time": int(datetime.now().timestamp()) - 172800, "value": 4.5, "unit": "m³"},
+            {
+                "time": int(datetime.now().timestamp()) - 86400,
+                "value": 5.0,
+                "unit": "m³",
+            },
+            {
+                "time": int(datetime.now().timestamp()) - 172800,
+                "value": 4.5,
+                "unit": "m³",
+            },
         ],
         "CW_all": [
-            {"time": int(datetime.now().timestamp()) - 86400, "value": 10.0, "unit": "m³"},
-            {"time": int(datetime.now().timestamp()) - 172800, "value": 9.5, "unit": "m³"},
+            {
+                "time": int(datetime.now().timestamp()) - 86400,
+                "value": 10.0,
+                "unit": "m³",
+            },
+            {
+                "time": int(datetime.now().timestamp()) - 172800,
+                "value": 9.5,
+                "unit": "m³",
+            },
         ],
     }
-    
+
     def get_setting(name: str) -> str | None:
         if name == "Currency":
             return "NOK"
         if name == "TimeZoneIANA":
             return "Europe/Oslo"
         return None
-    
-    async def get_hw_price_from_spot_prices(consumption, year, month, cw_price, cw_consumption):
+
+    async def get_hw_price_from_spot_prices(
+        consumption, year, month, cw_price, cw_consumption
+    ):
         return {
             "value": consumption * 50.0,  # Simplified calculation
             "unit": "NOK",
         }
-    
-    async def get_monthly_aggregate(utility_code, year, month, aggregate_type, cost_type):
+
+    async def get_monthly_aggregate(
+        utility_code, year, month, aggregate_type, cost_type
+    ):
         if utility_code == "CW" and aggregate_type == "price":
             return {"value": 100.0, "unit": "NOK", "year": year, "month": month}
         return None
-    
+
     mock_billing_manager = MagicMock()
-    mock_billing_manager.get_monthly_other_items_cost = AsyncMock(return_value={
-        "value": 50.0,
-        "unit": "NOK",
-    })
-    
+    mock_billing_manager.get_monthly_other_items_cost = AsyncMock(
+        return_value={
+            "value": 50.0,
+            "unit": "NOK",
+        }
+    )
+
     estimator = EndOfMonthEstimator(
         node_id=123,
         request_deduplicator=mock_request_deduplicator,
@@ -86,7 +108,7 @@ async def test_calculate_end_of_month_estimate(
 ):
     """Test calculating end-of-month estimate."""
     result = await end_of_month_estimator.calculate()
-    
+
     assert result is not None
     assert "total_bill_estimate" in result
     assert "currency" in result
@@ -103,7 +125,7 @@ async def test_calculate_uses_cache_first(
 ):
     """Test that cached consumption data is used before making API calls."""
     result = await end_of_month_estimator.calculate()
-    
+
     # Should have used cached data (mean daily from cache)
     assert result is not None
     # The estimator should use cached consumption data
@@ -116,7 +138,7 @@ async def test_calculate_includes_other_items(
 ):
     """Test that other items cost is included in the estimate."""
     result = await end_of_month_estimator.calculate()
-    
+
     assert result is not None
     assert "other_items_cost" in result
     assert result["other_items_cost"] == 50.0
@@ -128,10 +150,12 @@ async def test_calculate_no_data_available(
     """Test that result is returned even when no data is available (with zeros)."""
     # Clear cache
     end_of_month_estimator._daily_consumption_cache = {}
-    end_of_month_estimator._request_deduplicator.get_or_fetch = AsyncMock(return_value=[])
-    
+    end_of_month_estimator._request_deduplicator.get_or_fetch = AsyncMock(
+        return_value=[]
+    )
+
     result = await end_of_month_estimator.calculate()
-    
+
     # The implementation returns a result dict even with no data (zeros)
     # It only returns None if days_elapsed <= 0
     if result is not None:

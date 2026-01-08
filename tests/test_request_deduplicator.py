@@ -1,6 +1,5 @@
 """Tests for request deduplication."""
 
-from unittest.mock import AsyncMock, MagicMock
 import pytest
 import asyncio
 
@@ -15,7 +14,7 @@ def deduplicator(hass: HomeAssistant) -> RequestDeduplicator:
     cache = {}
     pending_requests = {}
     lock = asyncio.Lock()
-    
+
     return RequestDeduplicator(
         hass=hass,
         cache_ttl=60.0,
@@ -31,15 +30,15 @@ async def test_get_or_fetch_single_request(
 ):
     """Test that a single request is executed."""
     call_count = 0
-    
+
     async def mock_fetch():
         nonlocal call_count
         call_count += 1
         await asyncio.sleep(0.01)  # Simulate async work
         return {"data": "test"}
-    
+
     result = await deduplicator.get_or_fetch("test_key", mock_fetch)
-    
+
     assert call_count == 1
     assert result == {"data": "test"}
 
@@ -49,13 +48,13 @@ async def test_get_or_fetch_concurrent_requests(
 ):
     """Test that concurrent requests for the same key are deduplicated."""
     call_count = 0
-    
+
     async def mock_fetch():
         nonlocal call_count
         call_count += 1
         await asyncio.sleep(0.1)  # Simulate async work
         return {"data": "test", "call": call_count}
-    
+
     # Make 5 concurrent requests with the same key
     results = await asyncio.gather(
         deduplicator.get_or_fetch("test_key", mock_fetch),
@@ -64,7 +63,7 @@ async def test_get_or_fetch_concurrent_requests(
         deduplicator.get_or_fetch("test_key", mock_fetch),
         deduplicator.get_or_fetch("test_key", mock_fetch),
     )
-    
+
     # Should only call once
     assert call_count == 1
     # All results should be the same
@@ -76,20 +75,20 @@ async def test_get_or_fetch_different_keys(
 ):
     """Test that requests with different keys are not deduplicated."""
     call_count = 0
-    
+
     async def mock_fetch():
         nonlocal call_count
         call_count += 1
         await asyncio.sleep(0.01)
         return {"data": "test"}
-    
+
     # Make requests with different keys
     await asyncio.gather(
         deduplicator.get_or_fetch("key1", mock_fetch),
         deduplicator.get_or_fetch("key2", mock_fetch),
         deduplicator.get_or_fetch("key3", mock_fetch),
     )
-    
+
     # Should call 3 times (once per key)
     assert call_count == 3
 
@@ -99,16 +98,16 @@ async def test_get_or_fetch_cache_hit(
 ):
     """Test that cached results are returned without calling fetch."""
     call_count = 0
-    
+
     async def mock_fetch():
         nonlocal call_count
         call_count += 1
         return {"data": "test"}
-    
+
     # First call
     result1 = await deduplicator.get_or_fetch("test_key", mock_fetch)
     assert call_count == 1
-    
+
     # Second call should use cache
     result2 = await deduplicator.get_or_fetch("test_key", mock_fetch)
     assert call_count == 1  # Still 1

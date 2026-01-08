@@ -19,8 +19,13 @@ class MonthlyAggregateCalculator:
         request_deduplicator: Any,  # RequestDeduplicator
         api: Any,  # EcoGuardAPI
         get_setting: Callable[[str], str | None],
-        get_monthly_aggregate: Callable[[str, int, int, str, str], Awaitable[dict[str, Any] | None]],
-        get_hw_price_from_spot_prices: Callable[[float, int, int, float | None, float | None], Awaitable[dict[str, Any] | None]],
+        get_monthly_aggregate: Callable[
+            [str, int, int, str, str], Awaitable[dict[str, Any] | None]
+        ],
+        get_hw_price_from_spot_prices: Callable[
+            [float, int, int, float | None, float | None],
+            Awaitable[dict[str, Any] | None],
+        ],
         billing_manager: Any,  # BillingManager
         daily_consumption_cache: dict[str, list[dict[str, Any]]],
         daily_price_cache: dict[str, list[dict[str, Any]]],
@@ -56,37 +61,46 @@ class MonthlyAggregateCalculator:
 
     def _get_month_timestamps(self, year: int, month: int) -> tuple[int, int]:
         """Get start and end timestamps for a month."""
-        return get_month_timestamps(year, month, get_timezone(self._get_setting("TimeZoneIANA")))
+        return get_month_timestamps(
+            year, month, get_timezone(self._get_setting("TimeZoneIANA"))
+        )
 
     async def _calculate_monthly_price_from_daily_cache(
         self, utility_code: str, year: int, month: int
     ) -> dict[str, Any] | None:
         """Calculate monthly price from cached daily prices."""
         from_time, to_time = self._get_month_timestamps(year, month)
-        
+
         # Try to calculate from cached daily prices (aggregate across all meters)
         total_price = 0.0
         has_cached_data = False
-        
+
         # Sum prices from all meters for this utility
         for cache_key_price, daily_prices in self._daily_price_cache.items():
-            if cache_key_price.startswith(f"{utility_code}_") and cache_key_price.endswith("_metered"):
+            if cache_key_price.startswith(
+                f"{utility_code}_"
+            ) and cache_key_price.endswith("_metered"):
                 # Filter daily prices for this month
                 month_prices = [
-                    p for p in daily_prices
-                    if from_time <= p["time"] < to_time and p.get("value") is not None and p.get("value", 0) > 0
+                    p
+                    for p in daily_prices
+                    if from_time <= p["time"] < to_time
+                    and p.get("value") is not None
+                    and p.get("value", 0) > 0
                 ]
                 if month_prices:
                     # Sum prices for this meter
                     meter_total = sum(p["value"] for p in month_prices)
                     total_price += meter_total
                     has_cached_data = True
-        
+
         if has_cached_data:
             currency = self._get_setting("Currency") or ""
             _LOGGER.info(
                 "✓ Smart reuse: Calculated monthly price for %s %d-%02d from cached daily prices (no API call!)",
-                utility_code, year, month
+                utility_code,
+                year,
+                month,
             )
             return {
                 "value": total_price,
@@ -98,7 +112,7 @@ class MonthlyAggregateCalculator:
                 "cost_type": "actual",
                 "is_estimated": False,
             }
-        
+
         return None
 
     async def _fetch_monthly_price_from_api(
@@ -116,7 +130,7 @@ class MonthlyAggregateCalculator:
             node_id=self.node_id,
             aggregate_type="price",
         )
-        
+
         async def fetch_price_data() -> list[dict[str, Any]] | None:
             """Fetch price data from API."""
             _LOGGER.debug(
@@ -136,7 +150,7 @@ class MonthlyAggregateCalculator:
                 utilities=[f"{utility_code}[price]"],
                 include_sub_nodes=True,
             )
-        
+
         # Use request deduplicator to handle caching and deduplication
         data = await self._request_deduplicator.get_or_fetch(
             cache_key=api_cache_key,
@@ -173,7 +187,7 @@ class MonthlyAggregateCalculator:
                 "cost_type": "actual",
                 "is_estimated": False,
             }
-        
+
         return None
 
     async def _get_monthly_price_actual(
@@ -181,23 +195,27 @@ class MonthlyAggregateCalculator:
     ) -> dict[str, Any] | None:
         """Get monthly actual price aggregate."""
         # Try to calculate from cached daily prices first
-        result = await self._calculate_monthly_price_from_daily_cache(utility_code, year, month)
+        result = await self._calculate_monthly_price_from_daily_cache(
+            utility_code, year, month
+        )
         if result:
             self._monthly_aggregate_cache[cache_key] = result
             self._sync_cache_to_data()
             return result
-        
+
         _LOGGER.debug(
             "Daily price cache exists but no values for %s %d-%02d (date range mismatch?)",
-            utility_code, year, month
+            utility_code,
+            year,
+            month,
         )
-        
+
         # Fall back to API call
         result = await self._fetch_monthly_price_from_api(utility_code, year, month)
         if result:
             self._monthly_aggregate_cache[cache_key] = result
             self._sync_cache_to_data()
-        
+
         return result
 
     async def _get_monthly_price_cw(
@@ -206,9 +224,9 @@ class MonthlyAggregateCalculator:
         """Get monthly price for CW utility."""
         if utility_code != "CW":
             return None
-        
+
         from_time, to_time = self._get_month_timestamps(year, month)
-        
+
         # Create cache key for this request
         api_cache_key = format_cache_key(
             "data",
@@ -218,7 +236,7 @@ class MonthlyAggregateCalculator:
             node_id=self.node_id,
             aggregate_type="price",
         )
-        
+
         async def fetch_cw_price_data() -> list[dict[str, Any]] | None:
             """Fetch CW price data from API."""
             _LOGGER.debug(
@@ -237,7 +255,7 @@ class MonthlyAggregateCalculator:
                 utilities=[f"{utility_code}[price]"],
                 include_sub_nodes=True,
             )
-        
+
         # Use request deduplicator to handle caching and deduplication
         data = await self._request_deduplicator.get_or_fetch(
             cache_key=api_cache_key,
@@ -247,7 +265,7 @@ class MonthlyAggregateCalculator:
 
         if not data or not isinstance(data, list):
             return None
-        
+
         # Process the data
         total_price = 0.0
         has_data = False
@@ -281,7 +299,7 @@ class MonthlyAggregateCalculator:
                 "cost_type": cost_type,
                 "is_estimated": False,
             }
-        
+
         return None
 
     async def _get_monthly_price_hw_estimated(
@@ -289,7 +307,7 @@ class MonthlyAggregateCalculator:
     ) -> dict[str, Any] | None:
         """Get monthly estimated price for HW utility."""
         from_time, to_time = self._get_month_timestamps(year, month)
-        
+
         # First check if we have actual price data from API
         # Use the same deduplication pattern as other price fetches
         api_cache_key = format_cache_key(
@@ -384,7 +402,9 @@ class MonthlyAggregateCalculator:
                 )
 
                 cw_price = cw_price_data.get("value") if cw_price_data else None
-                cw_consumption = cw_consumption_data.get("value") if cw_consumption_data else None
+                cw_consumption = (
+                    cw_consumption_data.get("value") if cw_consumption_data else None
+                )
 
                 # Estimate HW price from spot prices
                 hw_estimated_data = await self._get_hw_price_from_spot_prices(
@@ -408,30 +428,34 @@ class MonthlyAggregateCalculator:
         """Calculate monthly consumption from cached daily consumption data."""
         cache_key_daily = f"{utility_code}_all"  # Use aggregate cache key
         daily_values = self._daily_consumption_cache.get(cache_key_daily)
-        
+
         if not daily_values:
             return None
-        
+
         from_time, to_time = self._get_month_timestamps(year, month)
-        
+
         # Filter daily values for this month
         month_values = [
-            v for v in daily_values
+            v
+            for v in daily_values
             if from_time <= v["time"] < to_time and v.get("value") is not None
         ]
-        
+
         if not month_values:
             return None
-        
+
         # Sum all values for the month
         total_value = sum(v["value"] for v in month_values)
         unit = month_values[0].get("unit", "") if month_values else ""
-        
+
         _LOGGER.debug(
             "Calculated monthly consumption for %s %d-%02d from %d cached daily values (reused data!)",
-            utility_code, year, month, len(month_values)
+            utility_code,
+            year,
+            month,
+            len(month_values),
         )
-        
+
         result = {
             "value": total_value,
             "unit": unit,
@@ -446,7 +470,12 @@ class MonthlyAggregateCalculator:
         return result
 
     async def _fetch_monthly_consumption_from_api(
-        self, utility_code: str, year: int, month: int, aggregate_type: str, cache_key: str
+        self,
+        utility_code: str,
+        year: int,
+        month: int,
+        aggregate_type: str,
+        cache_key: str,
     ) -> dict[str, Any] | None:
         """Fetch monthly consumption from API."""
         from_time, to_time = self._get_month_timestamps(year, month)
@@ -503,7 +532,10 @@ class MonthlyAggregateCalculator:
         for node_data in data:
             results = node_data.get("Result", [])
             for result in results:
-                if result.get("Utl") == utility_code and result.get("Func") == aggregate_type:
+                if (
+                    result.get("Utl") == utility_code
+                    and result.get("Func") == aggregate_type
+                ):
                     values = result.get("Values", [])
                     unit = result.get("Unit", "")
 
@@ -562,18 +594,22 @@ class MonthlyAggregateCalculator:
             if aggregate_type == "price":
                 # Handle actual price
                 if cost_type == "actual":
-                    result = await self._get_monthly_price_actual(utility_code, year, month, cache_key)
+                    result = await self._get_monthly_price_actual(
+                        utility_code, year, month, cache_key
+                    )
                     if result:
                         return result
-                
+
                 # Handle CW price (special case)
                 if utility_code == "CW":
-                    result = await self._get_monthly_price_cw(utility_code, year, month, cost_type)
+                    result = await self._get_monthly_price_cw(
+                        utility_code, year, month, cost_type
+                    )
                     if result:
                         self._monthly_aggregate_cache[cache_key] = result
                         self._sync_cache_to_data()
                         return result
-                
+
                 # Handle HW estimated price
                 if utility_code == "HW" and cost_type == "estimated":
                     result = await self._get_monthly_price_hw_estimated(year, month)
@@ -581,7 +617,7 @@ class MonthlyAggregateCalculator:
                         self._monthly_aggregate_cache[cache_key] = result
                         self._sync_cache_to_data()
                         return result
-                
+
                 # For HW actual: if we got here, we already checked for actual API data and didn't find it
                 # Don't fall back to billing/spot prices for "actual" - that would be an estimate
                 if utility_code == "HW" and cost_type == "actual":
@@ -591,14 +627,14 @@ class MonthlyAggregateCalculator:
                         month,
                     )
                     return None
-                
+
                 # For CW or HW estimated (fallback), use billing results
                 result = await self._billing_manager.get_monthly_price_from_billing(
                     utility_code=utility_code,
                     year=year,
                     month=month,
                 )
-                
+
                 if result:
                     result["cost_type"] = cost_type
                     # Mark as estimated if it came from spot prices or billing calculation
@@ -608,9 +644,9 @@ class MonthlyAggregateCalculator:
                         result["is_estimated"] = False
                     self._monthly_aggregate_cache[cache_key] = result
                     self._sync_cache_to_data()
-                
+
                 return result
-            
+
             # For consumption aggregates
             if aggregate_type == "con":
                 # Try to calculate from cached daily consumption data first
@@ -619,14 +655,14 @@ class MonthlyAggregateCalculator:
                 )
                 if result:
                     return result
-                
+
                 # Fall back to API call
                 return await self._fetch_monthly_consumption_from_api(
                     utility_code, year, month, aggregate_type, cache_key
                 )
-            
+
             return None
-        
+
         # Use request deduplicator for calculation task (not API call, so use_cache=False)
         return await self._request_deduplicator.get_or_fetch(
             cache_key=cache_key,

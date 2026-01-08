@@ -21,8 +21,13 @@ class EndOfMonthEstimator:
         api: Any,  # EcoGuardAPI
         get_setting: Callable[[str], str | None],
         daily_consumption_cache: dict[str, list[dict[str, Any]]],
-        get_hw_price_from_spot_prices: Callable[[float, int, int, float | None, float | None], Awaitable[dict[str, Any] | None]],
-        get_monthly_aggregate: Callable[[str, int, int, str, str], Awaitable[dict[str, Any] | None]],
+        get_hw_price_from_spot_prices: Callable[
+            [float, int, int, float | None, float | None],
+            Awaitable[dict[str, Any] | None],
+        ],
+        get_monthly_aggregate: Callable[
+            [str, int, int, str, str], Awaitable[dict[str, Any] | None]
+        ],
         billing_manager: Any,  # BillingManager
     ) -> None:
         """Initialize the end-of-month estimator.
@@ -72,18 +77,31 @@ class EndOfMonthEstimator:
         try:
             # Verify dependencies are available
             if not self._request_deduplicator:
-                _LOGGER.error("get_end_of_month_estimate[%s]: Request deduplicator not available", call_id)
+                _LOGGER.error(
+                    "get_end_of_month_estimate[%s]: Request deduplicator not available",
+                    call_id,
+                )
                 return None
             if not self._api:
-                _LOGGER.error("get_end_of_month_estimate[%s]: API not available", call_id)
+                _LOGGER.error(
+                    "get_end_of_month_estimate[%s]: API not available", call_id
+                )
                 return None
             if not self._billing_manager:
-                _LOGGER.error("get_end_of_month_estimate[%s]: Billing manager not available", call_id)
+                _LOGGER.error(
+                    "get_end_of_month_estimate[%s]: Billing manager not available",
+                    call_id,
+                )
                 return None
             now = datetime.now()
             current_year = now.year
             current_month = now.month
-            _LOGGER.debug("get_end_of_month_estimate[%s]: Starting for year=%d, month=%d", call_id, current_year, current_month)
+            _LOGGER.debug(
+                "get_end_of_month_estimate[%s]: Starting for year=%d, month=%d",
+                call_id,
+                current_year,
+                current_month,
+            )
 
             # Get timezone
             timezone_str = self._get_setting("TimeZoneIANA") or "UTC"
@@ -104,7 +122,9 @@ class EndOfMonthEstimator:
                 to_date = datetime(current_year, current_month + 1, 1, tzinfo=tz)
 
             total_days_in_month = (to_date - from_date).days
-            days_elapsed = (now_tz.date() - from_date.date()).days + 1  # +1 to include today
+            days_elapsed = (
+                now_tz.date() - from_date.date()
+            ).days + 1  # +1 to include today
             days_remaining = total_days_in_month - days_elapsed
 
             if days_elapsed <= 0:
@@ -130,14 +150,23 @@ class EndOfMonthEstimator:
                         if data_type == "con":
                             # Check daily consumption cache
                             cache_key = f"{utility_code}_all"
-                            cached_values = self._daily_consumption_cache.get(cache_key, [])
+                            cached_values = self._daily_consumption_cache.get(
+                                cache_key, []
+                            )
                             if cached_values:
                                 # Filter for current month
                                 for v in cached_values:
-                                    if from_time <= v.get("time", 0) < to_time and v.get("value") is not None and v.get("value") > 0:
+                                    if (
+                                        from_time <= v.get("time", 0) < to_time
+                                        and v.get("value") is not None
+                                        and v.get("value") > 0
+                                    ):
                                         daily_values.append(v.get("value"))
                                         time_stamp = v.get("time")
-                                        if time_stamp and (latest_data_time is None or time_stamp > latest_data_time):
+                                        if time_stamp and (
+                                            latest_data_time is None
+                                            or time_stamp > latest_data_time
+                                        ):
                                             latest_data_time = time_stamp
                         elif data_type == "price":
                             # Check daily price cache
@@ -177,7 +206,10 @@ class EndOfMonthEstimator:
                             for node_data in data:
                                 results = node_data.get("Result", [])
                                 for result in results:
-                                    if result.get("Utl") == utility_code and result.get("Func") == data_type:
+                                    if (
+                                        result.get("Utl") == utility_code
+                                        and result.get("Func") == data_type
+                                    ):
                                         values = result.get("Values", [])
                                         for value_entry in values:
                                             value = value_entry.get("Value")
@@ -185,7 +217,10 @@ class EndOfMonthEstimator:
                                             if value is not None and value > 0:
                                                 daily_values.append(value)
                                                 # Track the latest timestamp with data
-                                                if time_stamp and (latest_data_time is None or time_stamp > latest_data_time):
+                                                if time_stamp and (
+                                                    latest_data_time is None
+                                                    or time_stamp > latest_data_time
+                                                ):
                                                     latest_data_time = time_stamp
 
                         if daily_values:
@@ -235,7 +270,9 @@ class EndOfMonthEstimator:
             if not hw_price_has_data:
                 # Try to estimate HW price using spot prices
                 if "hw_con_estimate" in estimates:
-                    hw_consumption_estimate = estimates["hw_con_estimate"]["estimated_total"]
+                    hw_consumption_estimate = estimates["hw_con_estimate"][
+                        "estimated_total"
+                    ]
 
                     # Get CW price and consumption estimates (use mean daily if available, otherwise calculate from so_far)
                     cw_price_estimate_data = estimates.get("cw_price_estimate", {})
@@ -244,17 +281,25 @@ class EndOfMonthEstimator:
                     # Use mean daily from estimates if available
                     # Note: We only use actual data days, not calendar days elapsed
                     if cw_price_estimate_data.get("mean_daily", 0) > 0:
-                        estimated_cw_price = cw_price_estimate_data["mean_daily"] * total_days_in_month
+                        estimated_cw_price = (
+                            cw_price_estimate_data["mean_daily"] * total_days_in_month
+                        )
                     else:
                         # Fallback: if no mean daily, we can't reliably estimate
-                        _LOGGER.debug("No CW price mean daily available for HW price estimation")
+                        _LOGGER.debug(
+                            "No CW price mean daily available for HW price estimation"
+                        )
                         estimated_cw_price = 0
 
                     if cw_con_estimate_data.get("mean_daily", 0) > 0:
-                        estimated_cw_consumption = cw_con_estimate_data["mean_daily"] * total_days_in_month
+                        estimated_cw_consumption = (
+                            cw_con_estimate_data["mean_daily"] * total_days_in_month
+                        )
                     else:
                         # Fallback: if no mean daily, we can't reliably estimate
-                        _LOGGER.debug("No CW consumption mean daily available for HW price estimation")
+                        _LOGGER.debug(
+                            "No CW consumption mean daily available for HW price estimation"
+                        )
                         estimated_cw_consumption = 0
 
                     try:
@@ -262,8 +307,14 @@ class EndOfMonthEstimator:
                             consumption=hw_consumption_estimate,
                             year=current_year,
                             month=current_month,
-                            cold_water_price=estimated_cw_price if estimated_cw_price > 0 else None,
-                            cold_water_consumption=estimated_cw_consumption if estimated_cw_consumption > 0 else None,
+                            cold_water_price=(
+                                estimated_cw_price if estimated_cw_price > 0 else None
+                            ),
+                            cold_water_consumption=(
+                                estimated_cw_consumption
+                                if estimated_cw_consumption > 0
+                                else None
+                            ),
                         )
                     except Exception as err:
                         _LOGGER.warning(
@@ -298,7 +349,7 @@ class EndOfMonthEstimator:
             if not cw_price_has_data:
                 # Try to get CW price estimate from monthly aggregate
                 if "cw_con_estimate" in estimates:
-                    cw_consumption_estimate = estimates["cw_con_estimate"]["estimated_total"]
+                    estimates["cw_con_estimate"]["estimated_total"]
 
                     # Try to get estimated price from monthly aggregate
                     try:
@@ -332,26 +383,48 @@ class EndOfMonthEstimator:
                             cw_price_estimate_value,
                         )
 
-            _LOGGER.debug("get_end_of_month_estimate[%s]: Finished calculating estimates, now getting other items cost", call_id)
+            _LOGGER.debug(
+                "get_end_of_month_estimate[%s]: Finished calculating estimates, now getting other items cost",
+                call_id,
+            )
 
             # Get other items cost from last bill
-            _LOGGER.debug("get_end_of_month_estimate[%s]: Getting other items cost for year=%d, month=%d", call_id, current_year, current_month)
+            _LOGGER.debug(
+                "get_end_of_month_estimate[%s]: Getting other items cost for year=%d, month=%d",
+                call_id,
+                current_year,
+                current_month,
+            )
             other_items_cost = 0
             try:
-                other_items_data = await self._billing_manager.get_monthly_other_items_cost(
-                    year=current_year,
-                    month=current_month,
+                other_items_data = (
+                    await self._billing_manager.get_monthly_other_items_cost(
+                        year=current_year,
+                        month=current_month,
+                    )
                 )
                 if other_items_data:
                     other_items_cost = other_items_data.get("value", 0)
                 else:
                     other_items_cost = 0
-                _LOGGER.debug("get_end_of_month_estimate[%s]: Got other items cost: %.2f", call_id, other_items_cost)
+                _LOGGER.debug(
+                    "get_end_of_month_estimate[%s]: Got other items cost: %.2f",
+                    call_id,
+                    other_items_cost,
+                )
             except Exception as err:
-                _LOGGER.error("get_end_of_month_estimate[%s]: EXCEPTION in get_monthly_other_items_cost: %s", call_id, err, exc_info=True)
+                _LOGGER.error(
+                    "get_end_of_month_estimate[%s]: EXCEPTION in get_monthly_other_items_cost: %s",
+                    call_id,
+                    err,
+                    exc_info=True,
+                )
                 other_items_cost = 0
 
-            _LOGGER.debug("get_end_of_month_estimate[%s]: About to calculate total bill estimate", call_id)
+            _LOGGER.debug(
+                "get_end_of_month_estimate[%s]: About to calculate total bill estimate",
+                call_id,
+            )
 
             # Safely extract values from estimates dictionary
             def safe_get(key: str, attr: str, default: Any = 0) -> Any:
@@ -385,7 +458,9 @@ class EndOfMonthEstimator:
                     list(estimates.keys()),
                 )
             except Exception as err:
-                _LOGGER.warning("Failed to calculate total bill estimate: %s", err, exc_info=True)
+                _LOGGER.warning(
+                    "Failed to calculate total bill estimate: %s", err, exc_info=True
+                )
                 # Use safe defaults
                 hw_price_est = 0
                 cw_price_est = 0
@@ -394,19 +469,30 @@ class EndOfMonthEstimator:
             # Calculate maximum days with data across all metrics to show data freshness
             max_days_with_data = 0
             latest_data_timestamp = None
-            for key in ["hw_con_estimate", "hw_price_estimate", "cw_con_estimate", "cw_price_estimate"]:
+            for key in [
+                "hw_con_estimate",
+                "hw_price_estimate",
+                "cw_con_estimate",
+                "cw_price_estimate",
+            ]:
                 estimate_data = estimates.get(key, {})
                 days_with_data = estimate_data.get("days_with_data", 0)
                 if days_with_data > max_days_with_data:
                     max_days_with_data = days_with_data
                 data_time = estimate_data.get("latest_data_time")
-                if data_time and (latest_data_timestamp is None or data_time > latest_data_timestamp):
+                if data_time and (
+                    latest_data_timestamp is None or data_time > latest_data_timestamp
+                ):
                     latest_data_timestamp = data_time
 
             result = {
-                "hw_consumption_estimate": safe_get("hw_con_estimate", "estimated_total", 0),
+                "hw_consumption_estimate": safe_get(
+                    "hw_con_estimate", "estimated_total", 0
+                ),
                 "hw_price_estimate": hw_price_est,
-                "cw_consumption_estimate": safe_get("cw_con_estimate", "estimated_total", 0),
+                "cw_consumption_estimate": safe_get(
+                    "cw_con_estimate", "estimated_total", 0
+                ),
                 "cw_price_estimate": cw_price_est,
                 "other_items_cost": other_items_cost,
                 "total_bill_estimate": total_bill_estimate,
@@ -418,19 +504,33 @@ class EndOfMonthEstimator:
                 "days_remaining": days_remaining,
                 "total_days_in_month": total_days_in_month,
                 "latest_data_timestamp": latest_data_timestamp,  # Latest timestamp with data
-                "hw_mean_daily_consumption": safe_get("hw_con_estimate", "mean_daily", 0),
+                "hw_mean_daily_consumption": safe_get(
+                    "hw_con_estimate", "mean_daily", 0
+                ),
                 "hw_mean_daily_price": safe_get("hw_price_estimate", "mean_daily", 0),
-                "cw_mean_daily_consumption": safe_get("cw_con_estimate", "mean_daily", 0),
+                "cw_mean_daily_consumption": safe_get(
+                    "cw_con_estimate", "mean_daily", 0
+                ),
                 "cw_mean_daily_price": safe_get("cw_price_estimate", "mean_daily", 0),
                 "hw_consumption_so_far": safe_get("hw_con_estimate", "total_so_far", 0),
                 "hw_price_so_far": safe_get("hw_price_estimate", "total_so_far", 0),
                 "cw_consumption_so_far": safe_get("cw_con_estimate", "total_so_far", 0),
                 "cw_price_so_far": safe_get("cw_price_estimate", "total_so_far", 0),
-                "hw_consumption_days_with_data": safe_get("hw_con_estimate", "days_with_data", 0),
-                "hw_price_days_with_data": safe_get("hw_price_estimate", "days_with_data", 0),
-                "cw_consumption_days_with_data": safe_get("cw_con_estimate", "days_with_data", 0),
-                "cw_price_days_with_data": safe_get("cw_price_estimate", "days_with_data", 0),
-                "hw_price_is_estimated": safe_get("hw_price_estimate", "is_estimated", False),
+                "hw_consumption_days_with_data": safe_get(
+                    "hw_con_estimate", "days_with_data", 0
+                ),
+                "hw_price_days_with_data": safe_get(
+                    "hw_price_estimate", "days_with_data", 0
+                ),
+                "cw_consumption_days_with_data": safe_get(
+                    "cw_con_estimate", "days_with_data", 0
+                ),
+                "cw_price_days_with_data": safe_get(
+                    "cw_price_estimate", "days_with_data", 0
+                ),
+                "hw_price_is_estimated": safe_get(
+                    "hw_price_estimate", "is_estimated", False
+                ),
             }
 
             _LOGGER.info(
@@ -449,7 +549,11 @@ class EndOfMonthEstimator:
                 total_days_in_month,
             )
 
-            _LOGGER.debug("get_end_of_month_estimate[%s]: Returning result with %d keys", call_id, len(result))
+            _LOGGER.debug(
+                "get_end_of_month_estimate[%s]: Returning result with %d keys",
+                call_id,
+                len(result),
+            )
             return result
         except Exception as err:
             _LOGGER.warning(

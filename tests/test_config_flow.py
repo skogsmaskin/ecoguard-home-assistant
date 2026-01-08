@@ -23,9 +23,10 @@ async def ensure_config_flow_registered(hass: HomeAssistant):
     # Import the config flow module to register it
     # This ensures Home Assistant can discover the ConfigFlow handler
     import custom_components.ecoguard.config_flow  # noqa: F401
-    
+
     # Also ensure the integration is set up
     from custom_components.ecoguard import async_setup
+
     await async_setup(hass, {})
 
 
@@ -68,16 +69,14 @@ async def test_form(hass: HomeAssistant):
     flow = ConfigFlow()
     flow.hass = hass
     flow.init_step = "user"
-    
+
     result = await flow.async_step_user()
     assert result["type"] == FlowResultType.FORM
     # errors may be None or empty dict when there are no errors
     assert result.get("errors") in (None, {})
 
 
-async def test_form_user_input(
-    hass: HomeAssistant, mock_validate_input_success
-):
+async def test_form_user_input(hass: HomeAssistant, mock_validate_input_success):
     """Test form submission with valid user input."""
     # Test the ConfigFlow class directly to avoid integration discovery issues
     # Create a new flow instance for submission
@@ -86,14 +85,16 @@ async def test_form_user_input(
     flow.init_step = "user"
     # Make context mutable (it's normally a mappingproxy)
     flow.context = {}
-    
+
     # Submit form directly (skip showing form)
-    result = await flow.async_step_user({
-        "username": "test_user",
-        "password": "test_password",
-        "domain": "test_domain",
-        "nord_pool_area": "NO1",
-    })
+    result = await flow.async_step_user(
+        {
+            "username": "test_user",
+            "password": "test_password",
+            "domain": "test_domain",
+            "nord_pool_area": "NO1",
+        }
+    )
     await hass.async_block_till_done()
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
@@ -108,20 +109,20 @@ async def test_form_user_input(
     mock_validate_input_success.assert_called_once()
 
 
-async def test_form_invalid_auth(
-    hass: HomeAssistant, mock_validate_input_invalid_auth
-):
+async def test_form_invalid_auth(hass: HomeAssistant, mock_validate_input_invalid_auth):
     """Test we handle invalid auth."""
     # Test the ConfigFlow class directly to avoid integration discovery issues
     flow = ConfigFlow()
     flow.hass = hass
     flow.init_step = "user"
-    
-    result = await flow.async_step_user({
-        "username": "test_user",
-        "password": "wrong_password",
-        "domain": "test_domain",
-    })
+
+    result = await flow.async_step_user(
+        {
+            "username": "test_user",
+            "password": "wrong_password",
+            "domain": "test_domain",
+        }
+    )
 
     assert result["type"] == FlowResultType.FORM
     assert result["errors"] == {"base": "invalid_auth"}
@@ -135,12 +136,14 @@ async def test_form_cannot_connect(
     flow = ConfigFlow()
     flow.hass = hass
     flow.init_step = "user"
-    
-    result = await flow.async_step_user({
-        "username": "test_user",
-        "password": "test_password",
-        "domain": "test_domain",
-    })
+
+    result = await flow.async_step_user(
+        {
+            "username": "test_user",
+            "password": "test_password",
+            "domain": "test_domain",
+        }
+    )
 
     assert result["type"] == FlowResultType.FORM
     assert result["errors"] == {"base": "cannot_connect"}
@@ -152,17 +155,19 @@ async def test_form_unknown_error(hass: HomeAssistant):
     flow = ConfigFlow()
     flow.hass = hass
     flow.init_step = "user"
-    
+
     with patch(
         "custom_components.ecoguard.config_flow.validate_input"
     ) as mock_validate:
         mock_validate.side_effect = Exception("Unexpected error")
 
-        result = await flow.async_step_user({
-            "username": "test_user",
-            "password": "test_password",
-            "domain": "test_domain",
-        })
+        result = await flow.async_step_user(
+            {
+                "username": "test_user",
+                "password": "test_password",
+                "domain": "test_domain",
+            }
+        )
 
         assert result["type"] == FlowResultType.FORM
         assert result["errors"] == {"base": "unknown"}
@@ -173,33 +178,33 @@ async def test_form_unknown_error(hass: HomeAssistant):
 )
 async def test_form_duplicate_entry(hass: HomeAssistant, mock_validate_input_success):
     """Test that duplicate entries are rejected.
-    
+
     Note: This test is marked as xfail because duplicate detection relies on
     Home Assistant's config entry system properly discovering the integration,
     which requires using async_init(). Since we test ConfigFlow directly to
     avoid integration discovery issues, the duplicate detection mechanism
     doesn't work as expected in this test context.
-    
+
     The duplicate detection logic itself is correct and works in production.
     """
     from homeassistant.config_entries import ConfigEntry
     import inspect
-    
+
     def _create_config_entry(**kwargs) -> ConfigEntry:
         """Create a ConfigEntry that works with different Home Assistant versions."""
         sig = inspect.signature(ConfigEntry.__init__)
         params = sig.parameters
-        
+
         needs_discovery_keys = "discovery_keys" in params
         needs_subentries_data = "subentries_data" in params
-        
+
         if needs_discovery_keys and "discovery_keys" not in kwargs:
             kwargs["discovery_keys"] = None
         if needs_subentries_data and "subentries_data" not in kwargs:
             kwargs["subentries_data"] = None
-        
+
         return ConfigEntry(**kwargs)
-    
+
     # Manually create the first entry to simulate it already existing
     entry = _create_config_entry(
         version=1,
@@ -217,11 +222,11 @@ async def test_form_duplicate_entry(hass: HomeAssistant, mock_validate_input_suc
         options={},
         minor_version=1,
     )
-    
+
     # Add the entry to hass config_entries using the public API
     await hass.config_entries.async_add(entry)
     await hass.async_block_till_done()
-    
+
     # Verify the entry was added
     entries = hass.config_entries.async_entries(DOMAIN)
     assert len(entries) == 1
@@ -232,12 +237,14 @@ async def test_form_duplicate_entry(hass: HomeAssistant, mock_validate_input_suc
     flow.hass = hass
     flow.init_step = "user"
     flow.context = {}
-    
-    result = await flow.async_step_user({
-        "username": "test_user2",
-        "password": "test_password2",
-        "domain": "test_domain",  # Same domain (same unique_id)
-    })
+
+    result = await flow.async_step_user(
+        {
+            "username": "test_user2",
+            "password": "test_password2",
+            "domain": "test_domain",  # Same domain (same unique_id)
+        }
+    )
 
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "already_configured"
@@ -253,13 +260,15 @@ async def test_form_optional_nord_pool_area(
     flow.init_step = "user"
     # Make context mutable (it's normally a mappingproxy)
     flow.context = {}
-    
+
     # Submit form without nord_pool_area
-    result = await flow.async_step_user({
-        "username": "test_user",
-        "password": "test_password",
-        "domain": "test_domain",
-    })
+    result = await flow.async_step_user(
+        {
+            "username": "test_user",
+            "password": "test_password",
+            "domain": "test_domain",
+        }
+    )
     await hass.async_block_till_done()
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
@@ -273,13 +282,9 @@ async def test_validate_input_success(hass: HomeAssistant):
 
     with patch("custom_components.ecoguard.api.EcoGuardAPI") as mock_api_class:
         mock_api = AsyncMock()
-        mock_api.authenticate = AsyncMock(
-            return_value={"access_token": "test_token"}
-        )
+        mock_api.authenticate = AsyncMock(return_value={"access_token": "test_token"})
         mock_api.get_user_info = AsyncMock(return_value={"ID": 1})
-        mock_api.get_nodes = AsyncMock(
-            return_value=[{"ID": 123, "Name": "Test Node"}]
-        )
+        mock_api.get_nodes = AsyncMock(return_value=[{"ID": 123, "Name": "Test Node"}])
         mock_api.async_close = AsyncMock()
         mock_api_class.return_value = mock_api
 
@@ -302,9 +307,7 @@ async def test_validate_input_no_nodes(hass: HomeAssistant):
 
     with patch("custom_components.ecoguard.api.EcoGuardAPI") as mock_api_class:
         mock_api = AsyncMock()
-        mock_api.authenticate = AsyncMock(
-            return_value={"access_token": "test_token"}
-        )
+        mock_api.authenticate = AsyncMock(return_value={"access_token": "test_token"})
         mock_api.get_nodes = AsyncMock(return_value=[])
         mock_api.async_close = AsyncMock()
         mock_api_class.return_value = mock_api

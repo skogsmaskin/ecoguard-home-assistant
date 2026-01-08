@@ -24,6 +24,7 @@ from ..sensor_base import EcoGuardBaseSensor
 
 _LOGGER = logging.getLogger(__name__)
 
+
 class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
     """Sensor for last known daily consumption for a specific meter."""
 
@@ -37,7 +38,11 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
         measuring_point_name: str | None,
     ) -> None:
         """Initialize the daily consumption sensor."""
-        super().__init__(coordinator, hass=hass)
+        super().__init__(
+            coordinator,
+            hass=hass,
+            description_key="description.consumption_daily_meter",
+        )
         self._hass = hass
         self._installation = installation
         self._utility_code = utility_code
@@ -50,7 +55,9 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
         if measuring_point_name:
             measuring_point_display = measuring_point_name
         else:
-            measuring_point_display = get_translation_default("name.measuring_point", id=measuring_point_id)
+            measuring_point_display = get_translation_default(
+                "name.measuring_point", id=measuring_point_id
+            )
 
         # Use English defaults here; will be updated in async_added_to_hass with proper translations
         utility_name = get_translation_default(f"utility.{utility_code.lower()}")
@@ -70,9 +77,7 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
         # Use measuring_point_id to ensure uniqueness across nodes
         utility_slug = utility_code_to_slug(utility_code)
         sensor_name = slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
-        unique_id = (
-            f"{DOMAIN}_consumption_daily_metered_{utility_slug}_{sensor_name}"
-        )
+        unique_id = f"{DOMAIN}_consumption_daily_metered_{utility_slug}_{sensor_name}"
         self._attr_unique_id = unique_id
         _LOGGER.debug("Daily consumption sensor unique_id: %s", unique_id)
 
@@ -92,16 +97,22 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
         self._attr_native_unit_of_measurement = None
         self._last_data_date: datetime | None = None
 
+        # Set entity description (must be called after name and unique_id are set)
+        self._set_entity_description()
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        attrs = {
-            "measuring_point_id": self._measuring_point_id,
-            "utility_code": self._utility_code,
-            "external_key": self._installation.get("ExternalKey"),
-            "device_type": self._installation.get("DeviceTypeDisplay"),
-            "sensor_type": "daily_consumption",
-        }
+        attrs = self._get_base_extra_state_attributes()
+        attrs.update(
+            {
+                "measuring_point_id": self._measuring_point_id,
+                "utility_code": self._utility_code,
+                "external_key": self._installation.get("ExternalKey"),
+                "device_type": self._installation.get("DeviceTypeDisplay"),
+                "sensor_type": "daily_consumption",
+            }
+        )
 
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
@@ -115,7 +126,7 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
             return
 
         try:
-            lang = getattr(self._hass.config, 'language', 'en')
+            lang = getattr(self._hass.config, "language", "en")
             _LOGGER.debug("Updating sensor name for lang=%s", lang)
 
             # Rebuild sensor name with translations
@@ -130,7 +141,9 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
             utility_name = await self._get_translated_utility_name(self._utility_code)
             _LOGGER.debug("Utility name: %s", utility_name)
 
-            consumption_daily = await async_get_translation(self._hass, "name.consumption_daily")
+            consumption_daily = await async_get_translation(
+                self._hass, "name.consumption_daily"
+            )
             _LOGGER.debug("Consumption daily: %s", consumption_daily)
 
             # Update the name (this is the display name, not the entity_id)
@@ -141,11 +154,15 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
             await self._update_name_and_registry(new_name, log_level="info")
 
             # Also update device name
-            device_name = await self._get_translated_device_name(self.coordinator.node_id)
+            device_name = await self._get_translated_device_name(
+                self.coordinator.node_id
+            )
             self._update_device_name(device_name)
+
+            # Update description
+            await self._async_update_description()
         except Exception as e:
             _LOGGER.warning("Failed to update translated name: %s", e, exc_info=True)
-
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -173,7 +190,11 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
 
         if consumption_data:
             raw_value = consumption_data.get("value")
-            new_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            new_value = (
+                round_to_max_digits(raw_value)
+                if isinstance(raw_value, (int, float))
+                else raw_value
+            )
             old_value = self._attr_native_value
 
             self._attr_native_value = new_value
@@ -189,15 +210,24 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
 
             # Log update for debugging
             if old_value != new_value:
-                _LOGGER.info("Updated %s: %s -> %s %s (cache key: %s)",
-                             self.entity_id, old_value, new_value,
-                             self._attr_native_unit_of_measurement, cache_key)
+                _LOGGER.info(
+                    "Updated %s: %s -> %s %s (cache key: %s)",
+                    self.entity_id,
+                    old_value,
+                    new_value,
+                    self._attr_native_unit_of_measurement,
+                    cache_key,
+                )
         else:
             # Log missing cache key for debugging (only once to avoid spam)
-            if not hasattr(self, '_cache_miss_logged') or not self._cache_miss_logged:
+            if not hasattr(self, "_cache_miss_logged") or not self._cache_miss_logged:
                 available_keys = sorted(consumption_cache.keys())
-                _LOGGER.warning("Cache miss for %s: Looking for key '%s', available keys: %s",
-                             self.entity_id, cache_key, available_keys[:10] if len(available_keys) > 10 else available_keys)
+                _LOGGER.warning(
+                    "Cache miss for %s: Looking for key '%s', available keys: %s",
+                    self.entity_id,
+                    cache_key,
+                    available_keys[:10] if len(available_keys) > 10 else available_keys,
+                )
                 self._cache_miss_logged = True
 
             # Keep sensor available even if no data (shows as "unknown" not "unavailable")
@@ -209,7 +239,6 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
 
         # Notify Home Assistant that the state has changed
         self.async_write_ha_state()
-
 
 
 class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
@@ -224,7 +253,9 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
         utility_code: str | None = None,
     ) -> None:
         """Initialize the latest reception sensor."""
-        super().__init__(coordinator, hass=hass)
+        super().__init__(
+            coordinator, hass=hass, description_key="description.reception_last_update"
+        )
         self._hass = hass
         self._measuring_point_id = measuring_point_id
         self._measuring_point_name = measuring_point_name
@@ -234,13 +265,17 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
         if measuring_point_name:
             measuring_point_display = measuring_point_name
         else:
-            measuring_point_display = get_translation_default("name.measuring_point", id=measuring_point_id)
+            measuring_point_display = get_translation_default(
+                "name.measuring_point", id=measuring_point_id
+            )
 
         # Use English defaults here; will be updated in async_added_to_hass
         utility_suffix = ""
         if utility_code:
             utility_name = get_translation_default(f"utility.{utility_code.lower()}")
-            if utility_name == f"utility.{utility_code.lower()}":  # Fallback if not found
+            if (
+                utility_name == f"utility.{utility_code.lower()}"
+            ):  # Fallback if not found
                 utility_name = utility_code
             utility_suffix = f" ({utility_name})"
 
@@ -252,11 +287,15 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
         if utility_suffix:
             # utility_suffix already includes parentheses, so we need to extract just the utility name
             utility_name = get_translation_default(f"utility.{utility_code.lower()}")
-            if utility_name == f"utility.{utility_code.lower()}":  # Fallback if not found
+            if (
+                utility_name == f"utility.{utility_code.lower()}"
+            ):  # Fallback if not found
                 utility_name = utility_code
             self._attr_name = f'{reception_last_update} - {meter} "{measuring_point_display}" ({utility_name})'
         else:
-            self._attr_name = f'{reception_last_update} - {meter} "{measuring_point_display}"'
+            self._attr_name = (
+                f'{reception_last_update} - {meter} "{measuring_point_display}"'
+            )
 
         # Build unique_id following pattern: purpose_group_utility_sensor
         # Home Assistant strips the domain prefix, so we want: reception_last_update_cold_water_kaldtvann_bad
@@ -267,9 +306,7 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
                 f"{DOMAIN}_reception_last_update_{utility_slug}_{sensor_name}"
             )
         else:
-            self._attr_unique_id = (
-                f"{DOMAIN}_reception_last_update_{sensor_name}"
-            )
+            self._attr_unique_id = f"{DOMAIN}_reception_last_update_{sensor_name}"
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
@@ -282,12 +319,18 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
         self._attr_device_class = SensorDeviceClass.TIMESTAMP
         self._attr_native_value = None
 
+        # Set entity description (must be called after name and unique_id are set)
+        self._set_entity_description()
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        attrs = {
-            "measuring_point_id": self._measuring_point_id,
-        }
+        attrs = self._get_base_extra_state_attributes()
+        attrs.update(
+            {
+                "measuring_point_id": self._measuring_point_id,
+            }
+        )
 
         if self._measuring_point_name:
             attrs["measuring_point_name"] = self._measuring_point_name
@@ -313,21 +356,29 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
             # Keep "Reception Last Update" format to maintain entity_id starting with "reception_last_update_"
             # Format: "Reception Last Update - Meter "Measuring Point" (Utility)"
             # This groups similar sensors together when sorted alphabetically
-            reception_last_update = await async_get_translation(self._hass, "name.reception_last_update")
+            reception_last_update = await async_get_translation(
+                self._hass, "name.reception_last_update"
+            )
             meter = await async_get_translation(self._hass, "name.meter")
             if self._utility_code:
                 utility_name = await async_get_translation(
                     self._hass, f"utility.{self._utility_code.lower()}"
                 )
-                if utility_name == f"utility.{self._utility_code.lower()}":  # Fallback if not found
+                if (
+                    utility_name == f"utility.{self._utility_code.lower()}"
+                ):  # Fallback if not found
                     utility_name = self._utility_code
                 new_name = f'{reception_last_update} - {meter} "{measuring_point_display}" ({utility_name})'
             else:
-                new_name = f'{reception_last_update} - {meter} "{measuring_point_display}"'
+                new_name = (
+                    f'{reception_last_update} - {meter} "{measuring_point_display}"'
+                )
             await self._update_name_and_registry(new_name, log_level="debug")
+
+            # Update description
+            await self._async_update_description()
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
-
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -351,7 +402,9 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
                 if latest_timestamp:
                     # Convert Unix timestamp to timezone-aware datetime (UTC)
                     # Unix timestamps are always in UTC
-                    self._attr_native_value = datetime.fromtimestamp(latest_timestamp, tz=timezone.utc)
+                    self._attr_native_value = datetime.fromtimestamp(
+                        latest_timestamp, tz=timezone.utc
+                    )
                 else:
                     self._attr_native_value = None
                 break
@@ -384,7 +437,9 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
                 if latest_timestamp:
                     # Convert Unix timestamp to timezone-aware datetime (UTC)
                     # Unix timestamps are always in UTC
-                    self._attr_native_value = datetime.fromtimestamp(latest_timestamp, tz=timezone.utc)
+                    self._attr_native_value = datetime.fromtimestamp(
+                        latest_timestamp, tz=timezone.utc
+                    )
                 else:
                     self._attr_native_value = None
                 break
@@ -395,7 +450,6 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
 
         # Notify Home Assistant that the state has changed
         self.async_write_ha_state()
-
 
 
 class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
@@ -414,7 +468,11 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
             coordinator: The coordinator instance
             utility_code: Utility code (e.g., "HW", "CW")
         """
-        super().__init__(coordinator, hass=hass)
+        super().__init__(
+            coordinator,
+            hass=hass,
+            description_key="description.consumption_daily_aggregated",
+        )
         self._hass = hass
         self._utility_code = utility_code
 
@@ -442,14 +500,20 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
         self._last_data_date: datetime | None = None
         self._meters_with_data: list[dict[str, Any]] = []
 
+        # Set entity description (must be called after name and unique_id are set)
+        self._set_entity_description()
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        attrs = {
-            "utility_code": self._utility_code,
-            "sensor_type": "daily_consumption_aggregate",
-            "meter_count": len(self._meters_with_data),
-        }
+        attrs = self._get_base_extra_state_attributes()
+        attrs.update(
+            {
+                "utility_code": self._utility_code,
+                "sensor_type": "daily_consumption_aggregate",
+                "meter_count": len(self._meters_with_data),
+            }
+        )
 
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
@@ -479,13 +543,17 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
             if utility_name == f"utility.{self._utility_code.lower()}":
                 utility_name = self._utility_code
 
-            consumption_daily = await async_get_translation(self._hass, "name.consumption_daily")
+            consumption_daily = await async_get_translation(
+                self._hass, "name.consumption_daily"
+            )
             metered = await async_get_translation(self._hass, "name.metered")
             new_name = f"{consumption_daily} {metered} - {utility_name}"
             await self._update_name_and_registry(new_name, log_level="debug")
+
+            # Update description
+            await self._async_update_description()
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
-
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -509,7 +577,11 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
         if consumption_data:
             # Use aggregated data directly
             raw_value = consumption_data.get("value")
-            new_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            new_value = (
+                round_to_max_digits(raw_value)
+                if isinstance(raw_value, (int, float))
+                else raw_value
+            )
             old_value = self._attr_native_value
 
             self._attr_native_value = new_value
@@ -525,9 +597,14 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
 
             # Log update for debugging
             if old_value != new_value:
-                _LOGGER.info("Updated %s: %s -> %s %s (cache key: %s)",
-                             self.entity_id, old_value, new_value,
-                             self._attr_native_unit_of_measurement, cache_key_all)
+                _LOGGER.info(
+                    "Updated %s: %s -> %s %s (cache key: %s)",
+                    self.entity_id,
+                    old_value,
+                    new_value,
+                    self._attr_native_unit_of_measurement,
+                    cache_key_all,
+                )
 
             self.async_write_ha_state()
             return
@@ -578,11 +655,13 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
                     if latest_timestamp is None or time_stamp > latest_timestamp:
                         latest_timestamp = time_stamp
 
-                meters_with_data.append({
-                    "measuring_point_id": measuring_point_id,
-                    "measuring_point_name": measuring_point_name,
-                    "value": value,
-                })
+                meters_with_data.append(
+                    {
+                        "measuring_point_id": measuring_point_id,
+                        "measuring_point_name": measuring_point_name,
+                        "value": value,
+                    }
+                )
 
         if total_value > 0:
             self._attr_native_value = round_to_max_digits(total_value)
@@ -599,7 +678,6 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
         self.async_write_ha_state()
 
 
-
 class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
     """Sensor for combined daily water consumption (HW + CW) across all meters."""
 
@@ -614,7 +692,11 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
             hass: Home Assistant instance
             coordinator: The coordinator instance
         """
-        super().__init__(coordinator, hass=hass)
+        super().__init__(
+            coordinator,
+            hass=hass,
+            description_key="description.consumption_daily_combined_water",
+        )
         self._hass = hass
 
         # Format: "Consumption Daily Metered - Combined Water"
@@ -639,15 +721,21 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
         self._hw_meters_with_data: list[dict[str, Any]] = []
         self._cw_meters_with_data: list[dict[str, Any]] = []
 
+        # Set entity description (must be called after name and unique_id are set)
+        self._set_entity_description()
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        attrs = {
-            "sensor_type": "daily_consumption_combined_water",
-            "utilities": ["HW", "CW"],
-            "hw_meter_count": len(self._hw_meters_with_data),
-            "cw_meter_count": len(self._cw_meters_with_data),
-        }
+        attrs = self._get_base_extra_state_attributes()
+        attrs.update(
+            {
+                "sensor_type": "daily_consumption_combined_water",
+                "utilities": ["HW", "CW"],
+                "hw_meter_count": len(self._hw_meters_with_data),
+                "cw_meter_count": len(self._cw_meters_with_data),
+            }
+        )
 
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
@@ -681,16 +769,20 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
             return
 
         try:
-            consumption_daily = await async_get_translation(self._hass, "name.consumption_daily")
+            consumption_daily = await async_get_translation(
+                self._hass, "name.consumption_daily"
+            )
             metered = await async_get_translation(self._hass, "name.metered")
             water_name = await async_get_translation(self._hass, "name.combined_water")
             if water_name == "name.combined_water":
                 water_name = "Combined Water"
             new_name = f"{consumption_daily} {metered} - {water_name}"
             await self._update_name_and_registry(new_name, log_level="debug")
+
+            # Update description
+            await self._async_update_description()
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
-
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -775,9 +867,15 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
 
             # Log update for debugging
             if old_value != self._attr_native_value:
-                _LOGGER.debug("Updated %s: %s -> %s %s (HW: %s, CW: %s)",
-                             self.entity_id, old_value, self._attr_native_value,
-                             unit, hw_total, cw_total)
+                _LOGGER.debug(
+                    "Updated %s: %s -> %s %s (HW: %s, CW: %s)",
+                    self.entity_id,
+                    old_value,
+                    self._attr_native_value,
+                    unit,
+                    hw_total,
+                    cw_total,
+                )
         else:
             self._attr_native_value = None
             self._attr_native_unit_of_measurement = unit
@@ -787,10 +885,11 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
             # Keep sensor available even if no data (shows as "unknown" not "unavailable")
             self._attr_available = True
             if old_value is not None:
-                _LOGGER.debug("Updated %s: %s -> None (no data found)", self.entity_id, old_value)
+                _LOGGER.debug(
+                    "Updated %s: %s -> None (no data found)", self.entity_id, old_value
+                )
 
         self.async_write_ha_state()
-
 
 
 class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
@@ -817,7 +916,12 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
             measuring_point_name: Measuring point name
             cost_type: "actual" for metered API data, "estimated" for estimated costs
         """
-        super().__init__(coordinator, hass=hass)
+        description_key = (
+            "description.cost_daily_estimated"
+            if cost_type == "estimated"
+            else "description.cost_daily_metered"
+        )
+        super().__init__(coordinator, hass=hass, description_key=description_key)
         self._hass = hass
         self._installation = installation
         self._utility_code = utility_code
@@ -829,7 +933,9 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
         if measuring_point_name:
             measuring_point_display = measuring_point_name
         else:
-            measuring_point_display = get_translation_default("name.measuring_point", id=measuring_point_id)
+            measuring_point_display = get_translation_default(
+                "name.measuring_point", id=measuring_point_id
+            )
 
         utility_name = get_translation_default(f"utility.{utility_code.lower()}")
         if utility_name == f"utility.{utility_code.lower()}":  # Fallback if not found
@@ -870,17 +976,23 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
         self._attr_native_unit_of_measurement = currency
         self._last_data_date: datetime | None = None
 
+        # Set entity description (must be called after name and unique_id are set)
+        self._set_entity_description()
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        attrs = {
-            "measuring_point_id": self._measuring_point_id,
-            "utility_code": self._utility_code,
-            "external_key": self._installation.get("ExternalKey"),
-            "device_type": self._installation.get("DeviceTypeDisplay"),
-            "sensor_type": "daily_cost",
-            "cost_type": "metered" if self._cost_type == "actual" else "estimated",
-        }
+        attrs = self._get_base_extra_state_attributes()
+        attrs.update(
+            {
+                "measuring_point_id": self._measuring_point_id,
+                "utility_code": self._utility_code,
+                "external_key": self._installation.get("ExternalKey"),
+                "device_type": self._installation.get("DeviceTypeDisplay"),
+                "sensor_type": "daily_cost",
+                "cost_type": "metered" if self._cost_type == "actual" else "estimated",
+            }
+        )
 
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
@@ -917,14 +1029,21 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
                 new_name = f'{cost_daily} {metered} - {meter} "{measuring_point_display}" ({utility_name})'
 
             await self._update_name_and_registry(new_name, log_level="debug")
+
+            # Update description
+            await self._async_update_description()
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
-
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
-        _LOGGER.debug("_update_from_coordinator_data called for %s (cost_type=%s, utility=%s, meter=%s)",
-                     self.entity_id, self._cost_type, self._utility_code, self._measuring_point_id)
+        _LOGGER.debug(
+            "_update_from_coordinator_data called for %s (cost_type=%s, utility=%s, meter=%s)",
+            self.entity_id,
+            self._cost_type,
+            self._utility_code,
+            self._measuring_point_id,
+        )
         # Read from coordinator.data cache (populated by batch fetch)
         coordinator_data = self.coordinator.data
         if not coordinator_data:
@@ -948,8 +1067,13 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
 
         cost_data = cost_cache.get(cache_key)
 
-        _LOGGER.debug("_update_from_coordinator_data for %s: cost_type=%s, cache_key=%s, cost_data=%s",
-                     self.entity_id, self._cost_type, cache_key, cost_data is not None)
+        _LOGGER.debug(
+            "_update_from_coordinator_data for %s: cost_type=%s, cache_key=%s, cost_data=%s",
+            self.entity_id,
+            self._cost_type,
+            cache_key,
+            cost_data is not None,
+        )
 
         # For estimated costs: if we have metered cost data, use it (estimated = metered when available)
         # Only calculate from consumption if metered cost is not available
@@ -957,28 +1081,52 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
             # No metered cost available, trigger async fetch to calculate estimated cost
             # This is needed for HW where metered cost is often not available
             from homeassistant.core import CoreState
-            if self.hass and not self.hass.is_stopping and self.hass.state != CoreState.starting:
+
+            if (
+                self.hass
+                and not self.hass.is_stopping
+                and self.hass.state != CoreState.starting
+            ):
                 # Trigger async fetch in background (non-blocking)
                 async def _fetch_estimated_cost():
                     try:
-                        _LOGGER.debug("Starting async fetch for estimated cost: %s", self.entity_id)
+                        _LOGGER.debug(
+                            "Starting async fetch for estimated cost: %s",
+                            self.entity_id,
+                        )
                         await self._async_fetch_value()
                     except Exception as err:
-                        _LOGGER.warning("Error in async fetch for %s: %s", self.entity_id, err, exc_info=True)
+                        _LOGGER.warning(
+                            "Error in async fetch for %s: %s",
+                            self.entity_id,
+                            err,
+                            exc_info=True,
+                        )
+
                 self.hass.async_create_task(_fetch_estimated_cost())
-                _LOGGER.debug("Created async task for estimated cost fetch: %s", self.entity_id)
+                _LOGGER.debug(
+                    "Created async task for estimated cost fetch: %s", self.entity_id
+                )
             else:
-                _LOGGER.debug("Skipping async fetch for %s: hass=%s, is_stopping=%s, state=%s",
-                             self.entity_id,
-                             self.hass is not None,
-                             self.hass.is_stopping if self.hass else None,
-                             self.hass.state if self.hass else None)
+                _LOGGER.debug(
+                    "Skipping async fetch for %s: hass=%s, is_stopping=%s, state=%s",
+                    self.entity_id,
+                    self.hass is not None,
+                    self.hass.is_stopping if self.hass else None,
+                    self.hass.state if self.hass else None,
+                )
             cost_data = None
 
         if cost_data:
             raw_value = cost_data.get("value")
-            self._attr_native_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
-            self._attr_native_unit_of_measurement = cost_data.get("unit") or self.coordinator.get_setting("Currency") or ""
+            self._attr_native_value = (
+                round_to_max_digits(raw_value)
+                if isinstance(raw_value, (int, float))
+                else raw_value
+            )
+            self._attr_native_unit_of_measurement = (
+                cost_data.get("unit") or self.coordinator.get_setting("Currency") or ""
+            )
 
             # Update last data date
             time_stamp = cost_data.get("time")
@@ -999,8 +1147,12 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
             # Only fetch for estimated costs
             return
 
-        _LOGGER.debug("Fetching estimated cost for %s (utility: %s, meter: %s)",
-                     self.entity_id, self._utility_code, self._measuring_point_id)
+        _LOGGER.debug(
+            "Fetching estimated cost for %s (utility: %s, meter: %s)",
+            self.entity_id,
+            self._utility_code,
+            self._measuring_point_id,
+        )
 
         # Get estimated cost from coordinator
         cost_data = await self.coordinator.get_latest_estimated_cost(
@@ -1011,19 +1163,33 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
 
         if cost_data:
             raw_value = cost_data.get("value")
-            self._attr_native_value = round_to_max_digits(raw_value) if isinstance(raw_value, (int, float)) else raw_value
-            self._attr_native_unit_of_measurement = cost_data.get("unit") or self.coordinator.get_setting("Currency") or ""
+            self._attr_native_value = (
+                round_to_max_digits(raw_value)
+                if isinstance(raw_value, (int, float))
+                else raw_value
+            )
+            self._attr_native_unit_of_measurement = (
+                cost_data.get("unit") or self.coordinator.get_setting("Currency") or ""
+            )
 
             # Update last data date
             time_stamp = cost_data.get("time")
             if time_stamp:
                 self._last_data_date = datetime.fromtimestamp(time_stamp)
 
-            _LOGGER.info("Updated %s (estimated): %s %s",
-                         self.entity_id, self._attr_native_value, self._attr_native_unit_of_measurement)
+            _LOGGER.info(
+                "Updated %s (estimated): %s %s",
+                self.entity_id,
+                self._attr_native_value,
+                self._attr_native_unit_of_measurement,
+            )
         else:
-            _LOGGER.debug("No estimated cost data returned for %s (utility: %s, meter: %s)",
-                          self.entity_id, self._utility_code, self._measuring_point_id)
+            _LOGGER.debug(
+                "No estimated cost data returned for %s (utility: %s, meter: %s)",
+                self.entity_id,
+                self._utility_code,
+                self._measuring_point_id,
+            )
             self._attr_native_value = None
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
@@ -1031,7 +1197,6 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
 
         # Notify Home Assistant that the state has changed
         self.async_write_ha_state()
-
 
 
 class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
@@ -1052,7 +1217,12 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             utility_code: Utility code (e.g., "HW", "CW")
             cost_type: "actual" for metered API data, "estimated" for estimated costs
         """
-        super().__init__(coordinator, hass=hass)
+        description_key = (
+            "description.cost_daily_aggregated_estimated"
+            if cost_type == "estimated"
+            else "description.cost_daily_aggregated_metered"
+        )
+        super().__init__(coordinator, hass=hass, description_key=description_key)
         self._hass = hass
         self._utility_code = utility_code
         self._cost_type = cost_type
@@ -1089,15 +1259,21 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
         self._last_data_date: datetime | None = None
         self._meters_with_data: list[dict[str, Any]] = []
 
+        # Set entity description (must be called after name and unique_id are set)
+        self._set_entity_description()
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        attrs = {
-            "utility_code": self._utility_code,
-            "sensor_type": "daily_cost_aggregate",
-            "cost_type": "metered" if self._cost_type == "actual" else "estimated",
-            "meter_count": len(self._meters_with_data),
-        }
+        attrs = self._get_base_extra_state_attributes()
+        attrs.update(
+            {
+                "utility_code": self._utility_code,
+                "sensor_type": "daily_cost_aggregate",
+                "cost_type": "metered" if self._cost_type == "actual" else "estimated",
+                "meter_count": len(self._meters_with_data),
+            }
+        )
 
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
@@ -1136,9 +1312,11 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
                 new_name = f"{cost_daily} {metered} - {utility_name}"
 
             await self._update_name_and_registry(new_name, log_level="debug")
+
+            # Update description
+            await self._async_update_description()
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
-
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -1199,15 +1377,19 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
                     if latest_timestamp is None or time_stamp > latest_timestamp:
                         latest_timestamp = time_stamp
 
-                meters_with_data.append({
-                    "measuring_point_id": measuring_point_id,
-                    "measuring_point_name": measuring_point_name,
-                    "value": value,
-                })
+                meters_with_data.append(
+                    {
+                        "measuring_point_id": measuring_point_id,
+                        "measuring_point_name": measuring_point_name,
+                        "value": value,
+                    }
+                )
 
         if total_value > 0 or (self._cost_type == "actual" and meters_with_data):
             # Even if total is 0, update if we have meter data (shows 0 is valid)
-            self._attr_native_value = round_to_max_digits(total_value) if total_value > 0 else 0.0
+            self._attr_native_value = (
+                round_to_max_digits(total_value) if total_value > 0 else 0.0
+            )
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
             if latest_timestamp:
@@ -1215,29 +1397,53 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             self._meters_with_data = meters_with_data
             self._attr_available = True
 
-            _LOGGER.info("Updated %s: %s %s (from %d meters)",
-                         self.entity_id, self._attr_native_value, currency, len(meters_with_data))
+            _LOGGER.info(
+                "Updated %s: %s %s (from %d meters)",
+                self.entity_id,
+                self._attr_native_value,
+                currency,
+                len(meters_with_data),
+            )
         else:
             # No metered cost data available
             # For estimated costs, trigger async fetch to calculate from consumption + rate/spot prices
             if self._cost_type == "estimated":
                 from homeassistant.core import CoreState
-                if self.hass and not self.hass.is_stopping and self.hass.state != CoreState.starting:
+
+                if (
+                    self.hass
+                    and not self.hass.is_stopping
+                    and self.hass.state != CoreState.starting
+                ):
                     # Trigger async fetch in background (non-blocking)
                     async def _fetch_estimated_cost():
                         try:
-                            _LOGGER.debug("Starting async fetch for estimated cost aggregate: %s", self.entity_id)
+                            _LOGGER.debug(
+                                "Starting async fetch for estimated cost aggregate: %s",
+                                self.entity_id,
+                            )
                             await self._async_fetch_value()
                         except Exception as err:
-                            _LOGGER.warning("Error in async fetch for %s: %s", self.entity_id, err, exc_info=True)
+                            _LOGGER.warning(
+                                "Error in async fetch for %s: %s",
+                                self.entity_id,
+                                err,
+                                exc_info=True,
+                            )
+
                     self.hass.async_create_task(_fetch_estimated_cost())
-                    _LOGGER.debug("Created async task for estimated cost aggregate fetch: %s", self.entity_id)
+                    _LOGGER.debug(
+                        "Created async task for estimated cost aggregate fetch: %s",
+                        self.entity_id,
+                    )
                 else:
-                    _LOGGER.debug("Skipping async fetch for %s: hass=%s, is_stopping=%s, state=%s",
-                                 self.entity_id,
-                                 self.hass is not None,
-                                 self.hass.is_stopping if self.hass else None,
-                                 self.hass.state if self.hass else None)
+                    _LOGGER.debug(
+                        "Skipping async fetch for %s: hass=%s, is_stopping=%s, state=%s",
+                        self.entity_id,
+                        self.hass is not None,
+                        self.hass.is_stopping if self.hass else None,
+                        self.hass.state if self.hass else None,
+                    )
 
             # No data available yet, but keep sensor available
             self._attr_native_value = None
@@ -1301,11 +1507,13 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
                     if latest_timestamp is None or time_stamp > latest_timestamp:
                         latest_timestamp = time_stamp
 
-                meters_with_data.append({
-                    "measuring_point_id": measuring_point_id,
-                    "measuring_point_name": measuring_point_name,
-                    "value": value,
-                })
+                meters_with_data.append(
+                    {
+                        "measuring_point_id": measuring_point_id,
+                        "measuring_point_name": measuring_point_name,
+                        "value": value,
+                    }
+                )
 
         if total_value > 0:
             self._attr_native_value = round_to_max_digits(total_value)
@@ -1324,7 +1532,6 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
         self.async_write_ha_state()
 
 
-
 class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
     """Sensor for combined daily water cost (HW + CW) across all meters."""
 
@@ -1341,7 +1548,12 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
             coordinator: The coordinator instance
             cost_type: "actual" for metered API data, "estimated" for estimated costs
         """
-        super().__init__(coordinator, hass=hass)
+        description_key = (
+            "description.cost_daily_combined_water_estimated"
+            if cost_type == "estimated"
+            else "description.cost_daily_combined_water_metered"
+        )
+        super().__init__(coordinator, hass=hass, description_key=description_key)
         self._hass = hass
         self._cost_type = cost_type
 
@@ -1376,16 +1588,22 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         self._hw_meters_with_data: list[dict[str, Any]] = []
         self._cw_meters_with_data: list[dict[str, Any]] = []
 
+        # Set entity description (must be called after name and unique_id are set)
+        self._set_entity_description()
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        attrs = {
-            "sensor_type": "daily_cost_combined_water",
-            "cost_type": "metered" if self._cost_type == "actual" else "estimated",
-            "utilities": ["HW", "CW"],
-            "hw_meter_count": len(self._hw_meters_with_data),
-            "cw_meter_count": len(self._cw_meters_with_data),
-        }
+        attrs = self._get_base_extra_state_attributes()
+        attrs.update(
+            {
+                "sensor_type": "daily_cost_combined_water",
+                "cost_type": "metered" if self._cost_type == "actual" else "estimated",
+                "utilities": ["HW", "CW"],
+                "hw_meter_count": len(self._hw_meters_with_data),
+                "cw_meter_count": len(self._cw_meters_with_data),
+            }
+        )
 
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
@@ -1432,9 +1650,11 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
                 new_name = f"{cost_daily} {metered} - {water_name}"
 
             await self._update_name_and_registry(new_name, log_level="debug")
+
+            # Update description
+            await self._async_update_description()
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
-
 
     def _update_from_coordinator_data(self) -> None:
         """Update sensor state from coordinator's cached data (no API calls)."""
@@ -1504,8 +1724,11 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
                     # For metered HW costs: if data is missing (Unknown), we need to know about it
                     # This happens when all HW price values are 0 (no metered price data from API)
                     # We track this so we can show Unknown for the combined sensor
-                    _LOGGER.debug("HW cost data is Unknown (missing from cache) for meter %d in combined sensor %s",
-                                 measuring_point_id, self.entity_id)
+                    _LOGGER.debug(
+                        "HW cost data is Unknown (missing from cache) for meter %d in combined sensor %s",
+                        measuring_point_id,
+                        self.entity_id,
+                    )
 
         total_value = hw_total + cw_total
 
@@ -1521,17 +1744,35 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
             # This ensures we get the complete combined cost with both HW and CW
             if not has_hw_data or not has_cw_data:
                 from homeassistant.core import CoreState
-                if self.hass and not self.hass.is_stopping and self.hass.state != CoreState.starting:
+
+                if (
+                    self.hass
+                    and not self.hass.is_stopping
+                    and self.hass.state != CoreState.starting
+                ):
                     # Trigger async fetch in background (non-blocking)
                     async def _fetch_estimated_cost():
                         try:
-                            _LOGGER.debug("Starting async fetch for estimated combined water cost: %s", self.entity_id)
+                            _LOGGER.debug(
+                                "Starting async fetch for estimated combined water cost: %s",
+                                self.entity_id,
+                            )
                             await self._async_fetch_value()
                         except Exception as err:
-                            _LOGGER.warning("Error in async fetch for %s: %s", self.entity_id, err, exc_info=True)
+                            _LOGGER.warning(
+                                "Error in async fetch for %s: %s",
+                                self.entity_id,
+                                err,
+                                exc_info=True,
+                            )
+
                     self.hass.async_create_task(_fetch_estimated_cost())
-                    _LOGGER.debug("Created async task for estimated combined water cost fetch: %s (has_hw_data=%s, has_cw_data=%s)",
-                                 self.entity_id, has_hw_data, has_cw_data)
+                    _LOGGER.debug(
+                        "Created async task for estimated combined water cost fetch: %s (has_hw_data=%s, has_cw_data=%s)",
+                        self.entity_id,
+                        has_hw_data,
+                        has_cw_data,
+                    )
 
         # Only set a value if we have data for BOTH HW and CW
         # This ensures the combined sensor only shows a value when both utilities are available
@@ -1549,18 +1790,31 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
             self._hw_meters_with_data = hw_meters_with_data
             self._cw_meters_with_data = cw_meters_with_data
             self._attr_available = True
-            _LOGGER.debug("Updated %s: HW=%.2f, CW=%.2f, Total=%.2f",
-                         self.entity_id, hw_total, cw_total, total_value)
+            _LOGGER.debug(
+                "Updated %s: HW=%.2f, CW=%.2f, Total=%.2f",
+                self.entity_id,
+                hw_total,
+                cw_total,
+                total_value,
+            )
         else:
             # Missing data for one or both utilities - show Unknown
             # This is especially important for metered costs: if HW is Unknown (all 0 values),
             # we show Unknown rather than just CW cost (which would be misleading)
             if self._cost_type == "estimated":
-                _LOGGER.debug("Waiting for both utilities: %s (has_hw_data=%s, has_cw_data=%s)",
-                             self.entity_id, has_hw_data, has_cw_data)
+                _LOGGER.debug(
+                    "Waiting for both utilities: %s (has_hw_data=%s, has_cw_data=%s)",
+                    self.entity_id,
+                    has_hw_data,
+                    has_cw_data,
+                )
             elif self._cost_type == "actual":
-                _LOGGER.debug("Missing data for combined water cost: %s (has_hw_data=%s, has_cw_data=%s) - showing Unknown",
-                             self.entity_id, has_hw_data, has_cw_data)
+                _LOGGER.debug(
+                    "Missing data for combined water cost: %s (has_hw_data=%s, has_cw_data=%s) - showing Unknown",
+                    self.entity_id,
+                    has_hw_data,
+                    has_cw_data,
+                )
             self._attr_native_value = None
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
@@ -1650,8 +1904,14 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
             self._cw_meters_with_data = cw_meters_with_data
             self._attr_available = True
 
-            _LOGGER.info("Updated %s (estimated): HW=%.2f, CW=%.2f, Total=%.2f %s",
-                         self.entity_id, hw_total, cw_total, total_value, currency)
+            _LOGGER.info(
+                "Updated %s (estimated): HW=%.2f, CW=%.2f, Total=%.2f %s",
+                self.entity_id,
+                hw_total,
+                cw_total,
+                total_value,
+                currency,
+            )
         else:
             # Missing data for one or both utilities - don't show a value yet
             self._attr_native_value = None
@@ -1661,10 +1921,11 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
             self._hw_meters_with_data = []
             self._cw_meters_with_data = []
             self._attr_available = True
-            _LOGGER.debug("Waiting for both utilities in %s (has_hw_data=%s, has_cw_data=%s)",
-                         self.entity_id, has_hw_data, has_cw_data)
+            _LOGGER.debug(
+                "Waiting for both utilities in %s (has_hw_data=%s, has_cw_data=%s)",
+                self.entity_id,
+                has_hw_data,
+                has_cw_data,
+            )
 
         self.async_write_ha_state()
-
-
-

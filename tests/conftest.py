@@ -21,24 +21,24 @@ pytest_plugins = ("pytest_homeassistant_custom_component",)
 
 def _create_config_entry(**kwargs) -> ConfigEntry:
     """Create a ConfigEntry that works with different Home Assistant versions.
-    
+
     Some versions require discovery_keys and subentries_data, others don't accept them.
     This function inspects the signature and conditionally includes them.
     """
     # Get the ConfigEntry signature
     sig = inspect.signature(ConfigEntry.__init__)
     params = sig.parameters
-    
+
     # Check if discovery_keys and subentries_data are in the signature
     needs_discovery_keys = "discovery_keys" in params
     needs_subentries_data = "subentries_data" in params
-    
+
     # Add optional parameters if they're required by this version
     if needs_discovery_keys and "discovery_keys" not in kwargs:
         kwargs["discovery_keys"] = None
     if needs_subentries_data and "subentries_data" not in kwargs:
         kwargs["subentries_data"] = None
-    
+
     return ConfigEntry(**kwargs)
 
 
@@ -47,6 +47,7 @@ async def setup_integration(hass: HomeAssistant):
     """Set up the integration for testing."""
     # Ensure the integration is set up
     from custom_components.ecoguard import async_setup
+
     await async_setup(hass, {})
 
 
@@ -56,16 +57,12 @@ def mock_api() -> MagicMock:
     api = MagicMock(spec=EcoGuardAPI)
     api.authenticate = AsyncMock(return_value={"access_token": "test_token"})
     api.get_user_info = AsyncMock(return_value={"ID": 1, "Name": "Test User"})
-    api.get_nodes = AsyncMock(
-        return_value=[{"ID": 123, "Name": "Test Node"}]
-    )
+    api.get_nodes = AsyncMock(return_value=[{"ID": 123, "Name": "Test Node"}])
     api.get_node = AsyncMock(
         return_value={
             "ID": 123,
             "Name": "Test Node",
-            "MeasuringPoints": [
-                {"ID": 1, "Name": "Test Measuring Point"}
-            ],
+            "MeasuringPoints": [{"ID": 1, "Name": "Test Measuring Point"}],
         }
     )
     api.get_measuring_points = AsyncMock(
@@ -90,9 +87,7 @@ def mock_api() -> MagicMock:
         ]
     )
     api.get_latest_reception = AsyncMock(
-        return_value=[
-            {"PositionID": 1, "LatestReception": 1234567890}
-        ]
+        return_value=[{"PositionID": 1, "LatestReception": 1234567890}]
     )
     api.get_data = AsyncMock(return_value=[])
     api.get_billing_results = AsyncMock(return_value=[])
@@ -138,15 +133,11 @@ def mock_coordinator_data() -> dict:
                 ],
             }
         ],
-        "latest_reception": [
-            {"PositionID": 1, "LatestReception": 1234567890}
-        ],
+        "latest_reception": [{"PositionID": 1, "LatestReception": 1234567890}],
         "node_data": {
             "ID": 123,
             "Name": "Test Node",
-            "MeasuringPoints": [
-                {"ID": 1, "Name": "Test Measuring Point"}
-            ],
+            "MeasuringPoints": [{"ID": 1, "Name": "Test Measuring Point"}],
         },
         "settings": [{"Name": "Currency", "Value": "NOK"}],
         "node_id": 123,

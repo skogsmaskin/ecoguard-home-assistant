@@ -14,7 +14,7 @@ _LOGGER = logging.getLogger(__name__)
 
 class RequestDeduplicator:
     """Helper class for deduplicating and caching async requests."""
-    
+
     def __init__(
         self,
         hass: Any,
@@ -25,7 +25,7 @@ class RequestDeduplicator:
         lock: asyncio.Lock | None = None,
     ) -> None:
         """Initialize the deduplicator.
-        
+
         Args:
             hass: Home Assistant instance
             cache_ttl: Cache TTL in seconds
@@ -38,10 +38,14 @@ class RequestDeduplicator:
         self.cache_ttl = cache_ttl
         self.defer_during_startup = defer_during_startup
         self._cache: dict[str, tuple[Any, float]] = cache if cache is not None else {}
-        self._pending_requests: dict[str, asyncio.Task] = pending_requests if pending_requests is not None else {}
+        self._pending_requests: dict[str, asyncio.Task] = (
+            pending_requests if pending_requests is not None else {}
+        )
         self._lock = lock if lock is not None else asyncio.Lock()
-        self._owns_resources = cache is None and pending_requests is None and lock is None
-    
+        self._owns_resources = (
+            cache is None and pending_requests is None and lock is None
+        )
+
     async def get_or_fetch(
         self,
         cache_key: str,
@@ -49,18 +53,18 @@ class RequestDeduplicator:
         use_cache: bool = True,
     ) -> Any:
         """Get cached data or fetch it with deduplication.
-        
+
         This method:
         1. Checks cache first (if enabled)
         2. Checks for pending requests to avoid duplicate calls
         3. Creates a new fetch task if needed
         4. Caches the result
-        
+
         Args:
             cache_key: Unique key for this request
             fetch_func: Async function to fetch the data
             use_cache: Whether to use cache (default: True)
-            
+
         Returns:
             The fetched data
         """
@@ -68,7 +72,7 @@ class RequestDeduplicator:
         if use_cache and cache_key in self._cache:
             cached_data, cache_timestamp = self._cache[cache_key]
             age = time.time() - cache_timestamp
-            
+
             if age < self.cache_ttl:
                 _LOGGER.debug(
                     "Using cached data for key %s (age: %.1f seconds)",
@@ -84,20 +88,17 @@ class RequestDeduplicator:
                     self.cache_ttl,
                 )
                 del self._cache[cache_key]
-        
+
         # Defer during startup if configured
         if self.defer_during_startup and self.hass.state == CoreState.starting:
-            _LOGGER.debug(
-                "Deferring request for key %s (HA is starting)",
-                cache_key
-            )
+            _LOGGER.debug("Deferring request for key %s (HA is starting)", cache_key)
             # Return expired cached data if available, or None
             if cache_key in self._cache:
                 cached_data, _ = self._cache[cache_key]
                 _LOGGER.debug("Using expired cached data during startup")
                 return cached_data
             return None
-        
+
         # Check for pending request
         async with self._lock:
             if cache_key in self._pending_requests:
@@ -110,7 +111,7 @@ class RequestDeduplicator:
                     task_to_await = None
             else:
                 task_to_await = None
-        
+
         # Await outside the lock to avoid deadlock
         if task_to_await is not None:
             _LOGGER.debug(
@@ -127,15 +128,18 @@ class RequestDeduplicator:
                 )
                 # Remove failed task and continue to fetch
                 async with self._lock:
-                    if cache_key in self._pending_requests and self._pending_requests[cache_key] is task_to_await:
+                    if (
+                        cache_key in self._pending_requests
+                        and self._pending_requests[cache_key] is task_to_await
+                    ):
                         del self._pending_requests[cache_key]
-        
+
         # Create async task for fetching
         async def _fetch_with_cache() -> Any:
             try:
                 _LOGGER.debug("Fetching data for key %s", cache_key)
                 result = await fetch_func()
-                
+
                 # Cache the result
                 if result is not None and use_cache:
                     self._cache[cache_key] = (result, time.time())
@@ -143,7 +147,7 @@ class RequestDeduplicator:
                         "Cached data for key %s",
                         cache_key,
                     )
-                
+
                 return result
             except Exception as err:
                 _LOGGER.warning(
@@ -160,9 +164,12 @@ class RequestDeduplicator:
             finally:
                 # Clean up pending request
                 async with self._lock:
-                    if cache_key in self._pending_requests and self._pending_requests[cache_key] is task:
+                    if (
+                        cache_key in self._pending_requests
+                        and self._pending_requests[cache_key] is task
+                    ):
                         del self._pending_requests[cache_key]
-        
+
         # Create and track the task
         async with self._lock:
             # Final check - did another request create a task while we were waiting?
@@ -180,22 +187,28 @@ class RequestDeduplicator:
                 # No pending task, create and add it
                 task = asyncio.create_task(_fetch_with_cache())
                 self._pending_requests[cache_key] = task
-        
+
         try:
             return await task
-        except Exception as err:
+        except Exception:
             # Clean up on error
             async with self._lock:
-                if cache_key in self._pending_requests and self._pending_requests[cache_key] is task:
+                if (
+                    cache_key in self._pending_requests
+                    and self._pending_requests[cache_key] is task
+                ):
                     del self._pending_requests[cache_key]
             raise
         finally:
             # Clean up pending request if still there and it's done
             async with self._lock:
-                if cache_key in self._pending_requests and self._pending_requests[cache_key].done():
+                if (
+                    cache_key in self._pending_requests
+                    and self._pending_requests[cache_key].done()
+                ):
                     if self._pending_requests[cache_key] is task:
                         del self._pending_requests[cache_key]
-    
+
     def clear_cache(self) -> None:
         """Clear all cached data."""
         self._cache.clear()

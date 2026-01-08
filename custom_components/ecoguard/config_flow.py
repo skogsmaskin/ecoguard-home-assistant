@@ -156,7 +156,9 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
             await api.async_close()
         except Exception:
             pass
-        raise CannotConnect(f"Unexpected error: {type(err).__name__}: {str(err)}") from err
+        raise CannotConnect(
+            f"Unexpected error: {type(err).__name__}: {str(err)}"
+        ) from err
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -164,17 +166,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
-    async def async_step_user(
-        self, user_input: Optional[dict[str, Any]] = None
-    ):
+    async def async_step_user(self, user_input: Optional[dict[str, Any]] = None):
         """Handle the initial step."""
         if user_input is None:
             return self.async_show_form(
                 step_id="user",
                 data_schema=STEP_USER_DATA_SCHEMA,
-                description_placeholders={
-                    "nord_pool_link": NORD_POOL_MAP_URL
-                }
+                description_placeholders={"nord_pool_link": NORD_POOL_MAP_URL},
             )
 
         errors = {}
@@ -195,7 +193,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(user_input["domain"])
             self._abort_if_unique_id_configured()
 
-            _LOGGER.debug("Creating config entry with title: %s, node_id: %s", info["title"], info["node_id"])
+            _LOGGER.debug(
+                "Creating config entry with title: %s, node_id: %s",
+                info["title"],
+                info["node_id"],
+            )
             result = self.async_create_entry(
                 title=info["title"],
                 data={
@@ -207,9 +209,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Trigger data fetching after entry is created and setup completes
             # This happens in the background and doesn't block the config flow
             domain = user_input["domain"]  # Use domain as unique_id to find the entry
+
             async def _trigger_data_fetch_after_setup():
                 """Trigger data fetch after entry setup completes."""
                 import asyncio
+
                 # Wait a bit for async_setup_entry to complete
                 await asyncio.sleep(1.0)
                 try:
@@ -223,11 +227,18 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                     if entry:
                         from . import trigger_data_fetch_for_entry
+
                         await trigger_data_fetch_for_entry(self.hass, entry.entry_id)
                     else:
-                        _LOGGER.warning("Could not find entry for domain %s after creation", domain)
+                        _LOGGER.warning(
+                            "Could not find entry for domain %s after creation", domain
+                        )
                 except Exception as err:
-                    _LOGGER.warning("Failed to trigger data fetch after config flow: %s", err, exc_info=True)
+                    _LOGGER.warning(
+                        "Failed to trigger data fetch after config flow: %s",
+                        err,
+                        exc_info=True,
+                    )
 
             # Schedule data fetch as a background task
             self.hass.async_create_task(_trigger_data_fetch_after_setup())
@@ -238,9 +249,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=STEP_USER_DATA_SCHEMA,
             errors=errors,
-            description_placeholders={
-                "nord_pool_link": NORD_POOL_MAP_URL
-            }
+            description_placeholders={"nord_pool_link": NORD_POOL_MAP_URL},
         )
 
 
@@ -250,4 +259,3 @@ class CannotConnect(HomeAssistantError):
 
 class InvalidAuth(HomeAssistantError):
     """Error to indicate there is invalid auth."""
-

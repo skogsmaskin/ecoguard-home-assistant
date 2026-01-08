@@ -25,6 +25,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+
 class EcoGuardAuthenticationError(Exception):
     """Exception raised for authentication errors."""
 
@@ -58,7 +59,9 @@ class EcoGuardAPI:
         self._lock = asyncio.Lock()
         self._request_semaphore = asyncio.Semaphore(3)  # Limit to 3 concurrent requests
         self._last_request_time: Optional[datetime] = None
-        self._min_request_interval = timedelta(milliseconds=200)  # Minimum 200ms between requests
+        self._min_request_interval = timedelta(
+            milliseconds=200
+        )  # Minimum 200ms between requests
 
     async def _get_session(self) -> ClientSession:
         """Get or create aiohttp session."""
@@ -125,9 +128,7 @@ class EcoGuardAPI:
                         # Tokens typically expire in 12 days based on examples
                         if self._access_token:
                             # Set expiration to 12 days from now as default
-                            self._token_expires_at = datetime.now() + timedelta(
-                                days=12
-                            )
+                            self._token_expires_at = datetime.now() + timedelta(days=12)
 
                         return {
                             "access_token": self._access_token,
@@ -205,7 +206,9 @@ class EcoGuardAPI:
         if self._last_request_time:
             time_since_last = datetime.now() - self._last_request_time
             if time_since_last < self._min_request_interval:
-                wait_time = (self._min_request_interval - time_since_last).total_seconds()
+                wait_time = (
+                    self._min_request_interval - time_since_last
+                ).total_seconds()
                 await asyncio.sleep(wait_time)
 
         # Use semaphore to limit concurrent requests
@@ -226,7 +229,9 @@ class EcoGuardAPI:
 
                     self._last_request_time = datetime.now()
 
-                    async with session.request(method, url, headers=headers, **kwargs) as response:
+                    async with session.request(
+                        method, url, headers=headers, **kwargs
+                    ) as response:
                         if response.status == 401:
                             # Token expired, try to refresh
                             await self.refresh_token()
@@ -245,7 +250,9 @@ class EcoGuardAPI:
                         if response.status == 429:
                             # Rate limited - retry with exponential backoff
                             if attempt < max_retries - 1:
-                                delay = base_delay * (2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                                delay = base_delay * (
+                                    2**attempt
+                                )  # Exponential backoff: 1s, 2s, 4s
                                 error_text = await response.text()
                                 _LOGGER.warning(
                                     "Rate limited (429) on attempt %d/%d for %s %s. Retrying in %.1f seconds...",
@@ -273,7 +280,7 @@ class EcoGuardAPI:
                 except ClientError as err:
                     # Network errors - retry if we have attempts left
                     if attempt < max_retries - 1:
-                        delay = base_delay * (2 ** attempt)
+                        delay = base_delay * (2**attempt)
                         _LOGGER.warning(
                             "Network error on attempt %d/%d for %s %s: %s. Retrying in %.1f seconds...",
                             attempt + 1,
@@ -285,7 +292,9 @@ class EcoGuardAPI:
                         )
                         await asyncio.sleep(delay)
                         continue
-                    raise EcoGuardAPIError(f"Network error during API request after {max_retries} attempts: {err}")
+                    raise EcoGuardAPIError(
+                        f"Network error during API request after {max_retries} attempts: {err}"
+                    )
 
             # If we get here, all retries failed
             raise EcoGuardAPIError(f"API request failed after {max_retries} attempts")
@@ -431,4 +440,3 @@ class EcoGuardAPI:
         """Get domain settings."""
         endpoint = API_SETTINGS.format(domaincode=self._domain)
         return await self._request("GET", endpoint)
-

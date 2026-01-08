@@ -28,6 +28,14 @@ Major bump because breaking changes. Strictly following semantic versioning.
 - Improved translation system with better entity registry name updates
 - Sensor names now properly translate in both list view and modal dialogs
 
+#### Sensor Descriptions
+- **Added translated descriptions for all sensors**: Each sensor now includes a description explaining its purpose
+  - Descriptions are available in entity attributes for easy reference
+  - Descriptions are translated based on Home Assistant language setting
+  - Available in English, Norwegian (Bokmål), Norwegian (Nynorsk), and Swedish
+  - Descriptions explain what each sensor measures, data sources, and any important notes
+  - View descriptions in Developer Tools → States or in entity attributes
+
 ### Changed
 
 #### Sensor Naming Conventions

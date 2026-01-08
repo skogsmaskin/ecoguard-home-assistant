@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, date as date_class
-from typing import Any
 import asyncio
 import logging
 import requests
@@ -11,6 +10,7 @@ import requests
 # Try to import nordpool library (optional dependency)
 try:
     from nordpool import elspot
+
     NORD_POOL_AVAILABLE = True
 except ImportError:
     NORD_POOL_AVAILABLE = False
@@ -28,7 +28,9 @@ class NordPoolPriceFetcher:
         Args:
             price_cache: Optional shared cache dict for prices
         """
-        self._price_cache: dict[str, float] = price_cache if price_cache is not None else {}
+        self._price_cache: dict[str, float] = (
+            price_cache if price_cache is not None else {}
+        )
         self._pending_requests: dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
 
@@ -60,6 +62,7 @@ class NordPoolPriceFetcher:
             return None
 
         import zoneinfo
+
         try:
             tz = zoneinfo.ZoneInfo(timezone_str)
         except Exception:
@@ -149,10 +152,14 @@ class NordPoolPriceFetcher:
 
                 def fetch_prices():
                     try:
-                        _LOGGER.debug("Calling nordpool fetch for area %s, date %s", area_code, today)
+                        _LOGGER.debug(
+                            "Calling nordpool fetch for area %s, date %s",
+                            area_code,
+                            today,
+                        )
                         result = prices_spot.fetch(
                             areas=[area_code],
-                            end_date=date_class(today.year, today.month, today.day)
+                            end_date=date_class(today.year, today.month, today.day),
                         )
                         _LOGGER.debug(
                             "nordpool fetch returned: %s (type: %s)",
@@ -165,7 +172,11 @@ class NordPoolPriceFetcher:
                             yesterday_date = today - timedelta(days=1)
                             result = prices_spot.fetch(
                                 areas=[area_code],
-                                end_date=date_class(yesterday_date.year, yesterday_date.month, yesterday_date.day)
+                                end_date=date_class(
+                                    yesterday_date.year,
+                                    yesterday_date.month,
+                                    yesterday_date.day,
+                                ),
                             )
                             _LOGGER.debug(
                                 "nordpool fetch for yesterday returned: %s",
@@ -174,7 +185,9 @@ class NordPoolPriceFetcher:
 
                         return result
                     except Exception as e:
-                        _LOGGER.warning("Exception during nordpool fetch: %s", e, exc_info=True)
+                        _LOGGER.warning(
+                            "Exception during nordpool fetch: %s", e, exc_info=True
+                        )
                         return None
 
                 try:
@@ -224,7 +237,9 @@ class NordPoolPriceFetcher:
 
             values = area_data.get("values")
             if not values:
-                _LOGGER.debug("Nord Pool API returned empty values array for area %s", area_code)
+                _LOGGER.debug(
+                    "Nord Pool API returned empty values array for area %s", area_code
+                )
                 return None
 
             # Find the current hour's price, or use the most recent available price
@@ -259,12 +274,16 @@ class NordPoolPriceFetcher:
                             )
 
             if not prices_today:
-                _LOGGER.debug("No prices found for today (%s) for area %s", today, area_code)
+                _LOGGER.debug(
+                    "No prices found for today (%s) for area %s", today, area_code
+                )
                 return None
 
             # Use current hour price if available, otherwise use average of today's prices
             if current_price is not None:
-                _LOGGER.debug("Using current hour price: %.4f %s/kWh", current_price, currency)
+                _LOGGER.debug(
+                    "Using current hour price: %.4f %s/kWh", current_price, currency
+                )
                 spot_price = current_price
             else:
                 avg_price = sum(prices_today) / len(prices_today)
@@ -308,7 +327,7 @@ class NordPoolPriceFetcher:
                 )
                 return fallback_price
             return None
-        except Exception as err:
+        except Exception:
             if cache_key in self._pending_requests:
                 del self._pending_requests[cache_key]
             if fallback_price is not None:
@@ -319,5 +338,8 @@ class NordPoolPriceFetcher:
                 return fallback_price
             raise
         finally:
-            if cache_key in self._pending_requests and self._pending_requests[cache_key].done():
+            if (
+                cache_key in self._pending_requests
+                and self._pending_requests[cache_key].done()
+            ):
                 del self._pending_requests[cache_key]

@@ -15,6 +15,7 @@ from custom_components.ecoguard.api import EcoGuardAPIError
 # Import pytest-homeassistant-custom-component fixtures
 pytest_plugins = ("pytest_homeassistant_custom_component",)
 
+
 async def test_coordinator_update_data_success(
     hass: HomeAssistant, mock_api: MagicMock
 ):
@@ -54,7 +55,7 @@ async def test_coordinator_update_data_api_error(
 
     # Coordinator is designed to be resilient and return data even when endpoints fail
     data = await coordinator._async_update_data()
-    
+
     # Should return data structure with empty lists
     assert data is not None
     assert data["measuring_points"] == []
@@ -208,9 +209,7 @@ async def test_latest_reception_coordinator_update(
     )
 
     mock_api.get_latest_reception = AsyncMock(
-        return_value=[
-            {"PositionID": 1, "LatestReception": 1234567890}
-        ]
+        return_value=[{"PositionID": 1, "LatestReception": 1234567890}]
     )
 
     data = await coordinator._async_update_data()
@@ -229,17 +228,13 @@ async def test_latest_reception_coordinator_error(
         node_id=123,
     )
 
-    mock_api.get_latest_reception = AsyncMock(
-        side_effect=EcoGuardAPIError("API Error")
-    )
+    mock_api.get_latest_reception = AsyncMock(side_effect=EcoGuardAPIError("API Error"))
 
     with pytest.raises(UpdateFailed):
         await coordinator._async_update_data()
 
 
-async def test_coordinator_billing_cache(
-    hass: HomeAssistant, mock_api: MagicMock
-):
+async def test_coordinator_billing_cache(hass: HomeAssistant, mock_api: MagicMock):
     """Test billing results caching."""
     coordinator = EcoGuardDataUpdateCoordinator(
         hass=hass,
@@ -251,13 +246,14 @@ async def test_coordinator_billing_cache(
     mock_billing_data = [{"ID": 1, "Amount": 100.0}]
     mock_api.get_billing_results = AsyncMock(return_value=mock_billing_data)
 
+    # Billing caching is now handled by BillingManager
     # First call should fetch from API
-    result1 = await coordinator._get_cached_billing_results(123)
+    result1 = await coordinator.billing_manager.get_cached_billing_results()
     assert mock_api.get_billing_results.call_count == 1
     assert len(result1) == 1
 
     # Second call should use cache
-    result2 = await coordinator._get_cached_billing_results(123)
+    result2 = await coordinator.billing_manager.get_cached_billing_results()
     assert mock_api.get_billing_results.call_count == 1  # Still 1
     assert len(result2) == 1
 
@@ -275,7 +271,7 @@ async def test_coordinator_get_latest_consumption_value(
 
     # Set up settings for timezone
     coordinator._settings = [{"Name": "TimeZoneIANA", "Value": "Europe/Oslo"}]
-    
+
     # Set up installations for filtering
     coordinator._installations = [
         {

@@ -74,7 +74,9 @@ def _load_translation_file_sync(lang: str) -> dict[str, Any] | None:
     return None
 
 
-async def load_translation_file(hass: HomeAssistant, lang: str) -> dict[str, Any] | None:
+async def load_translation_file(
+    hass: HomeAssistant, lang: str
+) -> dict[str, Any] | None:
     """Load translation file asynchronously to access sensor section with request deduplication."""
     # Check cache first
     if lang in _translation_cache:
@@ -117,7 +119,11 @@ async def load_translation_file(hass: HomeAssistant, lang: str) -> dict[str, Any
             # Run the blocking file I/O in a thread pool
             data = await asyncio.to_thread(_load_translation_file_sync, lang)
             if data:
-                _LOGGER.debug("Loaded translation file for lang %s, keys in common: %s", lang, list(data.get("common", {}).keys()))
+                _LOGGER.debug(
+                    "Loaded translation file for lang %s, keys in common: %s",
+                    lang,
+                    list(data.get("common", {}).keys()),
+                )
             return data
         except Exception as e:
             _LOGGER.debug("Failed to load translation file for lang %s: %s", lang, e)
@@ -156,13 +162,20 @@ async def load_translation_file(hass: HomeAssistant, lang: str) -> dict[str, Any
     except asyncio.CancelledError:
         # Task was cancelled, clean up
         async with _translation_load_lock:
-            if lang in _pending_translation_loads and _pending_translation_loads[lang] is task_to_await:
+            if (
+                lang in _pending_translation_loads
+                and _pending_translation_loads[lang] is task_to_await
+            ):
                 del _pending_translation_loads[lang]
         raise
-    except Exception as err:
+    except Exception:
         # Clean up on error
         async with _translation_load_lock:
-            if lang in _pending_translation_loads and _pending_translation_loads[lang] is task_to_await and _pending_translation_loads[lang].done():
+            if (
+                lang in _pending_translation_loads
+                and _pending_translation_loads[lang] is task_to_await
+                and _pending_translation_loads[lang].done()
+            ):
                 del _pending_translation_loads[lang]
         raise
 
@@ -171,7 +184,7 @@ async def async_get_translation(hass: HomeAssistant, key: str, **kwargs: Any) ->
     """Get a translated string from the integration's translation files."""
     try:
         # Get the current language from hass.config.language
-        lang = getattr(hass.config, 'language', 'en')
+        lang = getattr(hass.config, "language", "en")
 
         # Load translation file directly to access common section
         # (The translation helper only loads config section)
@@ -186,11 +199,22 @@ async def async_get_translation(hass: HomeAssistant, key: str, **kwargs: Any) ->
             if translation_key in common_data:
                 text = common_data[translation_key]
                 if isinstance(text, str):
-                    _LOGGER.debug("Found translation for key %s (as %s): %s (lang=%s)", key, translation_key, text, lang)
+                    _LOGGER.debug(
+                        "Found translation for key %s (as %s): %s (lang=%s)",
+                        key,
+                        translation_key,
+                        text,
+                        lang,
+                    )
                     return text.format(**kwargs) if kwargs else text
             else:
-                _LOGGER.debug("Translation key %s (as %s) not found in common section (lang=%s). Available keys: %s",
-                             key, translation_key, lang, list(common_data.keys())[:10])
+                _LOGGER.debug(
+                    "Translation key %s (as %s) not found in common section (lang=%s). Available keys: %s",
+                    key,
+                    translation_key,
+                    lang,
+                    list(common_data.keys())[:10],
+                )
 
         # Fallback to English
         if lang != "en":
@@ -204,7 +228,12 @@ async def async_get_translation(hass: HomeAssistant, key: str, **kwargs: Any) ->
                     if isinstance(text, str):
                         return text.format(**kwargs) if kwargs else text
     except Exception as e:
-        _LOGGER.warning("Translation lookup failed for key %s (lang=%s): %s", key, getattr(hass.config, 'language', 'en'), e)
+        _LOGGER.warning(
+            "Translation lookup failed for key %s (lang=%s): %s",
+            key,
+            getattr(hass.config, "language", "en"),
+            e,
+        )
 
     # Fallback to English defaults
     defaults = {
@@ -225,11 +254,37 @@ async def async_get_translation(hass: HomeAssistant, key: str, **kwargs: Any) ->
         "name.all_utilities": "All Utilities",
         "name.cost_monthly_estimated_final_settlement": "Cost Monthly Estimated Final Settlement",
         "name.reception_last_update": "Reception Last Update",
+        "description.consumption_daily_meter": "Last known daily consumption for this specific meter. Data may be delayed by up to a day.",
+        "description.cost_daily_metered": "Daily cost for this meter based on actual API data. Data may be delayed by up to a day.",
+        "description.cost_daily_estimated": "Estimated daily cost for this meter calculated from consumption and pricing data.",
+        "description.consumption_daily_aggregated": "Aggregated daily consumption across all meters for this utility type. Data may be delayed by up to a day.",
+        "description.cost_daily_aggregated_metered": "Aggregated daily cost across all meters for this utility type, based on actual API data.",
+        "description.cost_daily_aggregated_estimated": "Estimated aggregated daily cost across all meters for this utility type.",
+        "description.consumption_daily_combined_water": "Combined hot and cold water daily consumption across all meters.",
+        "description.cost_daily_combined_water_metered": "Combined hot and cold water daily cost based on actual API data.",
+        "description.cost_daily_combined_water_estimated": "Estimated combined hot and cold water daily cost.",
+        "description.consumption_monthly_aggregated": "Total consumption for the current month, aggregated across all meters for this utility type.",
+        "description.cost_monthly_aggregated_metered": "Monthly cost aggregated across all meters for this utility type, based on actual API data.",
+        "description.cost_monthly_aggregated_estimated": "Estimated monthly cost aggregated across all meters for this utility type, using Nord Pool spot prices for electricity.",
+        "description.consumption_monthly_meter": "Monthly consumption for this specific meter for the current month.",
+        "description.cost_monthly_meter_metered": "Monthly cost for this specific meter based on actual API data.",
+        "description.cost_monthly_meter_estimated": "Estimated monthly cost for this specific meter.",
+        "description.consumption_monthly_combined_water": "Combined hot and cold water monthly consumption for the current month.",
+        "description.cost_monthly_combined_water_metered": "Combined hot and cold water monthly cost based on actual API data.",
+        "description.cost_monthly_combined_water_estimated": "Estimated combined hot and cold water monthly cost.",
+        "description.cost_monthly_other_items": "General fees and charges from the most recent billing period available.",
+        "description.cost_monthly_estimated_final_settlement": "Estimated final monthly bill settlement based on current consumption patterns and mean daily values.",
+        "description.cost_monthly_total_metered": "Total monthly cost across all utilities, based on actual API data.",
+        "description.cost_monthly_total_estimated": "Total monthly cost across all utilities, including estimated costs where actual data is not available.",
+        "description.reception_last_update": "Timestamp of the last data reception for this measuring point.",
     }
 
     default = defaults.get(key, key)
     if default == key:
-        _LOGGER.debug("Translation key %s not found in defaults dictionary, returning key as-is", key)
+        _LOGGER.debug(
+            "Translation key %s not found in defaults dictionary, returning key as-is",
+            key,
+        )
     return default.format(**kwargs) if kwargs else default
 
 
@@ -256,6 +311,29 @@ def get_translation_default(key: str, **kwargs: Any) -> str:
         "name.all_utilities": "All Utilities",
         "name.cost_monthly_estimated_final_settlement": "Cost Monthly Estimated Final Settlement",
         "name.reception_last_update": "Reception Last Update",
+        "description.consumption_daily_meter": "Last known daily consumption for this specific meter. Data may be delayed by up to a day.",
+        "description.cost_daily_metered": "Daily cost for this meter based on actual API data. Data may be delayed by up to a day.",
+        "description.cost_daily_estimated": "Estimated daily cost for this meter calculated from consumption and pricing data.",
+        "description.consumption_daily_aggregated": "Aggregated daily consumption across all meters for this utility type. Data may be delayed by up to a day.",
+        "description.cost_daily_aggregated_metered": "Aggregated daily cost across all meters for this utility type, based on actual API data.",
+        "description.cost_daily_aggregated_estimated": "Estimated aggregated daily cost across all meters for this utility type.",
+        "description.consumption_daily_combined_water": "Combined hot and cold water daily consumption across all meters.",
+        "description.cost_daily_combined_water_metered": "Combined hot and cold water daily cost based on actual API data.",
+        "description.cost_daily_combined_water_estimated": "Estimated combined hot and cold water daily cost.",
+        "description.consumption_monthly_aggregated": "Total consumption for the current month, aggregated across all meters for this utility type.",
+        "description.cost_monthly_aggregated_metered": "Monthly cost aggregated across all meters for this utility type, based on actual API data.",
+        "description.cost_monthly_aggregated_estimated": "Estimated monthly cost aggregated across all meters for this utility type, using Nord Pool spot prices for electricity.",
+        "description.consumption_monthly_meter": "Monthly consumption for this specific meter for the current month.",
+        "description.cost_monthly_meter_metered": "Monthly cost for this specific meter based on actual API data.",
+        "description.cost_monthly_meter_estimated": "Estimated monthly cost for this specific meter.",
+        "description.consumption_monthly_combined_water": "Combined hot and cold water monthly consumption for the current month.",
+        "description.cost_monthly_combined_water_metered": "Combined hot and cold water monthly cost based on actual API data.",
+        "description.cost_monthly_combined_water_estimated": "Estimated combined hot and cold water monthly cost.",
+        "description.cost_monthly_other_items": "General fees and charges from the most recent billing period available.",
+        "description.cost_monthly_estimated_final_settlement": "Estimated final monthly bill settlement based on current consumption patterns and mean daily values.",
+        "description.cost_monthly_total_metered": "Total monthly cost across all utilities, based on actual API data.",
+        "description.cost_monthly_total_estimated": "Total monthly cost across all utilities, including estimated costs where actual data is not available.",
+        "description.reception_last_update": "Timestamp of the last data reception for this measuring point.",
     }
 
     default = defaults.get(key, key)

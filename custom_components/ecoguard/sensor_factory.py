@@ -11,21 +11,7 @@ from .const import WATER_UTILITIES
 from .coordinator import EcoGuardDataUpdateCoordinator
 
 if TYPE_CHECKING:
-    from .sensors import (
-        EcoGuardDailyConsumptionSensor,
-        EcoGuardDailyCostSensor,
-        EcoGuardLatestReceptionSensor,
-        EcoGuardDailyConsumptionAggregateSensor,
-        EcoGuardDailyCostAggregateSensor,
-        EcoGuardDailyCombinedWaterSensor,
-        EcoGuardDailyCombinedWaterCostSensor,
-        EcoGuardMonthlyAggregateSensor,
-        EcoGuardMonthlyMeterSensor,
-        EcoGuardCombinedWaterSensor,
-        EcoGuardOtherItemsSensor,
-        EcoGuardEndOfMonthEstimateSensor,
-        EcoGuardTotalMonthlyCostSensor,
-    )
+    pass
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -79,7 +65,10 @@ def create_installation_sensors(
                 primary_utility_code = utility_code
                 break  # Use the first utility found
 
-        if measuring_point_id not in measuring_points_with_reception_sensor and latest_reception_coordinator:
+        if (
+            measuring_point_id not in measuring_points_with_reception_sensor
+            and latest_reception_coordinator
+        ):
             latest_reception_sensor = EcoGuardLatestReceptionSensor(
                 hass=hass,
                 coordinator=latest_reception_coordinator,
@@ -227,10 +216,12 @@ def create_daily_combined_water_sensors(
         )
         sensors.append(daily_combined_water_cost_metered_sensor)
 
-        daily_combined_water_cost_estimated_sensor = EcoGuardDailyCombinedWaterCostSensor(
-            hass=hass,
-            coordinator=coordinator,
-            cost_type="estimated",
+        daily_combined_water_cost_estimated_sensor = (
+            EcoGuardDailyCombinedWaterCostSensor(
+                hass=hass,
+                coordinator=coordinator,
+                cost_type="estimated",
+            )
         )
         sensors.append(daily_combined_water_cost_estimated_sensor)
 
@@ -453,7 +444,9 @@ def create_special_sensors(
     sensors.append(other_items_sensor)
 
     # End-of-month estimate sensor
-    end_of_month_estimate_sensor = EcoGuardEndOfMonthEstimateSensor(hass=hass, coordinator=coordinator)
+    end_of_month_estimate_sensor = EcoGuardEndOfMonthEstimateSensor(
+        hass=hass, coordinator=coordinator
+    )
     sensors.append(end_of_month_estimate_sensor)
 
     # Create total monthly cost sensors (metered and estimated)

@@ -21,8 +21,13 @@ class MonthlyCostCalculator:
         api: Any,  # EcoGuardAPI
         get_setting: Callable[[str], str | None],
         get_active_installations: Callable[[], list[dict[str, Any]]],
-        get_monthly_aggregate: Callable[[str, int, int, str, str], Awaitable[dict[str, Any] | None]],
-        get_hw_price_from_spot_prices: Callable[[float, int, int, float | None, float | None], Awaitable[dict[str, Any] | None]],
+        get_monthly_aggregate: Callable[
+            [str, int, int, str, str], Awaitable[dict[str, Any] | None]
+        ],
+        get_hw_price_from_spot_prices: Callable[
+            [float, int, int, float | None, float | None],
+            Awaitable[dict[str, Any] | None],
+        ],
         billing_manager: Any,  # BillingManager
     ) -> None:
         """Initialize the monthly cost calculator.
@@ -162,9 +167,15 @@ class MonthlyCostCalculator:
 
             # Check if HW is missing and needs estimation
             estimated_cost = 0.0
-            if include_estimated and "HW" in utility_codes and "HW" not in metered_utilities:
+            if (
+                include_estimated
+                and "HW" in utility_codes
+                and "HW" not in metered_utilities
+            ):
                 # HW price data is missing, try to estimate it
-                _LOGGER.debug("HW price data missing, attempting to estimate from spot prices")
+                _LOGGER.debug(
+                    "HW price data missing, attempting to estimate from spot prices"
+                )
 
                 # Get HW consumption for current month
                 hw_consumption_data = await self._get_monthly_aggregate(
@@ -192,7 +203,11 @@ class MonthlyCostCalculator:
                         )
 
                         cw_price = cw_price_data.get("value") if cw_price_data else None
-                        cw_consumption = cw_consumption_data.get("value") if cw_consumption_data else None
+                        cw_consumption = (
+                            cw_consumption_data.get("value")
+                            if cw_consumption_data
+                            else None
+                        )
 
                         # Estimate HW price from spot prices
                         hw_estimated_data = await self._get_hw_price_from_spot_prices(
@@ -235,18 +250,18 @@ class MonthlyCostCalculator:
                 # Look back up to 6 months to find a billing result
                 lookback_time = from_time - (180 * 24 * 60 * 60)  # 6 months
                 cache_key = f"vat_{year}_{month}"
-                billing_results = await self._billing_manager.get_cached_billing_results(
-                    start_from=lookback_time,
-                    start_to=to_time,
-                    cache_key=cache_key,
+                billing_results = (
+                    await self._billing_manager.get_cached_billing_results(
+                        start_from=lookback_time,
+                        start_to=to_time,
+                        cache_key=cache_key,
+                    )
                 )
 
                 if billing_results and isinstance(billing_results, list):
                     # Sort by end date descending to get most recent first
                     sorted_results = sorted(
-                        billing_results,
-                        key=lambda x: x.get("End", 0),
-                        reverse=True
+                        billing_results, key=lambda x: x.get("End", 0), reverse=True
                     )
 
                     # Find VAT information from the most recent billing result
@@ -309,7 +324,9 @@ class MonthlyCostCalculator:
 
             # Calculate total pure cost (metered without VAT + estimated)
             pure_total_cost = pure_metered_cost + estimated_cost
-            total_with_vat = metered_cost + estimated_cost if prices_include_vat else pure_total_cost
+            total_with_vat = (
+                metered_cost + estimated_cost if prices_include_vat else pure_total_cost
+            )
 
             if prices_include_vat and vat_rate:
                 _LOGGER.debug(
@@ -351,7 +368,9 @@ class MonthlyCostCalculator:
                 )
 
             result = {
-                "value": round(pure_total_cost, 2),  # Total pure value (metered without VAT + estimated)
+                "value": round(
+                    pure_total_cost, 2
+                ),  # Total pure value (metered without VAT + estimated)
                 "unit": currency,
                 "year": year,
                 "month": month,
@@ -360,15 +379,23 @@ class MonthlyCostCalculator:
                 "metered_utilities": sorted(metered_utilities),
                 "estimated_utilities": sorted(estimated_utilities),
                 "metered_cost": round(pure_metered_cost, 2),  # Metered cost without VAT
-                "metered_cost_with_vat": round(metered_cost, 2) if prices_include_vat else round(pure_metered_cost, 2),
+                "metered_cost_with_vat": (
+                    round(metered_cost, 2)
+                    if prices_include_vat
+                    else round(pure_metered_cost, 2)
+                ),
                 "estimated_cost": round(estimated_cost, 2),
                 "is_estimated": len(estimated_utilities) > 0,
-                "cost_without_vat": round(pure_total_cost, 2),  # Same as value (always pure)
+                "cost_without_vat": round(
+                    pure_total_cost, 2
+                ),  # Same as value (always pure)
             }
 
             # Include VAT information if VAT was found and removed
             if prices_include_vat and total_vat > 0:
-                result["cost_with_vat"] = round(total_with_vat, 2)  # Total with VAT (metered with VAT + estimated)
+                result["cost_with_vat"] = round(
+                    total_with_vat, 2
+                )  # Total with VAT (metered with VAT + estimated)
                 result["vat_amount"] = round(total_vat, 2)
                 if vat_rate:
                     result["vat_rate_percent"] = round(vat_rate * 100, 2)
