@@ -103,6 +103,12 @@ Major bump because breaking changes. Strictly following semantic versioning.
 - Added atomic task creation with lock protection to ensure only one request per unique data
 - Fixed `get_end_of_month_estimate` to use daily cache first and add deduplication for API calls
 
+#### Deadlock Fix
+- **Fixed deadlock in `get_cached_billing_results`**: Moved `await` outside lock to prevent blocking
+  when multiple callers await the same pending task. This was preventing
+  `cost_monthly_estimated_final_settlement` from getting values.
+- Fixed issue where concurrent calls to `get_monthly_other_items_cost` would hang indefinitely
+
 ### Technical Improvements
 
 #### Performance & Startup
@@ -136,6 +142,26 @@ Major bump because breaking changes. Strictly following semantic versioning.
   - `_get_monthly_price_hw_estimated`: Handles HW estimated monthly price with deduplication
   - `_calculate_monthly_consumption_from_daily_cache`: Calculates monthly consumption from cached daily data
   - `_fetch_monthly_consumption_from_api`: Fetches monthly consumption from API with deduplication
+
+#### Code Refactoring
+- **Extracted code from `coordinator.py` into separate modules** to improve maintainability:
+  - `billing_manager.py`: Billing data fetching, caching, and extraction logic
+    - `get_cached_billing_results`: Billing results with caching and request deduplication
+    - `get_rate_from_billing`: Extract rates from billing data
+    - `get_monthly_other_items_cost`: Extract other items cost from billing data
+    - `get_monthly_price_from_billing`: Get monthly price from billing or calculate from consumption × rate
+    - `calculate_hw_calibration_ratio`: Calculate HW calibration ratio from historical billing data
+  - `helpers.py`: Common helper functions
+    - `get_timezone`: Centralized timezone handling
+    - `get_month_timestamps`: Month boundary timestamp calculations
+  - `nord_pool.py`: Nord Pool spot price fetching
+    - `NordPoolPriceFetcher`: Encapsulates Nord Pool API interaction with caching
+  - `price_calculator.py`: Hot water price calculation logic
+    - `HWPriceCalculator`: Encapsulates complex HW price calculation with calibration
+  - `request_deduplicator.py`: Request deduplication pattern
+    - `RequestDeduplicator`: Reusable class for deduplicating async requests
+- Updated `sensor.py` to use `billing_manager` directly instead of delegation methods
+- Added call_id tracking to `get_end_of_month_estimate` for debugging concurrent calls
 
 #### Entity Registry Management
 - Improved entity registry update logic to handle timing issues
