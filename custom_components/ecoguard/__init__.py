@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
@@ -115,39 +115,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         _LOGGER.debug("Entry setup completed successfully")
         
-        # Schedule data fetching to start after Home Assistant has fully started
-        # This ensures sensors load instantly (showing "Unknown" state) and data
-        # is fetched in the background without blocking startup
-        async def _start_data_fetching_after_startup(event):
-            """Start fetching data after Home Assistant has fully started."""
-            _LOGGER.debug("Home Assistant started, beginning background data fetch")
-            
-            # Fetch batch data (consumption and price) in background
-            async def _fetch_batch_data():
-                """Fetch batch data in background."""
-                try:
-                    await coordinator._batch_fetch_sensor_data()
-                    _LOGGER.info("Background data fetch completed")
-                except Exception as err:
-                    _LOGGER.warning("Error in background data fetch: %s", err, exc_info=True)
-            
-            # Fetch latest reception data in background
-            async def _fetch_latest_reception():
-                """Fetch latest reception data in background."""
-                try:
-                    latest_reception = await api.get_latest_reception(node_id)
-                    if latest_reception:
-                        latest_reception_coordinator.async_set_updated_data(latest_reception)
-                        _LOGGER.debug("Latest reception data updated: %d entries", len(latest_reception))
-                except Exception as err:
-                    _LOGGER.warning("Error fetching latest reception: %s", err, exc_info=True)
-            
-            # Start both fetches as background tasks (non-blocking)
+        # Fetch data function (reusable for both startup and reload)
+        async def _fetch_batch_data():
+            """Fetch batch data in background."""
+            try:
+                await coordinator._batch_fetch_sensor_data()
+                _LOGGER.info("Background data fetch completed")
+            except Exception as err:
+                _LOGGER.warning("Error in background data fetch: %s", err, exc_info=True)
+        
+        async def _fetch_latest_reception():
+            """Fetch latest reception data in background."""
+            try:
+                latest_reception = await api.get_latest_reception(node_id)
+                if latest_reception:
+                    latest_reception_coordinator.async_set_updated_data(latest_reception)
+                    _LOGGER.debug("Latest reception data updated: %d entries", len(latest_reception))
+            except Exception as err:
+                _LOGGER.warning("Error fetching latest reception: %s", err, exc_info=True)
+        
+        # Check if Home Assistant is already started (reload scenario)
+        if hass.state == CoreState.running:
+            # HA is already running, so this is a reload - trigger data fetch immediately
+            _LOGGER.info("Home Assistant already running, triggering data refresh after reload")
             hass.async_create_task(_fetch_batch_data())
             hass.async_create_task(_fetch_latest_reception())
-        
-        # Listen for homeassistant_started event to begin data fetching
-        hass.bus.async_listen_once("homeassistant_started", _start_data_fetching_after_startup)
+        else:
+            # HA is still starting, wait for the started event
+            async def _start_data_fetching_after_startup(event):
+                """Start fetching data after Home Assistant has fully started."""
+                _LOGGER.debug("Home Assistant started, beginning background data fetch")
+                hass.async_create_task(_fetch_batch_data())
+                hass.async_create_task(_fetch_latest_reception())
+            
+            # Listen for homeassistant_started event to begin data fetching
+            hass.bus.async_listen_once("homeassistant_started", _start_data_fetching_after_startup)
         
         return True
     except Exception as err:
@@ -203,7 +205,7 @@ async def trigger_data_fetch_for_entry(hass: HomeAssistant, entry_id: str) -> No
     """Trigger data fetching for a specific config entry.
     
     This is called after a new integration is added via the config flow
-    to update sensors with real values without blocking the setup process.
+    to update sensors with real values without blocking the setup process.?
     """
     _LOGGER.debug("Triggering data fetch for entry: %s", entry_id)
     
