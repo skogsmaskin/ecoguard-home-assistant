@@ -40,6 +40,7 @@ from .sensor_factory import (
     create_combined_water_sensors,
     create_special_sensors,
 )
+from .sensor_base import EcoGuardBaseSensor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -230,7 +231,7 @@ class EcoGuardSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEnt
         }
 
 
-class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
+class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
     """Sensor for last known daily consumption for a specific meter."""
 
     def __init__(
@@ -243,7 +244,7 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
         measuring_point_name: str | None,
     ) -> None:
         """Initialize the daily consumption sensor."""
-        super().__init__(coordinator)
+        super().__init__(coordinator, hass=hass)
         self._hass = hass
         self._installation = installation
         self._utility_code = utility_code
@@ -284,13 +285,10 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
-        device_name = get_translation_default("name.device_name", node_id=coordinator.node_id)
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, str(coordinator.node_id))},
-            "name": device_name,
-            "manufacturer": "EcoGuard",
-            "model": installation.get("DeviceTypeDisplay", "Unknown"),
-        }
+        self._attr_device_info = self._get_device_info(
+            coordinator.node_id,
+            model=installation.get("DeviceTypeDisplay", "Unknown"),
+        )
 
         # Disable individual meter sensors by default (users can enable if needed)
         self._attr_entity_registry_enabled_default = False
@@ -318,18 +316,6 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
         return attrs
 
-    async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, update translations and set Unknown state."""
-        await super().async_added_to_hass()
-        # Update sensor name with translations now that we're in hass
-        await self._async_update_translated_name()
-        # Set sensor to Unknown state (available=True, native_value=None)
-        # No API calls during startup - sensors will show as "Unknown"
-        self._attr_native_value = None
-        self._attr_available = True
-        self.async_write_ha_state()
-        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
-
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
         if not self.hass or not self._hass:
@@ -348,11 +334,7 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
                 )
                 _LOGGER.debug("Measuring point display: %s", measuring_point_display)
 
-            utility_name = await async_get_translation(
-                self._hass, f"utility.{self._utility_code.lower()}"
-            )
-            if utility_name == f"utility.{self._utility_code.lower()}":  # Fallback if not found
-                utility_name = self._utility_code
+            utility_name = await self._get_translated_utility_name(self._utility_code)
             _LOGGER.debug("Utility name: %s", utility_name)
 
             consumption_daily = await async_get_translation(self._hass, "name.consumption_daily")
@@ -363,22 +345,11 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
             # Keep "Consumption Daily" format to maintain entity_id starting with "consumption_daily_"
             meter = await async_get_translation(self._hass, "name.meter")
             new_name = f'{consumption_daily} - {meter} "{measuring_point_display}" ({utility_name})'
-            if self._attr_name != new_name:
-                old_name = self._attr_name
-                self._attr_name = new_name
-                self.async_write_ha_state()
-                _LOGGER.info("Updated sensor name from '%s' to '%s' (lang=%s)", old_name, new_name, lang)
-
-            # Always update the entity registry name so it shows correctly in modals
-            await async_update_entity_registry_name(self, new_name)
+            await self._update_name_and_registry(new_name, log_level="info")
 
             # Also update device name
-            device_name = await async_get_translation(
-                self._hass, "name.device_name", node_id=self.coordinator.node_id
-            )
-            if self._attr_device_info.get("name") != device_name:
-                self._attr_device_info["name"] = device_name
-                self.async_write_ha_state()
+            device_name = await self._get_translated_device_name(self.coordinator.node_id)
+            self._update_device_name(device_name)
         except Exception as e:
             _LOGGER.warning("Failed to update translated name: %s", e, exc_info=True)
 
@@ -452,7 +423,7 @@ class EcoGuardDailyConsumptionSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
         self.async_write_ha_state()
 
 
-class EcoGuardLatestReceptionSensor(CoordinatorEntity, SensorEntity):
+class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
     """Sensor for last update timestamp for a specific meter."""
 
     def __init__(
@@ -464,7 +435,7 @@ class EcoGuardLatestReceptionSensor(CoordinatorEntity, SensorEntity):
         utility_code: str | None = None,
     ) -> None:
         """Initialize the latest reception sensor."""
-        super().__init__(coordinator)
+        super().__init__(coordinator, hass=hass)
         self._hass = hass
         self._measuring_point_id = measuring_point_id
         self._measuring_point_name = measuring_point_name
@@ -664,7 +635,7 @@ class EcoGuardLatestReceptionSensor(CoordinatorEntity, SensorEntity):
         self.async_write_ha_state()
 
 
-class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
+class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
     """Sensor for monthly aggregate consumption or price."""
 
     def __init__(
@@ -691,7 +662,7 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
             natural in English. This distinction is intentional: "price" for API/internal use,
             "cost" for user-facing display.
         """
-        super().__init__(coordinator)
+        super().__init__(coordinator, hass=hass)
         self._hass = hass
         self._utility_code = utility_code
         self._aggregate_type = aggregate_type
@@ -780,29 +751,13 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
 
         return attrs
 
-    async def async_added_to_hass(self) -> None:
-        """When entity is added to hass, update translations and set Unknown state."""
-        await super().async_added_to_hass()
-        # Update sensor name with translations now that we're in hass
-        await self._async_update_translated_name()
-        # Set sensor to Unknown state (available=True, native_value=None)
-        # No API calls during startup - sensors will show as "Unknown"
-        self._attr_native_value = None
-        self._attr_available = True
-        self.async_write_ha_state()
-        _LOGGER.debug("Sensor %s added to hass (Unknown state, no API calls)", self.entity_id)
-
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
         if not self.hass or not self._hass:
             return
 
         try:
-            utility_name = await async_get_translation(
-                self._hass, f"utility.{self._utility_code.lower()}"
-            )
-            if utility_name == f"utility.{self._utility_code.lower()}":
-                utility_name = self._utility_code
+            utility_name = await self._get_translated_utility_name(self._utility_code)
 
             if self._aggregate_type == "con":
                 # Keep "Consumption Monthly Aggregated" format to maintain entity_id starting with "consumption_monthly_aggregated_"
@@ -821,12 +776,7 @@ class EcoGuardMonthlyAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordin
             # Format: "Aggregate Name - Utility"
             # This groups similar sensors together when sorted alphabetically
             new_name = f"{aggregate_name} - {utility_name}"
-            if self._attr_name != new_name:
-                self._attr_name = new_name
-                self.async_write_ha_state()
-
-                # Also update the entity registry name so it shows correctly in modals
-                await async_update_entity_registry_name(self, new_name)
+            await self._update_name_and_registry(new_name, log_level="debug")
         except Exception as e:
             _LOGGER.debug("Failed to update translated name: %s", e)
 
