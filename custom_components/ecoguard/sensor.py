@@ -1620,7 +1620,7 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
         self.async_write_ha_state()
 
 
-class EcoGuardDailyConsumptionAggregateSensor(CoordinatorEntity[EcoGuardDataUpdateCoordinator], SensorEntity):
+class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
     """Sensor for aggregated daily consumption across all meters of a utility type."""
 
     def __init__(
