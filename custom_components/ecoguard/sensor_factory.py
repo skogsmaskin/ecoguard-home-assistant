@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from .coordinator import EcoGuardDataUpdateCoordinator
 
 if TYPE_CHECKING:
-    from .sensor import (
+    from .sensors import (
         EcoGuardDailyConsumptionSensor,
         EcoGuardDailyCostSensor,
         EcoGuardLatestReceptionSensor,
@@ -49,7 +49,7 @@ def create_installation_sensors(
         Tuple of (list of created sensors, set of utility codes found)
     """
     # Import here to avoid circular import
-    from .sensor import (
+    from .sensors import (
         EcoGuardDailyConsumptionSensor,
         EcoGuardDailyCostSensor,
         EcoGuardLatestReceptionSensor,
@@ -150,7 +150,7 @@ def create_daily_aggregate_sensors(
         List of created sensors
     """
     # Import here to avoid circular import
-    from .sensor import (
+    from .sensors import (
         EcoGuardDailyConsumptionAggregateSensor,
         EcoGuardDailyCostAggregateSensor,
     )
@@ -203,7 +203,7 @@ def create_daily_combined_water_sensors(
         List of created sensors
     """
     # Import here to avoid circular import
-    from .sensor import (
+    from .sensors import (
         EcoGuardDailyCombinedWaterSensor,
         EcoGuardDailyCombinedWaterCostSensor,
     )
@@ -252,7 +252,7 @@ def create_monthly_aggregate_sensors(
         List of created sensors
     """
     # Import here to avoid circular import
-    from .sensor import EcoGuardMonthlyAggregateSensor
+    from .sensors import EcoGuardMonthlyAggregateSensor
 
     sensors: list[Any] = []
 
@@ -306,7 +306,7 @@ def create_monthly_meter_sensors(
         List of created sensors
     """
     # Import here to avoid circular import
-    from .sensor import EcoGuardMonthlyMeterSensor
+    from .sensors import EcoGuardMonthlyMeterSensor
 
     sensors: list[Any] = []
 
@@ -391,7 +391,7 @@ def create_combined_water_sensors(
         List of created sensors
     """
     # Import here to avoid circular import
-    from .sensor import EcoGuardCombinedWaterSensor
+    from .sensors import EcoGuardCombinedWaterSensor
 
     sensors: list[Any] = []
 
@@ -439,7 +439,7 @@ def create_special_sensors(
         List of created sensors
     """
     # Import here to avoid circular import
-    from .sensor import (
+    from .sensors import (
         EcoGuardOtherItemsSensor,
         EcoGuardEndOfMonthEstimateSensor,
         EcoGuardTotalMonthlyCostSensor,
