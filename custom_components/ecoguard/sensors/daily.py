@@ -97,6 +97,18 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
         self._attr_native_unit_of_measurement = None
         self._last_data_date: datetime | None = None
 
+        # Set icon based on utility type
+        if utility_code == "HW":
+            self._attr_icon = "mdi:water-thermometer"
+        elif utility_code == "CW":
+            self._attr_icon = "mdi:water"
+        elif utility_code == "E":
+            self._attr_icon = "mdi:lightning-bolt"
+        elif utility_code == "HE":
+            self._attr_icon = "mdi:radiator"
+        else:
+            self._attr_icon = "mdi:gauge"
+
         # Set entity description (must be called after name and unique_id are set)
         self._set_entity_description()
 
@@ -319,6 +331,9 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
         self._attr_device_class = SensorDeviceClass.TIMESTAMP
         self._attr_native_value = None
 
+        # Set icon for latest reception sensor
+        self._attr_icon = "mdi:clock-outline"
+
         # Set entity description (must be called after name and unique_id are set)
         self._set_entity_description()
 
@@ -499,6 +514,18 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
         self._attr_native_unit_of_measurement = None
         self._last_data_date: datetime | None = None
         self._meters_with_data: list[dict[str, Any]] = []
+
+        # Set icon based on utility type
+        if utility_code == "HW":
+            self._attr_icon = "mdi:water-thermometer"
+        elif utility_code == "CW":
+            self._attr_icon = "mdi:water"
+        elif utility_code == "E":
+            self._attr_icon = "mdi:lightning-bolt"
+        elif utility_code == "HE":
+            self._attr_icon = "mdi:radiator"
+        else:
+            self._attr_icon = "mdi:gauge"
 
         # Set entity description (must be called after name and unique_id are set)
         self._set_entity_description()
@@ -720,6 +747,9 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
         self._last_data_date: datetime | None = None
         self._hw_meters_with_data: list[dict[str, Any]] = []
         self._cw_meters_with_data: list[dict[str, Any]] = []
+
+        # Set icon for combined water sensor
+        self._attr_icon = "mdi:water-circle"
 
         # Set entity description (must be called after name and unique_id are set)
         self._set_entity_description()
@@ -975,6 +1005,9 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
         currency = coordinator.get_setting("Currency") or ""
         self._attr_native_unit_of_measurement = currency
         self._last_data_date: datetime | None = None
+
+        # Set icon for cost sensor (all money units use dollar icon)
+        self._attr_icon = "mdi:currency-usd"
 
         # Set entity description (must be called after name and unique_id are set)
         self._set_entity_description()
@@ -1258,6 +1291,9 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
         self._attr_native_unit_of_measurement = currency
         self._last_data_date: datetime | None = None
         self._meters_with_data: list[dict[str, Any]] = []
+
+        # Set icon for cost sensor (all money units use dollar icon)
+        self._attr_icon = "mdi:currency-usd"
 
         # Set entity description (must be called after name and unique_id are set)
         self._set_entity_description()
@@ -1587,6 +1623,9 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         self._last_data_date: datetime | None = None
         self._hw_meters_with_data: list[dict[str, Any]] = []
         self._cw_meters_with_data: list[dict[str, Any]] = []
+
+        # Set icon for cost sensor (all money units use dollar icon)
+        self._attr_icon = "mdi:currency-usd"
 
         # Set entity description (must be called after name and unique_id are set)
         self._set_entity_description()

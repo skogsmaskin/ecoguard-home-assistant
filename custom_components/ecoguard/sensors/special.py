@@ -65,6 +65,9 @@ class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
         self._item_count: int | None = None
         self._items: list[dict[str, Any]] = []
 
+        # Set icon for cost sensor (all money units use dollar icon)
+        self._attr_icon = "mdi:currency-usd"
+
         # Set entity description (must be called after name and unique_id are set)
         self._set_entity_description()
 
@@ -280,6 +283,9 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
         self._current_year: int | None = None
         self._current_month: int | None = None
         self._utilities: list[str] = []
+
+        # Set icon for cost sensor (all money units use dollar icon)
+        self._attr_icon = "mdi:currency-usd"
 
         # Set entity description (must be called after name and unique_id are set)
         self._set_entity_description()
@@ -523,6 +529,9 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
         self._cw_consumption_so_far: float | None = None
         self._cw_price_so_far: float | None = None
         self._hw_price_is_estimated: bool = False
+
+        # Set icon for cost sensor (all money units use dollar icon)
+        self._attr_icon = "mdi:currency-usd"
 
         # Set entity description (must be called after name and unique_id are set)
         self._set_entity_description()

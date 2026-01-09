@@ -36,6 +36,23 @@ Major bump because breaking changes. Strictly following semantic versioning.
   - Descriptions explain what each sensor measures, data sources, and any important notes
   - View descriptions in Developer Tools → States or in entity attributes
 
+#### Sensor Icons
+- **Added icons to all sensors**: All sensors now display appropriate icons in the Home Assistant UI
+  - **Consumption sensors**: Utility-specific icons
+    - Hot Water (HW): `mdi:water-thermometer`
+    - Cold Water (CW): `mdi:water`
+    - Electricity (E): `mdi:lightning-bolt`
+    - Heat (HE): `mdi:radiator`
+  - **Cost/Price sensors**: Dollar icon (`mdi:currency-usd`) for all money-related sensors
+    - Daily cost sensors (metered and estimated)
+    - Monthly cost sensors (metered and estimated)
+    - Combined water cost sensors
+    - Total monthly cost sensors
+    - Other items cost sensor
+    - End-of-month estimate sensor
+  - **Latest reception sensors**: Clock icon (`mdi:clock-outline`)
+  - **Combined water consumption**: Water circle icon (`mdi:water-circle`)
+
 ### Changed
 
 #### Sensor Naming Conventions

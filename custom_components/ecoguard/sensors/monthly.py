@@ -129,6 +129,21 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
         self._current_year: int | None = None
         self._current_month: int | None = None
 
+        # Set icon based on aggregate type and utility type
+        if aggregate_type == "con":
+            if utility_code == "HW":
+                self._attr_icon = "mdi:water-thermometer"
+            elif utility_code == "CW":
+                self._attr_icon = "mdi:water"
+            elif utility_code == "E":
+                self._attr_icon = "mdi:lightning-bolt"
+            elif utility_code == "HE":
+                self._attr_icon = "mdi:radiator"
+            else:
+                self._attr_icon = "mdi:chart-line"
+        else:  # price/cost - all money units use dollar icon
+            self._attr_icon = "mdi:currency-usd"
+
         # Set entity description (must be called after name and unique_id are set)
         self._set_entity_description()
 
@@ -615,6 +630,21 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
             self._attr_native_unit_of_measurement = None
         self._current_year: int | None = None
         self._current_month: int | None = None
+
+        # Set icon based on aggregate type and utility type
+        if aggregate_type == "con":
+            if utility_code == "HW":
+                self._attr_icon = "mdi:water-thermometer"
+            elif utility_code == "CW":
+                self._attr_icon = "mdi:water"
+            elif utility_code == "E":
+                self._attr_icon = "mdi:lightning-bolt"
+            elif utility_code == "HE":
+                self._attr_icon = "mdi:radiator"
+            else:
+                self._attr_icon = "mdi:chart-line"
+        else:  # price/cost - all money units use dollar icon
+            self._attr_icon = "mdi:currency-usd"
 
         # Set entity description (must be called after name and unique_id are set)
         self._set_entity_description()
@@ -1394,6 +1424,12 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
             self._attr_native_unit_of_measurement = "m³"
         self._current_year: int | None = None
         self._current_month: int | None = None
+
+        # Set icon for combined water sensor
+        if aggregate_type == "con":
+            self._attr_icon = "mdi:water-circle"
+        else:  # price/cost - all money units use dollar icon
+            self._attr_icon = "mdi:currency-usd"
 
         # Set entity description (must be called after name and unique_id are set)
         self._set_entity_description()
