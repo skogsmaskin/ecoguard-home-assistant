@@ -568,6 +568,7 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
                 latest_date = datetime.fromtimestamp(self._latest_data_timestamp)
                 attrs["latest_data_date"] = latest_date.isoformat()
             except Exception:
+                # Ignore timestamp conversion errors - the raw timestamp is already available in attrs
                 pass
 
         if self._hw_consumption_estimate is not None:

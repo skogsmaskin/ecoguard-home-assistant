@@ -87,7 +87,8 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
                 node_data = await api.get_node(node_id)
                 measuring_points = node_data.get("MeasuringPoints", [])
             except Exception:
-                # Fallback to separate measuring points endpoint
+                # Node data endpoint may not be available, fallback to separate measuring points endpoint
+                # Will be empty list if both fail
                 try:
                     measuring_points = await api.get_measuring_points(node_id)
                 except Exception:
@@ -141,6 +142,7 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
         try:
             await api.async_close()
         except Exception:
+            # Ignore errors when closing API during error handling - the original error is more important
             pass
         raise InvalidAuth(str(err)) from err
     except EcoGuardAPIError as err:
@@ -148,6 +150,7 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
         try:
             await api.async_close()
         except Exception:
+            # Ignore errors when closing API during error handling - the original error is more important
             pass
         raise CannotConnect(f"API error: {str(err)}") from err
     except Exception as err:
@@ -155,6 +158,7 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
         try:
             await api.async_close()
         except Exception:
+            # Ignore errors when closing API during error handling - the original error is more important
             pass
         raise CannotConnect(
             f"Unexpected error: {type(err).__name__}: {str(err)}"

@@ -514,7 +514,6 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
             except asyncio.CancelledError:
                 _LOGGER.debug("Debounced listener update was cancelled")
-                pass
             except Exception as err:
                 _LOGGER.error(
                     "Error in debounced listener update: %s", err, exc_info=True
