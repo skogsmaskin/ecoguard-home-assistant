@@ -160,12 +160,8 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             pending_requests_lock=self._pending_requests_lock,
             get_setting=self.get_setting,
             billing_cache_ttl=self._billing_cache_ttl,
-            get_monthly_aggregate=lambda uc, y, m, at, ct: self.get_monthly_aggregate(
-                uc, y, m, at, ct
-            ),
-            get_hw_price_from_spot_prices=lambda c, y, m, cwp, cwc: self._get_hw_price_from_spot_prices(
-                c, y, m, cwp, cwc
-            ),
+            get_monthly_aggregate=self.get_monthly_aggregate,
+            get_hw_price_from_spot_prices=self._get_hw_price_from_spot_prices,
             nord_pool_area=self.nord_pool_area,
         )
 
@@ -239,12 +235,8 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             request_deduplicator=self._request_deduplicator,
             api=self.api,
             get_setting=self.get_setting,
-            get_monthly_aggregate=lambda uc, y, m, at, ct: self.get_monthly_aggregate(
-                uc, y, m, at, ct
-            ),
-            get_hw_price_from_spot_prices=lambda c, y, m, cwp, cwc: self._get_hw_price_from_spot_prices(
-                c, y, m, cwp, cwc
-            ),
+            get_monthly_aggregate=self.get_monthly_aggregate,
+            get_hw_price_from_spot_prices=self._get_hw_price_from_spot_prices,
             billing_manager=self.billing_manager,
             installations=self._installations,
         )
@@ -276,12 +268,8 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             api=self.api,
             get_setting=self.get_setting,
             daily_consumption_cache=self._daily_consumption_cache,
-            get_hw_price_from_spot_prices=lambda consumption, year, month, cold_water_price=None, cold_water_consumption=None: self._get_hw_price_from_spot_prices(
-                consumption, year, month, cold_water_price, cold_water_consumption
-            ),
-            get_monthly_aggregate=lambda uc, y, m, at, ct: self.get_monthly_aggregate(
-                uc, y, m, at, ct
-            ),
+            get_hw_price_from_spot_prices=self._get_hw_price_from_spot_prices,
+            get_monthly_aggregate=self.get_monthly_aggregate,
             billing_manager=self.billing_manager,
         )
 
@@ -291,12 +279,8 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             api=self.api,
             get_setting=self.get_setting,
             get_active_installations=self.get_active_installations,
-            get_monthly_aggregate=lambda uc, y, m, at, ct: self.get_monthly_aggregate(
-                uc, y, m, at, ct
-            ),
-            get_hw_price_from_spot_prices=lambda c, y, m, cwp, cwc: self._get_hw_price_from_spot_prices(
-                c, y, m, cwp, cwc
-            ),
+            get_monthly_aggregate=self.get_monthly_aggregate,
+            get_hw_price_from_spot_prices=self._get_hw_price_from_spot_prices,
             billing_manager=self.billing_manager,
         )
 
