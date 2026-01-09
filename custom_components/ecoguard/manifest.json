@@ -1,13 +1,17 @@
 {
   "domain": "ecoguard",
   "name": "EcoGuard",
-  "codeowners": ["@skogsmaskin"],
+  "codeowners": [
+    "@skogsmaskin"
+  ],
   "config_flow": true,
   "documentation": "https://github.com/skogsmaskin/ecoguard-home-assistant",
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/skogsmaskin/ecoguard-home-assistant/issues",
-  "requirements": ["aiohttp>=3.8.0", "nordpool>=0.5.0"],
-  "version": "1.0.0"
+  "requirements": [
+    "aiohttp>=3.8.0",
+    "nordpool>=0.5.0"
+  ],
+  "version": "2.0.0"
 }
-

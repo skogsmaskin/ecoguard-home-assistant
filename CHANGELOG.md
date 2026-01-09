@@ -307,4 +307,5 @@ Sensor names have been restructured to improve grouping and sorting in lists. Wh
 - Configuration guide
 - Nord Pool integration explanation
 
+[2.0.0]: https://github.com/skogsmaskin/ecoguard-home-assistant/releases/tag/v2.0.0
 [1.0.0]: https://github.com/skogsmaskin/ecoguard-home-assistant/releases/tag/v1.0.0
