@@ -1187,6 +1187,8 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
         currency = coordinator.get_setting("Currency") or ""
         self._attr_native_unit_of_measurement = currency
         self._last_data_date: datetime | None = None
+        self._data_lagging: bool = False
+        self._data_lag_days: int | None = None
 
         # Set icon for cost sensor (all money units use dollar icon)
         self._attr_icon = "mdi:currency-usd"
@@ -1211,6 +1213,11 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
 
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
+
+        # Add lag detection attributes
+        attrs["data_lagging"] = self._data_lagging
+        if self._data_lag_days is not None:
+            attrs["data_lag_days"] = self._data_lag_days
 
         return attrs
 
@@ -1378,6 +1385,15 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
             self._last_data_date = None
+
+        # Detect lag
+        if self._last_data_date:
+            is_lagging, lag_days = detect_data_lag(self._last_data_date, tz)
+            self._data_lagging = is_lagging
+            self._data_lag_days = lag_days
+        else:
+            self._data_lagging = True
+            self._data_lag_days = None
 
         # Notify Home Assistant that the state has changed
         self.async_write_ha_state()
