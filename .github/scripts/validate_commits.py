@@ -123,6 +123,19 @@ def main():
     github_base_ref = os.environ.get("GITHUB_BASE_REF")
     github_before = os.environ.get("GITHUB_BEFORE")  # SHA before push
     github_after = os.environ.get("GITHUB_AFTER")    # SHA after push
+    github_pr_title = os.environ.get("GITHUB_PR_TITLE", "")  # PR title (for squash merge)
+
+    # Validate PR title if this is a pull request (important for squash merges)
+    errors = []
+    if github_event_name == "pull_request" and github_pr_title:
+        print("Validating PR title (used for squash merge)...")
+        print(f"PR Title: {github_pr_title}")
+        is_valid, error_msg = validate_commit_message(github_pr_title)
+        if not is_valid:
+            errors.append(f"PR Title: {error_msg}")
+            print("❌ PR title validation failed")
+        else:
+            print("✅ PR title is valid\n")
 
     if github_event_name == "pull_request" and github_base_ref:
         # PR context - compare with base branch (only new commits in PR)
@@ -160,17 +173,17 @@ def main():
     commit_messages = get_commit_messages(base_ref)
 
     if not commit_messages:
-        print("No commits to validate.")
-        return 0
+        if not errors:
+            print("No commits to validate.")
+            return 0
+    else:
+        print(f"Validating {len(commit_messages)} commit(s)...\n")
 
-    print(f"Validating {len(commit_messages)} commit(s)...\n")
-
-    errors = []
-    for i, message in enumerate(commit_messages, 1):
-        print(f"Commit {i}: {message[:50]}...")
-        is_valid, error_msg = validate_commit_message(message)
-        if not is_valid:
-            errors.append(f"Commit {i}: {error_msg}")
+        for i, message in enumerate(commit_messages, 1):
+            print(f"Commit {i}: {message[:50]}...")
+            is_valid, error_msg = validate_commit_message(message)
+            if not is_valid:
+                errors.append(f"Commit {i}: {error_msg}")
 
     if errors:
         print("\n❌ Validation failed:\n")
@@ -178,17 +191,29 @@ def main():
             print(error)
             print()
         print(
-            "Please ensure your commit messages follow the Conventional Commits format:\n"
+            "Please ensure your commit messages and PR title follow the Conventional Commits format:\n"
             "<type>[optional scope]: <description>\n\n"
             "Examples:\n"
             "  feat: add new sensor for water consumption\n"
             "  fix(api): handle authentication errors\n"
             "  docs: update installation instructions\n"
-            "  chore: update dependencies\n"
+            "  chore: update dependencies\n\n"
+            "Note: PR titles are validated because they become commit messages when using 'Squash and merge'."
         )
         return 1
 
-    print("\n✅ All commit messages are valid!")
+    # Success messages
+    success_parts = []
+    if commit_messages:
+        success_parts.append("All commit messages are valid")
+    if github_event_name == "pull_request" and github_pr_title:
+        success_parts.append("PR title is valid")
+    
+    if success_parts:
+        print(f"\n✅ {' and '.join(success_parts)}!")
+    elif not errors:
+        print("\n✅ Validation passed!")
+    
     return 0
 
 
