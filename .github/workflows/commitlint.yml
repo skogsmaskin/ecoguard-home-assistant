@@ -1,0 +1,33 @@
+name: Validate Conventional Commits
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  validate-commits:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for commit validation
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    
+    - name: Fetch base branch (for PRs)
+      if: github.event_name == 'pull_request'
+      run: |
+        git fetch origin ${{ github.base_ref }}:${{ github.base_ref }} || true
+    
+    - name: Validate commit messages
+      env:
+        GITHUB_BASE_REF: ${{ github.base_ref }}
+        GITHUB_REF: ${{ github.ref }}
+      run: |
+        python3 .github/scripts/validate_commits.py
