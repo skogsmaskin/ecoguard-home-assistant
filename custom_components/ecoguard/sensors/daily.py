@@ -1432,7 +1432,7 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
             # For estimated costs, use consumption cache to find actual last data date
             # since estimated costs are calculated from consumption data
             coordinator_data = self.coordinator.data
-            if coordinator_data and self._cost_type == "estimated":
+            if coordinator_data:
                 daily_consumption_cache = coordinator_data.get(
                     "daily_consumption_cache", {}
                 )
@@ -1457,15 +1457,6 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
                         self._last_data_date = datetime.fromtimestamp(time_stamp, tz=tz)
                     else:
                         self._last_data_date = None
-            else:
-                # For metered costs, use timestamp from cost_data
-                time_stamp = cost_data.get("time")
-                if time_stamp:
-                    timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
-                    tz = get_timezone(timezone_str)
-                    self._last_data_date = datetime.fromtimestamp(time_stamp, tz=tz)
-                else:
-                    self._last_data_date = None
 
             # Detect lag
             if self._last_data_date:
@@ -1936,6 +1927,8 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         self._last_data_date: datetime | None = None
         self._hw_meters_with_data: list[dict[str, Any]] = []
         self._cw_meters_with_data: list[dict[str, Any]] = []
+        self._data_lagging: bool = False
+        self._data_lag_days: int | None = None
 
         # Set icon for cost sensor (all money units use dollar icon)
         self._attr_icon = "mdi:currency-usd"
@@ -1961,10 +1954,9 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
             attrs["last_data_date"] = self._last_data_date.isoformat()
 
         # Add lag detection attributes, consistent with other daily sensors
-        timezone = get_timezone(self.hass)
-        data_lagging, data_lag_days = detect_data_lag(self._last_data_date, timezone)
-        attrs["data_lagging"] = data_lagging
-        attrs["data_lag_days"] = data_lag_days
+        attrs["data_lagging"] = self._data_lagging
+        if self._data_lag_days is not None:
+            attrs["data_lag_days"] = self._data_lag_days
         if self._hw_meters_with_data:
             attrs["hw_meters"] = [
                 {
