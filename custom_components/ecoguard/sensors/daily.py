@@ -262,11 +262,13 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
 
             # Log update for debugging
             if old_value != new_value:
-                lag_info = (
-                    f" (lagging {self._data_lag_days} days)"
-                    if self._data_lagging
-                    else ""
-                )
+                if self._data_lagging:
+                    if self._data_lag_days is not None:
+                        lag_info = f" (lagging {self._data_lag_days} days)"
+                    else:
+                        lag_info = " (data unavailable)"
+                else:
+                    lag_info = ""
                 _LOGGER.info(
                     "Updated %s: %s -> %s %s (cache key: %s, last data: %s)%s",
                     self.entity_id,
@@ -701,11 +703,13 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
 
             # Log update for debugging
             if old_value != new_value:
-                lag_info = (
-                    f" (lagging {self._data_lag_days} days)"
-                    if self._data_lagging
-                    else ""
-                )
+                if self._data_lagging:
+                    if self._data_lag_days is not None:
+                        lag_info = f" (lagging {self._data_lag_days} days)"
+                    else:
+                        lag_info = " (data unavailable)"
+                else:
+                    lag_info = ""
                 _LOGGER.info(
                     "Updated %s: %s -> %s %s (cache key: %s, last data: %s)%s",
                     self.entity_id,
@@ -1068,11 +1072,13 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
 
             # Log update for debugging
             if old_value != self._attr_native_value:
-                lag_info = (
-                    f" (lagging {self._data_lag_days} days)"
-                    if self._data_lagging
-                    else ""
-                )
+                if self._data_lagging:
+                    if self._data_lag_days is not None:
+                        lag_info = f" (lagging {self._data_lag_days} days)"
+                    else:
+                        lag_info = " (data unavailable)"
+                else:
+                    lag_info = ""
                 _LOGGER.debug(
                     "Updated %s: %s -> %s %s (HW: %s, CW: %s, last data: %s)%s",
                     self.entity_id,
