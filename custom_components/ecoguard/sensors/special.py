@@ -250,21 +250,23 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
 
         self._cost_type = cost_type  # "actual" (displayed as "Metered") or "estimated"
 
-        # Use "Cost Monthly Aggregated" format with "All Utilities" suffix
+        # Use "Cost Monthly Accumulated" format with "All Utilities" suffix
         # This will be updated in async_added_to_hass with proper translations
-        cost_monthly_aggregated = get_translation_default(
-            "name.cost_monthly_aggregated"
+        cost_monthly_accumulated = get_translation_default(
+            "name.cost_monthly_accumulated"
         )
         all_utilities = get_translation_default("name.all_utilities")
         if cost_type == "estimated":
             estimated = get_translation_default("name.estimated")
-            self._attr_name = f"{cost_monthly_aggregated} {estimated} - {all_utilities}"
+            self._attr_name = (
+                f"{cost_monthly_accumulated} {estimated} - {all_utilities}"
+            )
             # Build unique_id following pattern: purpose_group_total_type
             # Home Assistant strips the domain prefix, so we want: cost_monthly_total_estimated
             self._attr_unique_id = f"{DOMAIN}_cost_monthly_total_estimated"
         else:
             metered = get_translation_default("name.metered")
-            self._attr_name = f"{cost_monthly_aggregated} {metered} - {all_utilities}"
+            self._attr_name = f"{cost_monthly_accumulated} {metered} - {all_utilities}"
             # Build unique_id following pattern: purpose_group_total_type
             # Home Assistant strips the domain prefix, so we want: cost_monthly_total_metered
             self._attr_unique_id = f"{DOMAIN}_cost_monthly_total_metered"
@@ -320,19 +322,19 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
             return
 
         try:
-            # Use "Cost Monthly Aggregated" format with "All Utilities" suffix
-            cost_monthly_aggregated = await async_get_translation(
-                self._hass, "name.cost_monthly_aggregated"
+            # Use "Cost Monthly Accumulated" format with "All Utilities" suffix
+            cost_monthly_accumulated = await async_get_translation(
+                self._hass, "name.cost_monthly_accumulated"
             )
             all_utilities = await async_get_translation(
                 self._hass, "name.all_utilities"
             )
             if self._cost_type == "estimated":
                 estimated = await async_get_translation(self._hass, "name.estimated")
-                new_name = f"{cost_monthly_aggregated} {estimated} - {all_utilities}"
+                new_name = f"{cost_monthly_accumulated} {estimated} - {all_utilities}"
             else:
                 metered = await async_get_translation(self._hass, "name.metered")
-                new_name = f"{cost_monthly_aggregated} {metered} - {all_utilities}"
+                new_name = f"{cost_monthly_accumulated} {metered} - {all_utilities}"
             await self._update_name_and_registry(new_name, log_level="debug")
 
             # Update description

@@ -18,7 +18,7 @@ from custom_components.ecoguard.sensors import (
     EcoGuardDailyCombinedWaterSensor,
     EcoGuardDailyCombinedWaterCostSensor,
     EcoGuardLatestReceptionSensor,
-    EcoGuardMonthlyAggregateSensor,
+    EcoGuardMonthlyAccumulatedSensor,
     EcoGuardMonthlyMeterSensor,
     EcoGuardCombinedWaterSensor,
     EcoGuardOtherItemsSensor,
@@ -112,11 +112,11 @@ async def test_daily_consumption_sensor(
         measuring_point_name="Test Measuring Point",
     )
 
-    # unique_id format: ecoguard_consumption_daily_metered_{utility_slug}_{sensor_name}
+    # unique_id format: ecoguard_consumption_daily_metered_{utility_slug}_meter_{sensor_name}
     # sensor_name is slugified measuring_point_name or f"mp{measuring_point_id}"
     assert (
         sensor._attr_unique_id
-        == "ecoguard_consumption_daily_metered_cold_water_test_measuring_point"
+        == "ecoguard_consumption_daily_metered_cold_water_meter_test_measuring_point"
     )
     assert "Consumption Daily" in sensor._attr_name
     assert sensor._attr_state_class is not None
@@ -140,8 +140,8 @@ async def test_daily_consumption_sensor_fetch_value(hass: HomeAssistant, coordin
         measuring_point_name=None,
     )
 
-    # unique_id format when measuring_point_name is None: ecoguard_consumption_daily_metered_{utility_slug}_mp{measuring_point_id}
-    assert sensor._attr_unique_id == "ecoguard_consumption_daily_metered_cold_water_mp1"
+    # unique_id format when measuring_point_name is None: ecoguard_consumption_daily_metered_{utility_slug}_meter_mp{measuring_point_id}
+    assert sensor._attr_unique_id == "ecoguard_consumption_daily_metered_cold_water_meter_mp1"
 
     # Set hass on sensor (normally done by async_added_to_hass)
     sensor.hass = hass
@@ -185,10 +185,10 @@ async def test_latest_reception_sensor(
         utility_code="CW",
     )
 
-    # unique_id format: ecoguard_reception_last_update_{utility_slug}_{sensor_name}
+    # unique_id format: ecoguard_reception_last_update_{utility_slug}_meter_{sensor_name}
     assert (
         sensor._attr_unique_id
-        == "ecoguard_reception_last_update_cold_water_test_measuring_point"
+        == "ecoguard_reception_last_update_cold_water_meter_test_measuring_point"
     )
     assert sensor._attr_device_class is not None
     assert sensor._attr_entity_registry_enabled_default is False
@@ -210,8 +210,8 @@ async def test_latest_reception_sensor_fetch_value(
         measuring_point_name=None,
     )
 
-    # unique_id format when measuring_point_name is None: ecoguard_reception_last_update_mp{measuring_point_id}
-    assert sensor._attr_unique_id == "ecoguard_reception_last_update_mp1"
+    # unique_id format when measuring_point_name is None: ecoguard_reception_last_update_meter_mp{measuring_point_id}
+    assert sensor._attr_unique_id == "ecoguard_reception_last_update_meter_mp1"
 
     # Set hass on sensor (normally done by async_added_to_hass)
     sensor.hass = hass
@@ -231,9 +231,9 @@ async def test_latest_reception_sensor_fetch_value(
         mock_write.assert_called_once()
 
 
-async def test_monthly_aggregate_sensor_consumption(hass: HomeAssistant, coordinator):
-    """Test monthly aggregate sensor for consumption."""
-    sensor = EcoGuardMonthlyAggregateSensor(
+async def test_monthly_accumulated_sensor_consumption(hass: HomeAssistant, coordinator):
+    """Test monthly accumulated sensor for consumption."""
+    sensor = EcoGuardMonthlyAccumulatedSensor(
         hass=hass,
         coordinator=coordinator,
         utility_code="CW",
@@ -244,9 +244,9 @@ async def test_monthly_aggregate_sensor_consumption(hass: HomeAssistant, coordin
     assert sensor._attr_state_class is not None
 
 
-async def test_monthly_aggregate_sensor_cost(hass: HomeAssistant, coordinator):
-    """Test monthly aggregate sensor for cost."""
-    sensor = EcoGuardMonthlyAggregateSensor(
+async def test_monthly_accumulated_sensor_cost(hass: HomeAssistant, coordinator):
+    """Test monthly accumulated sensor for cost."""
+    sensor = EcoGuardMonthlyAccumulatedSensor(
         hass=hass,
         coordinator=coordinator,
         utility_code="HW",
@@ -254,13 +254,13 @@ async def test_monthly_aggregate_sensor_cost(hass: HomeAssistant, coordinator):
         cost_type="estimated",
     )
 
-    assert "Cost Monthly Aggregated" in sensor._attr_name
+    assert "Cost Monthly Accumulated" in sensor._attr_name
     assert "Estimated" in sensor._attr_name
 
 
-async def test_monthly_aggregate_sensor_fetch_value(hass: HomeAssistant, coordinator):
-    """Test monthly aggregate sensor fetching value."""
-    sensor = EcoGuardMonthlyAggregateSensor(
+async def test_monthly_accumulated_sensor_fetch_value(hass: HomeAssistant, coordinator):
+    """Test monthly accumulated sensor fetching value."""
+    sensor = EcoGuardMonthlyAccumulatedSensor(
         hass=hass,
         coordinator=coordinator,
         utility_code="CW",
@@ -344,7 +344,7 @@ async def test_total_monthly_cost_sensor(hass: HomeAssistant, coordinator):
         cost_type="actual",  # Internal: "actual", Display: "Metered"
     )
 
-    assert "Cost Monthly Aggregated" in sensor._attr_name
+    assert "Cost Monthly Accumulated" in sensor._attr_name
     assert "Metered" in sensor._attr_name
     assert "All Utilities" in sensor._attr_name
 
@@ -437,10 +437,10 @@ async def test_daily_cost_sensor(
         cost_type="actual",
     )
 
-    # unique_id format: ecoguard_cost_daily_metered_{utility_slug}_{sensor_name}
+    # unique_id format: ecoguard_cost_daily_metered_{utility_slug}_meter_{sensor_name}
     assert (
         sensor._attr_unique_id
-        == "ecoguard_cost_daily_metered_cold_water_test_measuring_point"
+        == "ecoguard_cost_daily_metered_cold_water_meter_test_measuring_point"
     )
     assert "Cost Daily" in sensor._attr_name
     assert "Metered" in sensor._attr_name
@@ -474,12 +474,12 @@ async def test_monthly_meter_sensor(
         aggregate_type="con",
     )
 
-    # unique_id format: ecoguard_consumption_monthly_metered_{utility_slug}_{sensor_name}
+    # unique_id format: ecoguard_consumption_monthly_accumulated_{utility_slug}_meter_{sensor_name}
     assert (
         sensor._attr_unique_id
-        == "ecoguard_consumption_monthly_metered_cold_water_test_measuring_point"
+        == "ecoguard_consumption_monthly_accumulated_cold_water_meter_test_measuring_point"
     )
-    assert "Consumption Monthly Aggregated" in sensor._attr_name
+    assert "Consumption Monthly Accumulated" in sensor._attr_name
     assert "Meter" in sensor._attr_name
     assert sensor._attr_state_class is not None
     assert sensor._attr_entity_registry_enabled_default is False
@@ -551,7 +551,7 @@ async def test_async_setup_entry_sensors(
         # Should have created sensors
         # With recent changes, we now have more sensors including:
         # - Individual meter sensors (daily consumption, daily cost, monthly meter, reception) - disabled by default
-        # - Aggregate sensors (daily consumption, daily cost, monthly aggregates)
+        # - Aggregate sensors (daily consumption, daily cost, monthly accumulated)
         # - Combined water sensors
         # - Total cost sensors
         # - Other items and end of month estimate
@@ -779,7 +779,7 @@ async def test_monthly_combined_water_sensor_consumption(
         aggregate_type="con",
     )
 
-    assert "Consumption Monthly Aggregated" in sensor._attr_name
+    assert "Consumption Monthly Accumulated" in sensor._attr_name
     assert "Combined Water" in sensor._attr_name
     assert sensor._attr_state_class is not None
 
@@ -799,7 +799,7 @@ async def test_monthly_combined_water_sensor_cost_metered(
         cost_type="actual",
     )
 
-    assert "Cost Monthly Aggregated" in sensor._attr_name
+    assert "Cost Monthly Accumulated" in sensor._attr_name
     assert "Metered" in sensor._attr_name
     assert "Combined Water" in sensor._attr_name
 
@@ -819,7 +819,7 @@ async def test_monthly_combined_water_sensor_cost_estimated(
         cost_type="estimated",
     )
 
-    assert "Cost Monthly Aggregated" in sensor._attr_name
+    assert "Cost Monthly Accumulated" in sensor._attr_name
     assert "Estimated" in sensor._attr_name
     assert "Combined Water" in sensor._attr_name
 
@@ -850,7 +850,7 @@ async def test_monthly_meter_sensor_cost(
         cost_type="actual",
     )
 
-    assert "Cost Monthly Aggregated" in sensor._attr_name
+    assert "Cost Monthly Accumulated" in sensor._attr_name
     assert "Meter" in sensor._attr_name
     assert sensor._attr_state_class is not None
     assert sensor._attr_entity_registry_enabled_default is False

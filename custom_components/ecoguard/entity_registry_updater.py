@@ -102,8 +102,8 @@ async def update_entity_registry_after_setup(
             "name.estimated",
             "name.metered",
             "name.reception_last_update",
-            "name.consumption_monthly_aggregated",
-            "name.cost_monthly_aggregated",
+            "name.consumption_monthly_accumulated",
+            "name.cost_monthly_accumulated",
         ]
 
         # Collect unique utility codes and measuring point IDs
@@ -390,11 +390,11 @@ async def update_entity_registry_after_setup(
                                         utility_name = sensor._utility_code
                                     if sensor._aggregate_type == "con":
                                         aggregate_name = await get_cached_translation(
-                                            "name.consumption_monthly_aggregated"
+                                            "name.consumption_monthly_accumulated"
                                         )
                                     else:
                                         aggregate_name = await get_cached_translation(
-                                            "name.cost_monthly_aggregated"
+                                            "name.cost_monthly_accumulated"
                                         )
                                     if (
                                         sensor._aggregate_type == "price"

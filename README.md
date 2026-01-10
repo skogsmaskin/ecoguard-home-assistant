@@ -13,7 +13,7 @@ This integration provides comprehensive monitoring of your water consumption and
 
 - **Daily Consumption Sensors**: Last known daily consumption (m³) for each meter and aggregated by utility type
 - **Daily Cost Sensors**: Daily cost for each meter and aggregated by utility type (metered and estimated)
-- **Monthly Consumption Sensors**: Running totals for the current month, aggregated by utility and per meter
+- **Monthly Consumption Sensors**: Running totals for the current month, accumulated over time and aggregated by utility and per meter
 - **Monthly Cost Sensors**:
   - **Metered**: Actual price data from the API (when available)
   - **Estimated**: Estimated prices using Nord Pool spot prices for hot water heating costs
@@ -117,16 +117,16 @@ The integration creates the following sensors, organized by purpose (Consumption
 - **Format**: `Consumption Daily Metered - Combined Water`
 - Combined hot and cold water daily consumption
 
-#### Monthly Consumption (Aggregated by Utility)
-- **Format**: `Consumption Monthly Aggregated - Utility`
+#### Monthly Consumption (Accumulated by Utility)
+- **Format**: `Consumption Monthly Accumulated - Utility`
 - **Examples**: 
-  - `Consumption Monthly Aggregated - Hot Water`
-  - `Consumption Monthly Aggregated - Cold Water`
-- Total consumption for the current month (m³), aggregated across all meters
+  - `Consumption Monthly Accumulated - Hot Water`
+  - `Consumption Monthly Accumulated - Cold Water`
+- Total consumption accumulated for the current month (m³), aggregated across all meters
 
 #### Monthly Consumption (Individual Meters)
-- **Format**: `Consumption Monthly Aggregated - Meter "Measuring Point" (Utility)`
-- **Example**: `Consumption Monthly Aggregated - Meter "Kaldtvann Bad" (Cold Water)`
+- **Format**: `Consumption Monthly Accumulated - Meter "Measuring Point" (Utility)`
+- **Example**: `Consumption Monthly Accumulated - Meter "Kaldtvann Bad" (Cold Water)`
 - Monthly consumption for individual meters
 - **Status**: Disabled by default (enable in entity registry if needed)
 
@@ -151,22 +151,22 @@ The integration creates the following sensors, organized by purpose (Consumption
 - **Format**: `Cost Daily Metered - Combined Water` or `Cost Daily Estimated - Combined Water`
 - Combined hot and cold water daily cost
 
-#### Monthly Cost (Aggregated by Utility)
-- **Format**: `Cost Monthly Aggregated Metered - Utility` or `Cost Monthly Aggregated Estimated - Utility`
+#### Monthly Cost (Accumulated by Utility)
+- **Format**: `Cost Monthly Accumulated Metered - Utility` or `Cost Monthly Accumulated Estimated - Utility`
 - **Examples**:
-  - `Cost Monthly Aggregated Metered - Hot Water`
-  - `Cost Monthly Aggregated Estimated - Cold Water`
-- Monthly cost aggregated across all meters (metered uses actual API data, estimated uses Nord Pool spot prices)
+  - `Cost Monthly Accumulated Metered - Hot Water`
+  - `Cost Monthly Accumulated Estimated - Cold Water`
+- Monthly cost accumulated for the current month, aggregated across all meters (metered uses actual API data, estimated uses Nord Pool spot prices)
 - Note: Cold water prices are typically available from the API, so estimated and metered are usually the same
 
 #### Monthly Cost (Individual Meters)
-- **Format**: `Cost Monthly Aggregated Metered - Meter "Measuring Point" (Utility)` or `Cost Monthly Aggregated Estimated - Meter "Measuring Point" (Utility)`
-- **Example**: `Cost Monthly Aggregated Metered - Meter "Kaldtvann Bad" (Cold Water)`
-- Monthly cost for individual meters
+- **Format**: `Cost Monthly Accumulated Metered - Meter "Measuring Point" (Utility)` or `Cost Monthly Accumulated Estimated - Meter "Measuring Point" (Utility)`
+- **Example**: `Cost Monthly Accumulated Metered - Meter "Kaldtvann Bad" (Cold Water)`
+- Monthly cost accumulated for individual meters
 - **Status**: Disabled by default (enable in entity registry if needed)
 
 #### Total Monthly Cost
-- **Format**: `Cost Monthly Aggregated Metered - All Utilities` or `Cost Monthly Aggregated Estimated - All Utilities`
+- **Format**: `Cost Monthly Accumulated Metered - All Utilities` or `Cost Monthly Accumulated Estimated - All Utilities`
 - Sum of all costs across all utilities (metered uses only actual API data, estimated includes estimated hot water costs)
 
 ### Other Sensors
@@ -181,6 +181,34 @@ The integration creates the following sensors, organized by purpose (Consumption
 - Timestamp of last data reception for each measuring point
 - **Status**: Disabled by default (enable in entity registry if needed)
 
+## Entity ID Patterns
+
+Entity IDs follow consistent patterns to make them easy to identify and use in automations:
+
+### Individual Meter Sensors
+Individual meter sensors include `_meter_` in their entity IDs:
+- **Daily**: `sensor.consumption_daily_metered_{utility}_meter_{meter_name}`
+  - Example: `sensor.consumption_daily_metered_cold_water_meter_kaldtvann_bad`
+- **Monthly**: `sensor.consumption_monthly_accumulated_{utility}_meter_{meter_name}`
+  - Example: `sensor.consumption_monthly_accumulated_cold_water_meter_kaldtvann_bad`
+- **Cost**: `sensor.cost_daily_metered_{utility}_meter_{meter_name}` or `sensor.cost_daily_estimated_{utility}_meter_{meter_name}`
+  - Example: `sensor.cost_daily_metered_cold_water_meter_kaldtvann_bad`
+- **Reception**: `sensor.reception_last_update_{utility}_meter_{meter_name}`
+  - Example: `sensor.reception_last_update_cold_water_meter_kaldtvann_bad`
+
+### Aggregate/Accumulated Sensors
+Aggregate and accumulated sensors (combining multiple meters) do NOT include `_meter_`:
+- **Daily Aggregate**: `sensor.consumption_daily_metered_{utility}`
+  - Example: `sensor.consumption_daily_metered_cold_water`
+- **Monthly Accumulated**: `sensor.consumption_monthly_accumulated_{utility}`
+  - Example: `sensor.consumption_monthly_accumulated_cold_water`
+- **Combined Water**: `sensor.consumption_daily_metered_combined_water` or `sensor.consumption_monthly_accumulated_combined_water`
+
+### Pattern Summary
+- `*_meter_*` = Individual meter sensor (disabled by default)
+- No `_meter_` = Aggregate/accumulated sensor (enabled by default)
+- `{utility}` = `hot_water` or `cold_water`
+- `{meter_name}` = Slugified measuring point name (e.g., `kaldtvann_bad`)
 
 ## Development
 
@@ -443,8 +471,8 @@ The integration uses the following translation files:
 Sensor names are automatically translated based on your Home Assistant language setting. The integration uses translation keys following the pattern:
 - `name.consumption_daily` - "Consumption Daily"
 - `name.cost_daily` - "Cost Daily"
-- `name.consumption_monthly_aggregated` - "Consumption Monthly Aggregated"
-- `name.cost_monthly_aggregated` - "Cost Monthly Aggregated"
+- `name.consumption_monthly_accumulated` - "Consumption Monthly Accumulated"
+- `name.cost_monthly_accumulated` - "Cost Monthly Accumulated"
 - `name.reception_last_update` - "Reception Last Update"
 - `name.meter` - "Meter"
 - `utility.hw` - "Hot Water" / "Varmt vann"
