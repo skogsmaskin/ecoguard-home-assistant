@@ -160,6 +160,17 @@ def test_find_last_data_date():
     
     assert find_last_data_date(cache_none, tz) is None
 
+    # Test with negative values (should be skipped)
+    cache_negative = [
+        {"time": int(now.timestamp()), "value": -5.0, "unit": "m³"},  # Negative value should be skipped
+        {"time": int(yesterday.timestamp()), "value": 15.0, "unit": "m³"},
+        {"time": int(two_days_ago.timestamp()), "value": 10.0, "unit": "m³"},
+    ]
+    
+    result = find_last_data_date(cache_negative, tz)
+    assert result is not None
+    assert result.date() == yesterday.date()  # Should skip negative value and return yesterday
+
 
 def test_find_last_price_date():
     """Test finding last price date from daily price cache."""
@@ -242,3 +253,9 @@ def test_detect_data_lag():
     is_lagging, lag_days = detect_data_lag(three_days_ago, tz, expected_delay_days=2)
     assert is_lagging is True
     assert lag_days == 1  # 3 days ago vs expected 2 days ago = 1 day lag
+    
+    # Test with future date (should not be lagging and log warning)
+    tomorrow = datetime.combine(today + timedelta(days=1), datetime.min.time(), tz)
+    is_lagging, lag_days = detect_data_lag(tomorrow, tz)
+    assert is_lagging is False
+    assert lag_days == 0
