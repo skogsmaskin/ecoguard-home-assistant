@@ -1469,6 +1469,17 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
                 else:
                     self._last_data_date = None
 
+            # Detect lag
+            if self._last_data_date:
+                timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+                tz = get_timezone(timezone_str)
+                is_lagging, lag_days = detect_data_lag(self._last_data_date, tz)
+                self._data_lagging = is_lagging
+                self._data_lag_days = lag_days
+            else:
+                self._data_lagging = True
+                self._data_lag_days = None
+
             _LOGGER.info(
                 "Updated %s (estimated): %s %s",
                 self.entity_id,
@@ -1486,6 +1497,8 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
             self._last_data_date = None
+            self._data_lagging = True
+            self._data_lag_days = None
 
         # Notify Home Assistant that the state has changed
         self.async_write_ha_state()
