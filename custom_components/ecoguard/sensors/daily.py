@@ -1211,6 +1211,8 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
 
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
+            attrs["data_lagging"] = self._data_lagging
+            attrs["data_lag_days"] = self._data_lag_days
 
         return attrs
 
