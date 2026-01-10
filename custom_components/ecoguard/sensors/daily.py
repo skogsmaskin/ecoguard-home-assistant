@@ -1438,6 +1438,10 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
 
             # For estimated costs, use consumption cache to find actual last data date
             # since estimated costs are calculated from consumption data
+            # Get timezone first (needed for lag detection)
+            timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+            tz = get_timezone(timezone_str)
+            
             coordinator_data = self.coordinator.data
             if coordinator_data:
                 daily_consumption_cache = coordinator_data.get(
@@ -1452,8 +1456,6 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
                 consumption_daily_cache = daily_consumption_cache.get(
                     consumption_cache_key, []
                 )
-                timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
-                tz = get_timezone(timezone_str)
                 actual_last_data_date = find_last_data_date(consumption_daily_cache, tz)
                 if actual_last_data_date:
                     self._last_data_date = actual_last_data_date

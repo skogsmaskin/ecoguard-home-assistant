@@ -370,8 +370,8 @@ def find_last_price_date(
     """Find the actual last date with price data from daily price cache.
 
     This finds the most recent date where the API returned actual price data
-    (non-None, non-negative value). For price data, we look for the last non-zero
-    price since 0 values might indicate missing data for some utilities (like HW).
+    (non-None value), preferring non-zero values but accepting zero as a fallback
+    since 0 values might indicate missing data for some utilities (like HW).
 
     Args:
         daily_cache: List of daily price entries with 'time' and 'value' keys
