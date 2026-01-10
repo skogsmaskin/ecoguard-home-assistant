@@ -394,23 +394,26 @@ def find_last_price_date(
         reverse=True,
     )
 
-    # Find the last entry with a non-None, non-negative value
-    # For prices, we prefer non-zero values (0 might indicate missing data)
-    for entry in sorted_cache:
-        value = entry.get("value")
-        time_stamp = entry.get("time")
-        if value is not None and value >= 0 and time_stamp is not None:
-            # Prefer non-zero values, but accept 0 if that's all we have
-            if value > 0:
-                return datetime.fromtimestamp(time_stamp, tz=tz)
+    # Single pass: prefer the most recent non-zero value,
+    # but remember the most recent zero value as a fallback.
+    zero_timestamp: int | None = None
 
-    # If no non-zero values found, return the last entry with any value (including 0)
-    # This handles cases where 0 might be a valid price
     for entry in sorted_cache:
         value = entry.get("value")
         time_stamp = entry.get("time")
-        if value is not None and value >= 0 and time_stamp is not None:
+        if value is None or time_stamp is None or value < 0:
+            continue
+
+        if value > 0:
+            # First non-zero value in descending order is the most recent
             return datetime.fromtimestamp(time_stamp, tz=tz)
+
+        # Value is 0: remember the first (most recent) zero as fallback
+        if zero_timestamp is None:
+            zero_timestamp = time_stamp
+
+    if zero_timestamp is not None:
+        return datetime.fromtimestamp(zero_timestamp, tz=tz)
 
     return None
 
