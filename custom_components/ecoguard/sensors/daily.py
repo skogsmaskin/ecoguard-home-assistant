@@ -1697,6 +1697,11 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
                 self._last_data_date = datetime.fromtimestamp(latest_timestamp, tz=tz)
             else:
                 self._last_data_date = None
+            # Detect lag based on the last data date, similar to consumption sensors
+            self._data_lagging, self._data_lag_days = detect_data_lag(
+                self._last_data_date,
+                tz,
+            )
             self._meters_with_data = meters_with_data
             self._attr_available = True
 
