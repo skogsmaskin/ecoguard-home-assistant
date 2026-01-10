@@ -199,7 +199,8 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
             self._attr_native_value = None
             self._attr_native_unit_of_measurement = None
             self._last_data_date = None
-            self._data_lagging = False
+            # Treat lack of coordinator data as missing data, mark as lagging
+            self._data_lagging = True
             self._data_lag_days = None
             self._attr_available = True
             self.async_write_ha_state()
@@ -1460,8 +1461,6 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
 
             # Detect lag
             if self._last_data_date:
-                timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
-                tz = get_timezone(timezone_str)
                 is_lagging, lag_days = detect_data_lag(self._last_data_date, tz)
                 self._data_lagging = is_lagging
                 self._data_lag_days = lag_days
@@ -1631,7 +1630,8 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
             self._last_data_date = None
-            self._data_lagging = False
+            # Treat lack of coordinator data as missing data, mark as lagging
+            self._data_lagging = True
             self._data_lag_days = None
             self._attr_available = True
             self.async_write_ha_state()
@@ -1789,7 +1789,8 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             self._attr_native_unit_of_measurement = currency
             self._last_data_date = None
             self._meters_with_data = []
-            self._data_lagging = False
+            # Treat lack of metered cost data as missing data, mark as lagging
+            self._data_lagging = True
             self._data_lag_days = None
             self._attr_available = True
 
