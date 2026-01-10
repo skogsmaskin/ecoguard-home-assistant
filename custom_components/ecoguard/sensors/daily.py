@@ -11,7 +11,13 @@ from homeassistant.core import HomeAssistant
 
 from ..const import DOMAIN
 from ..coordinator import EcoGuardDataUpdateCoordinator
-from ..helpers import round_to_max_digits
+from ..helpers import (
+    round_to_max_digits,
+    find_last_data_date,
+    find_last_price_date,
+    detect_data_lag,
+    get_timezone,
+)
 from ..translations import (
     async_get_translation,
     get_translation_default,
@@ -98,6 +104,8 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
         self._attr_native_value = None
         self._attr_native_unit_of_measurement = None
         self._last_data_date: datetime | None = None
+        self._data_lagging: bool = False
+        self._data_lag_days: int | None = None
 
         # Set icon based on utility type
         if utility_code == "HW":
@@ -130,7 +138,11 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
 
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
-            attrs["last_data_date_readable"] = self._last_data_date.strftime("%Y-%m-%d")
+
+        # Add lag detection attributes
+        attrs["data_lagging"] = self._data_lagging
+        if self._data_lag_days is not None:
+            attrs["data_lag_days"] = self._data_lag_days
 
         return attrs
 
@@ -187,12 +199,15 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
             self._attr_native_value = None
             self._attr_native_unit_of_measurement = None
             self._last_data_date = None
+            self._data_lagging = False
+            self._data_lag_days = None
             self._attr_available = True
             self.async_write_ha_state()
             return
 
         # Get consumption cache from coordinator data
         consumption_cache = coordinator_data.get("latest_consumption_cache", {})
+        daily_consumption_cache = coordinator_data.get("daily_consumption_cache", {})
 
         # Build cache key
         if self._measuring_point_id:
@@ -201,6 +216,33 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
             cache_key = f"{self._utility_code}_all"
 
         consumption_data = consumption_cache.get(cache_key)
+
+        # Find actual last data date from daily consumption cache
+        daily_cache = daily_consumption_cache.get(cache_key, [])
+        timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+        tz = get_timezone(timezone_str)
+        actual_last_data_date = find_last_data_date(daily_cache, tz)
+
+        # Use actual last data date if available, otherwise fall back to latest cache timestamp
+        if actual_last_data_date:
+            self._last_data_date = actual_last_data_date
+        elif consumption_data:
+            time_stamp = consumption_data.get("time")
+            if time_stamp:
+                self._last_data_date = datetime.fromtimestamp(time_stamp, tz=tz)
+            else:
+                self._last_data_date = None
+        else:
+            self._last_data_date = None
+
+        # Detect lag
+        if self._last_data_date:
+            is_lagging, lag_days = detect_data_lag(self._last_data_date, tz)
+            self._data_lagging = is_lagging
+            self._data_lag_days = lag_days
+        else:
+            self._data_lagging = True
+            self._data_lag_days = None
 
         if consumption_data:
             raw_value = consumption_data.get("value")
@@ -214,23 +256,29 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
             self._attr_native_value = new_value
             self._attr_native_unit_of_measurement = consumption_data.get("unit")
 
-            # Update last data date
-            time_stamp = consumption_data.get("time")
-            if time_stamp:
-                self._last_data_date = datetime.fromtimestamp(time_stamp)
-
             # Mark sensor as available when we have data
             self._attr_available = True
 
             # Log update for debugging
             if old_value != new_value:
+                lag_info = (
+                    f" (lagging {self._data_lag_days} days)"
+                    if self._data_lagging
+                    else ""
+                )
                 _LOGGER.info(
-                    "Updated %s: %s -> %s %s (cache key: %s)",
+                    "Updated %s: %s -> %s %s (cache key: %s, last data: %s)%s",
                     self.entity_id,
                     old_value,
                     new_value,
                     self._attr_native_unit_of_measurement,
                     cache_key,
+                    (
+                        self._last_data_date.strftime("%Y-%m-%d")
+                        if self._last_data_date
+                        else "None"
+                    ),
+                    lag_info,
                 )
         else:
             # Log missing cache key for debugging (only once to avoid spam)
@@ -248,7 +296,6 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
             # This allows sensors to appear in UI immediately
             self._attr_native_value = None
             self._attr_native_unit_of_measurement = None
-            self._last_data_date = None
             self._attr_available = True  # Keep available, just show None/unknown
 
         # Notify Home Assistant that the state has changed
@@ -516,6 +563,8 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
         self._attr_native_unit_of_measurement = None
         self._last_data_date: datetime | None = None
         self._meters_with_data: list[dict[str, Any]] = []
+        self._data_lagging: bool = False
+        self._data_lag_days: int | None = None
 
         # Set icon based on utility type
         if utility_code == "HW":
@@ -546,7 +595,11 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
 
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
-            attrs["last_data_date_readable"] = self._last_data_date.strftime("%Y-%m-%d")
+
+        # Add lag detection attributes
+        attrs["data_lagging"] = self._data_lagging
+        if self._data_lag_days is not None:
+            attrs["data_lag_days"] = self._data_lag_days
 
         if self._meters_with_data:
             attrs["meters"] = [
@@ -598,10 +651,17 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
 
         # Get consumption cache from coordinator data
         consumption_cache = coordinator_data.get("latest_consumption_cache", {})
+        daily_consumption_cache = coordinator_data.get("daily_consumption_cache", {})
 
         # Try to read from "all" cache first (aggregated across all meters)
         cache_key_all = f"{self._utility_code}_all"
         consumption_data = consumption_cache.get(cache_key_all)
+
+        # Find actual last data date from daily consumption cache
+        daily_cache = daily_consumption_cache.get(cache_key_all, [])
+        timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+        tz = get_timezone(timezone_str)
+        actual_last_data_date = find_last_data_date(daily_cache, tz)
 
         if consumption_data:
             # Use aggregated data directly
@@ -616,23 +676,48 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
             self._attr_native_value = new_value
             self._attr_native_unit_of_measurement = consumption_data.get("unit")
 
-            # Update last data date
-            time_stamp = consumption_data.get("time")
-            if time_stamp:
-                self._last_data_date = datetime.fromtimestamp(time_stamp)
+            # Use actual last data date if available, otherwise fall back to latest cache timestamp
+            if actual_last_data_date:
+                self._last_data_date = actual_last_data_date
+            else:
+                time_stamp = consumption_data.get("time")
+                if time_stamp:
+                    self._last_data_date = datetime.fromtimestamp(time_stamp, tz=tz)
+                else:
+                    self._last_data_date = None
+
+            # Detect lag
+            if self._last_data_date:
+                is_lagging, lag_days = detect_data_lag(self._last_data_date, tz)
+                self._data_lagging = is_lagging
+                self._data_lag_days = lag_days
+            else:
+                self._data_lagging = True
+                self._data_lag_days = None
 
             # Mark sensor as available when we have data
             self._attr_available = True
 
             # Log update for debugging
             if old_value != new_value:
+                lag_info = (
+                    f" (lagging {self._data_lag_days} days)"
+                    if self._data_lagging
+                    else ""
+                )
                 _LOGGER.info(
-                    "Updated %s: %s -> %s %s (cache key: %s)",
+                    "Updated %s: %s -> %s %s (cache key: %s, last data: %s)%s",
                     self.entity_id,
                     old_value,
                     new_value,
                     self._attr_native_unit_of_measurement,
                     cache_key_all,
+                    (
+                        self._last_data_date.strftime("%Y-%m-%d")
+                        if self._last_data_date
+                        else "None"
+                    ),
+                    lag_info,
                 )
 
             self.async_write_ha_state()
@@ -692,16 +777,48 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
                     }
                 )
 
+        # Find actual last data date from daily consumption cache (fallback case)
+        if not actual_last_data_date and latest_timestamp:
+            # Check individual meter caches
+            for installation in active_installations:
+                measuring_point_id = installation.get("MeasuringPointID")
+                cache_key = f"{self._utility_code}_{measuring_point_id}"
+                meter_daily_cache = daily_consumption_cache.get(cache_key, [])
+                meter_last_date = find_last_data_date(meter_daily_cache, tz)
+                if meter_last_date:
+                    if (
+                        actual_last_data_date is None
+                        or meter_last_date > actual_last_data_date
+                    ):
+                        actual_last_data_date = meter_last_date
+
         if total_value > 0:
             self._attr_native_value = round_to_max_digits(total_value)
             self._attr_native_unit_of_measurement = unit
-            if latest_timestamp:
-                self._last_data_date = datetime.fromtimestamp(latest_timestamp)
+            # Use actual last data date if available, otherwise fall back to latest timestamp
+            if actual_last_data_date:
+                self._last_data_date = actual_last_data_date
+            elif latest_timestamp:
+                self._last_data_date = datetime.fromtimestamp(latest_timestamp, tz=tz)
+            else:
+                self._last_data_date = None
+
+            # Detect lag
+            if self._last_data_date:
+                is_lagging, lag_days = detect_data_lag(self._last_data_date, tz)
+                self._data_lagging = is_lagging
+                self._data_lag_days = lag_days
+            else:
+                self._data_lagging = True
+                self._data_lag_days = None
+
             self._meters_with_data = meters_with_data
         else:
             self._attr_native_value = None
             self._attr_native_unit_of_measurement = unit
             self._last_data_date = None
+            self._data_lagging = True
+            self._data_lag_days = None
             self._meters_with_data = []
 
         self.async_write_ha_state()
@@ -749,6 +866,8 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
         self._last_data_date: datetime | None = None
         self._hw_meters_with_data: list[dict[str, Any]] = []
         self._cw_meters_with_data: list[dict[str, Any]] = []
+        self._data_lagging: bool = False
+        self._data_lag_days: int | None = None
 
         # Set icon for combined water sensor
         self._attr_icon = "mdi:water-circle"
@@ -771,7 +890,11 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
 
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
-            attrs["last_data_date_readable"] = self._last_data_date.strftime("%Y-%m-%d")
+
+        # Add lag detection attributes
+        attrs["data_lagging"] = self._data_lagging
+        if self._data_lag_days is not None:
+            attrs["data_lag_days"] = self._data_lag_days
 
         if self._hw_meters_with_data:
             attrs["hw_meters"] = [
@@ -829,6 +952,10 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
 
         # Get consumption cache from coordinator data
         consumption_cache = coordinator_data.get("latest_consumption_cache", {})
+        daily_consumption_cache = coordinator_data.get("daily_consumption_cache", {})
+
+        timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+        tz = get_timezone(timezone_str)
 
         active_installations = self.coordinator.get_active_installations()
         hw_total = 0.0
@@ -837,6 +964,8 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
         latest_timestamp = None
         hw_meters_with_data = []
         cw_meters_with_data = []
+        hw_last_data_date: datetime | None = None
+        cw_last_data_date: datetime | None = None
 
         for installation in active_installations:
             registers = installation.get("Registers", [])
@@ -859,6 +988,10 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
                 cache_key = f"{utility_code}_{measuring_point_id}"
                 consumption_data = consumption_cache.get(cache_key)
 
+                # Find actual last data date from daily consumption cache
+                meter_daily_cache = daily_consumption_cache.get(cache_key, [])
+                meter_last_date = find_last_data_date(meter_daily_cache, tz)
+
                 if consumption_data and consumption_data.get("value") is not None:
                     value = consumption_data.get("value", 0.0)
 
@@ -871,6 +1004,21 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
                     if time_stamp:
                         if latest_timestamp is None or time_stamp > latest_timestamp:
                             latest_timestamp = time_stamp
+
+                    # Track last data date per utility
+                    if meter_last_date:
+                        if utility_code == "HW":
+                            if (
+                                hw_last_data_date is None
+                                or meter_last_date > hw_last_data_date
+                            ):
+                                hw_last_data_date = meter_last_date
+                        elif utility_code == "CW":
+                            if (
+                                cw_last_data_date is None
+                                or meter_last_date > cw_last_data_date
+                            ):
+                                cw_last_data_date = meter_last_date
 
                     meter_info = {
                         "measuring_point_id": measuring_point_id,
@@ -888,30 +1036,60 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
         total_value = hw_total + cw_total
         old_value = self._attr_native_value
 
+        # Use the earliest of HW and CW last data dates (most conservative)
+        # This ensures we show lag if either utility is lagging
+        if hw_last_data_date and cw_last_data_date:
+            self._last_data_date = min(hw_last_data_date, cw_last_data_date)
+        elif hw_last_data_date:
+            self._last_data_date = hw_last_data_date
+        elif cw_last_data_date:
+            self._last_data_date = cw_last_data_date
+        elif latest_timestamp:
+            self._last_data_date = datetime.fromtimestamp(latest_timestamp, tz=tz)
+        else:
+            self._last_data_date = None
+
+        # Detect lag
+        if self._last_data_date:
+            is_lagging, lag_days = detect_data_lag(self._last_data_date, tz)
+            self._data_lagging = is_lagging
+            self._data_lag_days = lag_days
+        else:
+            self._data_lagging = True
+            self._data_lag_days = None
+
         if total_value > 0:
             self._attr_native_value = round_to_max_digits(total_value)
             self._attr_native_unit_of_measurement = unit
-            if latest_timestamp:
-                self._last_data_date = datetime.fromtimestamp(latest_timestamp)
             self._hw_meters_with_data = hw_meters_with_data
             self._cw_meters_with_data = cw_meters_with_data
             self._attr_available = True
 
             # Log update for debugging
             if old_value != self._attr_native_value:
+                lag_info = (
+                    f" (lagging {self._data_lag_days} days)"
+                    if self._data_lagging
+                    else ""
+                )
                 _LOGGER.debug(
-                    "Updated %s: %s -> %s %s (HW: %s, CW: %s)",
+                    "Updated %s: %s -> %s %s (HW: %s, CW: %s, last data: %s)%s",
                     self.entity_id,
                     old_value,
                     self._attr_native_value,
                     unit,
                     hw_total,
                     cw_total,
+                    (
+                        self._last_data_date.strftime("%Y-%m-%d")
+                        if self._last_data_date
+                        else "None"
+                    ),
+                    lag_info,
                 )
         else:
             self._attr_native_value = None
             self._attr_native_unit_of_measurement = unit
-            self._last_data_date = None
             self._hw_meters_with_data = []
             self._cw_meters_with_data = []
             # Keep sensor available even if no data (shows as "unknown" not "unavailable")
@@ -1033,7 +1211,6 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
 
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
-            attrs["last_data_date_readable"] = self._last_data_date.strftime("%Y-%m-%d")
 
         return attrs
 
@@ -1094,15 +1271,37 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
 
         # Get cost cache from coordinator data
         cost_cache = coordinator_data.get("latest_cost_cache", {})
+        daily_price_cache = coordinator_data.get("daily_price_cache", {})
+        daily_consumption_cache = coordinator_data.get("daily_consumption_cache", {})
 
         # Build cache key - always use metered cache key
         # For estimated costs, use metered cost if available (estimated = metered when metered exists)
         if self._measuring_point_id:
             cache_key = f"{self._utility_code}_{self._measuring_point_id}_metered"
+            consumption_cache_key = f"{self._utility_code}_{self._measuring_point_id}"
         else:
             cache_key = f"{self._utility_code}_all_metered"
+            consumption_cache_key = f"{self._utility_code}_all"
 
         cost_data = cost_cache.get(cache_key)
+
+        # Find actual last data date
+        # For metered costs: use daily_price_cache
+        # For estimated costs: use daily_consumption_cache (since they're calculated from consumption)
+        timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+        tz = get_timezone(timezone_str)
+        actual_last_data_date = None
+
+        if self._cost_type == "actual":
+            # Metered costs: use price cache
+            price_daily_cache = daily_price_cache.get(cache_key, [])
+            actual_last_data_date = find_last_price_date(price_daily_cache, tz)
+        else:
+            # Estimated costs: use consumption cache (since they're calculated from consumption)
+            consumption_daily_cache = daily_consumption_cache.get(
+                consumption_cache_key, []
+            )
+            actual_last_data_date = find_last_data_date(consumption_daily_cache, tz)
 
         _LOGGER.debug(
             "_update_from_coordinator_data for %s: cost_type=%s, cache_key=%s, cost_data=%s",
@@ -1165,10 +1364,15 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
                 cost_data.get("unit") or self.coordinator.get_setting("Currency") or ""
             )
 
-            # Update last data date
-            time_stamp = cost_data.get("time")
-            if time_stamp:
-                self._last_data_date = datetime.fromtimestamp(time_stamp)
+            # Use actual last data date if available, otherwise fall back to latest cache timestamp
+            if actual_last_data_date:
+                self._last_data_date = actual_last_data_date
+            else:
+                time_stamp = cost_data.get("time")
+                if time_stamp:
+                    self._last_data_date = datetime.fromtimestamp(time_stamp, tz=tz)
+                else:
+                    self._last_data_date = None
         else:
             self._attr_native_value = None
             currency = self.coordinator.get_setting("Currency") or ""
@@ -1209,10 +1413,43 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
                 cost_data.get("unit") or self.coordinator.get_setting("Currency") or ""
             )
 
-            # Update last data date
-            time_stamp = cost_data.get("time")
-            if time_stamp:
-                self._last_data_date = datetime.fromtimestamp(time_stamp)
+            # For estimated costs, use consumption cache to find actual last data date
+            # since estimated costs are calculated from consumption data
+            coordinator_data = self.coordinator.data
+            if coordinator_data and self._cost_type == "estimated":
+                daily_consumption_cache = coordinator_data.get(
+                    "daily_consumption_cache", {}
+                )
+                if self._measuring_point_id:
+                    consumption_cache_key = (
+                        f"{self._utility_code}_{self._measuring_point_id}"
+                    )
+                else:
+                    consumption_cache_key = f"{self._utility_code}_all"
+                consumption_daily_cache = daily_consumption_cache.get(
+                    consumption_cache_key, []
+                )
+                timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+                tz = get_timezone(timezone_str)
+                actual_last_data_date = find_last_data_date(consumption_daily_cache, tz)
+                if actual_last_data_date:
+                    self._last_data_date = actual_last_data_date
+                else:
+                    # Fall back to timestamp from cost_data
+                    time_stamp = cost_data.get("time")
+                    if time_stamp:
+                        self._last_data_date = datetime.fromtimestamp(time_stamp, tz=tz)
+                    else:
+                        self._last_data_date = None
+            else:
+                # For metered costs, use timestamp from cost_data
+                time_stamp = cost_data.get("time")
+                if time_stamp:
+                    timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+                    tz = get_timezone(timezone_str)
+                    self._last_data_date = datetime.fromtimestamp(time_stamp, tz=tz)
+                else:
+                    self._last_data_date = None
 
             _LOGGER.info(
                 "Updated %s (estimated): %s %s",
@@ -1317,7 +1554,6 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
 
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
-            attrs["last_data_date_readable"] = self._last_data_date.strftime("%Y-%m-%d")
 
         if self._meters_with_data:
             attrs["meters"] = [
@@ -1373,12 +1609,18 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
 
         # Get cost cache from coordinator data
         cost_cache = coordinator_data.get("latest_cost_cache", {})
+        daily_price_cache = coordinator_data.get("daily_price_cache", {})
+        daily_consumption_cache = coordinator_data.get("daily_consumption_cache", {})
+
+        timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+        tz = get_timezone(timezone_str)
 
         # Sum costs across all meters for this utility
         active_installations = self.coordinator.get_active_installations()
         total_value = 0.0
         latest_timestamp = None
         meters_with_data = []
+        actual_last_data_dates: list[datetime] = []
 
         for installation in active_installations:
             registers = installation.get("Registers", [])
@@ -1405,7 +1647,23 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             # Always use metered cache key
             # For estimated costs, use metered cost if available (estimated = metered when metered exists)
             cache_key = f"{self._utility_code}_{measuring_point_id}_metered"
+            consumption_cache_key = f"{self._utility_code}_{measuring_point_id}"
             cost_data = cost_cache.get(cache_key)
+
+            # Find actual last data date for this meter
+            if self._cost_type == "actual":
+                # Metered costs: use price cache
+                price_daily_cache = daily_price_cache.get(cache_key, [])
+                meter_last_date = find_last_price_date(price_daily_cache, tz)
+            else:
+                # Estimated costs: use consumption cache
+                consumption_daily_cache = daily_consumption_cache.get(
+                    consumption_cache_key, []
+                )
+                meter_last_date = find_last_data_date(consumption_daily_cache, tz)
+
+            if meter_last_date:
+                actual_last_data_dates.append(meter_last_date)
 
             if cost_data and cost_data.get("value") is not None:
                 value = cost_data.get("value", 0.0)
@@ -1432,8 +1690,13 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             )
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
-            if latest_timestamp:
-                self._last_data_date = datetime.fromtimestamp(latest_timestamp)
+            # Use actual last data date if available (most recent across all meters), otherwise fall back to latest timestamp
+            if actual_last_data_dates:
+                self._last_data_date = max(actual_last_data_dates)
+            elif latest_timestamp:
+                self._last_data_date = datetime.fromtimestamp(latest_timestamp, tz=tz)
+            else:
+                self._last_data_date = None
             self._meters_with_data = meters_with_data
             self._attr_available = True
 
@@ -1650,7 +1913,6 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
 
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
-            attrs["last_data_date_readable"] = self._last_data_date.strftime("%Y-%m-%d")
 
         if self._hw_meters_with_data:
             attrs["hw_meters"] = [
@@ -1713,6 +1975,11 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
 
         # Get cost cache from coordinator data
         cost_cache = coordinator_data.get("latest_cost_cache", {})
+        daily_price_cache = coordinator_data.get("daily_price_cache", {})
+        daily_consumption_cache = coordinator_data.get("daily_consumption_cache", {})
+
+        timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+        tz = get_timezone(timezone_str)
 
         active_installations = self.coordinator.get_active_installations()
         hw_total = 0.0
@@ -1720,6 +1987,8 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         latest_timestamp = None
         hw_meters_with_data = []
         cw_meters_with_data = []
+        hw_last_data_dates: list[datetime] = []
+        cw_last_data_dates: list[datetime] = []
 
         for installation in active_installations:
             registers = installation.get("Registers", [])
@@ -1740,7 +2009,26 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
 
                 # Read cost from cache (no API call)
                 cache_key = f"{utility_code}_{measuring_point_id}_metered"
+                consumption_cache_key = f"{utility_code}_{measuring_point_id}"
                 cost_data = cost_cache.get(cache_key)
+
+                # Find actual last data date for this meter
+                if self._cost_type == "actual":
+                    # Metered costs: use price cache
+                    price_daily_cache = daily_price_cache.get(cache_key, [])
+                    meter_last_date = find_last_price_date(price_daily_cache, tz)
+                else:
+                    # Estimated costs: use consumption cache
+                    consumption_daily_cache = daily_consumption_cache.get(
+                        consumption_cache_key, []
+                    )
+                    meter_last_date = find_last_data_date(consumption_daily_cache, tz)
+
+                if meter_last_date:
+                    if utility_code == "HW":
+                        hw_last_data_dates.append(meter_last_date)
+                    elif utility_code == "CW":
+                        cw_last_data_dates.append(meter_last_date)
 
                 if cost_data and cost_data.get("value") is not None:
                     value = cost_data.get("value", 0.0)
@@ -1828,8 +2116,19 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
             self._attr_native_value = round_to_max_digits(total_value)
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
-            if latest_timestamp:
-                self._last_data_date = datetime.fromtimestamp(latest_timestamp)
+            # Use the earliest of HW and CW last data dates (most conservative)
+            # This ensures we show lag if either utility is lagging
+            all_last_dates = []
+            if hw_last_data_dates:
+                all_last_dates.extend(hw_last_data_dates)
+            if cw_last_data_dates:
+                all_last_dates.extend(cw_last_data_dates)
+            if all_last_dates:
+                self._last_data_date = min(all_last_dates)
+            elif latest_timestamp:
+                self._last_data_date = datetime.fromtimestamp(latest_timestamp, tz=tz)
+            else:
+                self._last_data_date = None
             self._hw_meters_with_data = hw_meters_with_data
             self._cw_meters_with_data = cw_meters_with_data
             self._attr_available = True
