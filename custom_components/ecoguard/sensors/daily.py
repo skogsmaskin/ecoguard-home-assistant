@@ -1919,6 +1919,11 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
 
+        # Add lag detection attributes, consistent with other daily sensors
+        timezone = get_timezone(self.hass)
+        data_lagging, data_lag_days = detect_data_lag(self._last_data_date, timezone)
+        attrs["data_lagging"] = data_lagging
+        attrs["data_lag_days"] = data_lag_days
         if self._hw_meters_with_data:
             attrs["hw_meters"] = [
                 {
