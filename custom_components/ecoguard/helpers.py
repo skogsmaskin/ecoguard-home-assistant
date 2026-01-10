@@ -353,11 +353,11 @@ def find_last_data_date(
         reverse=True,
     )
 
-    # Find the last entry with a non-None value
+    # Find the last entry with a non-None, non-negative value
     for entry in sorted_cache:
         value = entry.get("value")
         time_stamp = entry.get("time")
-        if value is not None and time_stamp is not None:
+        if value is not None and time_stamp is not None and value >= 0:
             return datetime.fromtimestamp(time_stamp, tz=tz)
 
     return None
@@ -442,6 +442,17 @@ def detect_data_lag(
     # Expected last data date is yesterday (or expected_delay_days ago)
     expected_date = today - timedelta(days=expected_delay_days)
     last_data_date_only = last_data_date.date()
+
+    if last_data_date_only > today:
+        # Data appears to be from the future relative to the current date.
+        # This is treated as "not lagging" but logged as a potential anomaly.
+        _LOGGER.warning(
+            "Last data date %s is in the future relative to timezone %s; "
+            "treating as not lagging",
+            last_data_date_only,
+            tz,
+        )
+        return (False, 0)
 
     if last_data_date_only < expected_date:
         lag_days = (expected_date - last_data_date_only).days

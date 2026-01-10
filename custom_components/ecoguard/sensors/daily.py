@@ -1418,6 +1418,10 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
             self._measuring_point_id,
         )
 
+        # Get timezone (needed for lag detection in both branches)
+        timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+        tz = get_timezone(timezone_str)
+
         # Get estimated cost from coordinator
         cost_data = await self.coordinator.get_latest_estimated_cost(
             utility_code=self._utility_code,
@@ -1438,9 +1442,6 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
 
             # For estimated costs, use consumption cache to find actual last data date
             # since estimated costs are calculated from consumption data
-            # Get timezone first (needed for lag detection)
-            timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
-            tz = get_timezone(timezone_str)
             
             coordinator_data = self.coordinator.data
             if coordinator_data:
@@ -2227,6 +2228,9 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
             self._cw_meters_with_data = []
             # Keep sensor available even if no data (shows as "unknown" not "unavailable")
             self._attr_available = True
+            # Mark as lagging when data is missing
+            self._data_lagging = True
+            self._data_lag_days = None
 
         self.async_write_ha_state()
 
