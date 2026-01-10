@@ -5,6 +5,91 @@ All notable changes to the EcoGuard Home Assistant integration will be documente
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-01-10
+
+### Added
+
+#### Lag Detection for Daily Sensors
+- **Data lag detection and tracking**: All daily sensors now expose lag detection attributes to identify when API data is outdated
+  - `data_lagging` (boolean): Indicates whether the sensor data is lagging behind the expected date
+  - `data_lag_days` (integer or None): Number of days the data is lagging, or None when data is unavailable
+  - Sensors are marked as lagging when data is older than expected (typically 1 day behind current date)
+  - Example use case: Identify when hot water data hasn't been updated for several days while cold water data is current
+
+#### Helper Functions (`helpers.py`)
+- **`find_last_data_date()`**: Finds the most recent date with valid consumption data from daily cache
+  - Skips None values (no data returned by API)
+  - Skips negative values (invalid consumption data)
+  - Returns the most recent timestamp with actual valid data
+- **`find_last_price_date()`**: Finds the most recent date with valid price data from daily cache
+  - Prefers non-zero values (since 0 might indicate missing price data for some utilities)
+  - Falls back to zero values if no non-zero values are found
+  - Uses optimized single-pass algorithm for efficiency
+- **`detect_data_lag()`**: Detects whether data is lagging behind expected date
+  - Compares actual last data date to expected date (default: yesterday, accounting for 1-day API delay)
+  - Returns tuple of (is_lagging: bool, lag_days: int | None)
+  - Handles None values (returns lagging=True, lag_days=None)
+  - Handles future dates (logs warning, returns not lagging)
+  - Configurable expected delay parameter (default: 1 day)
+
+#### Sensor Updates
+- **Daily consumption sensors**: Now track and expose lag detection attributes
+  - Individual meter sensors use `find_last_data_date()` from daily consumption cache
+  - Aggregate sensors combine data from multiple meters
+  - Combined water sensors use the earliest date from hot/cold water for conservative lag detection
+- **Daily cost sensors**: Extended lag detection to all cost tracking
+  - Metered cost sensors use `find_last_price_date()` from daily price cache
+  - Estimated cost sensors use `find_last_data_date()` from daily consumption cache (since calculated from consumption)
+  - Aggregate and combined sensors properly track lag across multiple data sources
+
+#### Logging Improvements
+- **Enhanced log messages**: Sensor updates now include lag information in logs
+  - When `data_lag_days` is None: "data unavailable"
+  - When lagging: "lagging X days"
+  - Example: `Updated sensor.consumption_daily_metered_hot_water: 2.5 -> 2.7 m³ (lagging 4 days)`
+
+### Changed
+
+#### Sensor Attributes
+- **Renamed `last_data_date_readable` to `last_data_date`**: For consistency and clarity
+  - Both attributes contain ISO 8601 formatted datetime strings
+  - Old attribute name removed (minor breaking change)
+  - `last_data_date` now reflects the actual last date where the API returned valid data (not just latest cache timestamp)
+
+#### Lag Detection Consistency
+- **Improved consistency across all daily sensors**:
+  - All sensors set `_data_lagging = True` when coordinator data is unavailable (previously inconsistent)
+  - Lag detection performed consistently after determining last data date
+  - Log message formatting handles None values properly (shows "data unavailable" instead of "lagging None days")
+
+### Fixed
+
+#### Edge Case Handling
+- **Negative value handling**: `find_last_data_date()` now skips negative consumption values (invalid data)
+- **Future date handling**: `detect_data_lag()` now properly handles future dates with warning log
+- **UnboundLocalError prevention**: Fixed potential error in `EcoGuardDailyCostSensor` when timezone variable was undefined
+
+#### Algorithm Optimization
+- **`find_last_price_date()` optimization**: Refactored to use single-pass algorithm instead of dual-loop pattern
+  - More efficient iteration through cache
+  - Clearer logic for preferring non-zero values with zero fallback
+
+### Technical Improvements
+
+#### Testing
+- **Comprehensive test coverage added** in `test_helpers.py`:
+  - `test_find_last_data_date()`: Tests with empty cache, valid data, None values, negative values, unsorted data
+  - `test_find_last_price_date()`: Tests with empty cache, non-zero prices, zero-only prices, None values
+  - `test_detect_data_lag()`: Tests with None values, past dates, future dates, custom expected delays
+  - All edge cases covered including negative values and future dates
+
+#### Code Quality
+- **Improved documentation**: Enhanced docstrings for all helper functions with clear parameter and return descriptions
+- **Better error messages**: Lag-related log messages now provide more context and handle edge cases gracefully
+
+### Breaking Changes (Minor)
+- **`last_data_date_readable` attribute renamed to `last_data_date`**: This affects any automations or dashboards using the old attribute name. Both attributes contain ISO 8601 formatted datetime strings, so migration is straightforward. This is considered a minor breaking change requiring only a minor version bump.
+
 ## [3.0.0] - 2025-01-09
 
 ### Breaking Changes
@@ -340,5 +425,7 @@ Sensor names have been restructured to improve grouping and sorting in lists. Wh
 - Configuration guide
 - Nord Pool integration explanation
 
+[3.1.0]: https://github.com/skogsmaskin/ecoguard-home-assistant/releases/tag/v3.1.0
+[3.0.0]: https://github.com/skogsmaskin/ecoguard-home-assistant/releases/tag/v3.0.0
 [2.0.0]: https://github.com/skogsmaskin/ecoguard-home-assistant/releases/tag/v2.0.0
 [1.0.0]: https://github.com/skogsmaskin/ecoguard-home-assistant/releases/tag/v1.0.0
