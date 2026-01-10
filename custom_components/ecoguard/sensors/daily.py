@@ -2178,6 +2178,16 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
                 self._last_data_date = datetime.fromtimestamp(latest_timestamp, tz=tz)
             else:
                 self._last_data_date = None
+
+            # Detect lag
+            if self._last_data_date:
+                is_lagging, lag_days = detect_data_lag(self._last_data_date, tz)
+                self._data_lagging = is_lagging
+                self._data_lag_days = lag_days
+            else:
+                self._data_lagging = True
+                self._data_lag_days = None
+
             self._hw_meters_with_data = hw_meters_with_data
             self._cw_meters_with_data = cw_meters_with_data
             self._attr_available = True
