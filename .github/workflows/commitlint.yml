@@ -25,12 +25,13 @@ jobs:
       run: |
         git fetch origin ${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }} || true
     
-    - name: Validate commit messages
+    - name: Validate PR title and commit messages
       env:
         GITHUB_BASE_REF: ${{ github.base_ref }}
         GITHUB_REF: ${{ github.ref }}
         GITHUB_BEFORE: ${{ github.event.before }}
         GITHUB_AFTER: ${{ github.event.after }}
         GITHUB_EVENT_NAME: ${{ github.event_name }}
+        GITHUB_PR_TITLE: ${{ github.event.pull_request.title }}
       run: |
         python3 .github/scripts/validate_commits.py
