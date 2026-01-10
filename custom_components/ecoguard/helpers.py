@@ -320,3 +320,128 @@ def round_to_max_digits(value: float | None, max_digits: int = 3) -> float | Non
 
     # Round to the calculated decimal places
     return round(value, decimal_places)
+
+
+def find_last_data_date(
+    daily_cache: list[dict[str, Any]],
+    tz: zoneinfo.ZoneInfo | None = None,
+) -> datetime | None:
+    """Find the actual last date with data from daily consumption cache.
+
+    This finds the most recent date where the API returned actual consumption data
+    (non-None value). This represents the actual last date we successfully retrieved
+    data from the API, not just the latest timestamp in the cache.
+
+    Args:
+        daily_cache: List of daily consumption entries with 'time' and 'value' keys
+            (populated from API responses in data_processor)
+        tz: Optional timezone for date conversion (defaults to UTC)
+
+    Returns:
+        Datetime of the last entry with actual data from the API, or None if no data found
+    """
+    if not daily_cache:
+        return None
+
+    if tz is None:
+        tz = zoneinfo.ZoneInfo("UTC")
+
+    # Sort by time (descending) to find the latest entry with actual data
+    sorted_cache = sorted(
+        daily_cache,
+        key=lambda x: x.get("time", 0),
+        reverse=True,
+    )
+
+    # Find the last entry with a non-None value
+    for entry in sorted_cache:
+        value = entry.get("value")
+        time_stamp = entry.get("time")
+        if value is not None and time_stamp is not None:
+            return datetime.fromtimestamp(time_stamp, tz=tz)
+
+    return None
+
+
+def find_last_price_date(
+    daily_cache: list[dict[str, Any]],
+    tz: zoneinfo.ZoneInfo | None = None,
+) -> datetime | None:
+    """Find the actual last date with price data from daily price cache.
+
+    This finds the most recent date where the API returned actual price data
+    (non-None, non-negative value). For price data, we look for the last non-zero
+    price since 0 values might indicate missing data for some utilities (like HW).
+
+    Args:
+        daily_cache: List of daily price entries with 'time' and 'value' keys
+            (populated from API responses in data_processor)
+        tz: Optional timezone for date conversion (defaults to UTC)
+
+    Returns:
+        Datetime of the last entry with actual price data from the API, or None if no data found
+    """
+    if not daily_cache:
+        return None
+
+    if tz is None:
+        tz = zoneinfo.ZoneInfo("UTC")
+
+    # Sort by time (descending) to find the latest entry with actual data
+    sorted_cache = sorted(
+        daily_cache,
+        key=lambda x: x.get("time", 0),
+        reverse=True,
+    )
+
+    # Find the last entry with a non-None, non-negative value
+    # For prices, we prefer non-zero values (0 might indicate missing data)
+    for entry in sorted_cache:
+        value = entry.get("value")
+        time_stamp = entry.get("time")
+        if value is not None and value >= 0 and time_stamp is not None:
+            # Prefer non-zero values, but accept 0 if that's all we have
+            if value > 0:
+                return datetime.fromtimestamp(time_stamp, tz=tz)
+
+    # If no non-zero values found, return the last entry with any value (including 0)
+    # This handles cases where 0 might be a valid price
+    for entry in sorted_cache:
+        value = entry.get("value")
+        time_stamp = entry.get("time")
+        if value is not None and value >= 0 and time_stamp is not None:
+            return datetime.fromtimestamp(time_stamp, tz=tz)
+
+    return None
+
+
+def detect_data_lag(
+    last_data_date: datetime | None,
+    tz: zoneinfo.ZoneInfo,
+    expected_delay_days: int = 1,
+) -> tuple[bool, int | None]:
+    """Detect if data is lagging behind expected date.
+
+    Args:
+        last_data_date: The last date with actual data
+        tz: Timezone for date calculations
+        expected_delay_days: Expected delay in days (default: 1, since data is typically delayed by 1 day)
+
+    Returns:
+        Tuple of (is_lagging: bool, lag_days: int | None)
+    """
+    if last_data_date is None:
+        return (True, None)
+
+    now_tz = datetime.now(tz)
+    today = now_tz.date()
+
+    # Expected last data date is yesterday (or expected_delay_days ago)
+    expected_date = today - timedelta(days=expected_delay_days)
+    last_data_date_only = last_data_date.date()
+
+    if last_data_date_only < expected_date:
+        lag_days = (expected_date - last_data_date_only).days
+        return (True, lag_days)
+
+    return (False, 0)
