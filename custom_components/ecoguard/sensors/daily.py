@@ -1213,8 +1213,6 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
 
         if self._last_data_date:
             attrs["last_data_date"] = self._last_data_date.isoformat()
-            attrs["data_lagging"] = self._data_lagging
-            attrs["data_lag_days"] = self._data_lag_days
 
         # Add lag detection attributes
         attrs["data_lagging"] = self._data_lagging
@@ -1745,15 +1743,6 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             )
             self._meters_with_data = meters_with_data
             self._attr_available = True
-
-            # Detect lag
-            if self._last_data_date:
-                is_lagging, lag_days = detect_data_lag(self._last_data_date, tz)
-                self._data_lagging = is_lagging
-                self._data_lag_days = lag_days
-            else:
-                self._data_lagging = True
-                self._data_lag_days = None
 
             _LOGGER.info(
                 "Updated %s: %s %s (from %d meters)",
