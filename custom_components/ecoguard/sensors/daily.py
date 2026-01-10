@@ -72,12 +72,14 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
         meter = get_translation_default("name.meter")
         self._attr_name = f'{consumption_daily} - {meter} "{measuring_point_display}" ({utility_name})'
 
-        # Build unique_id following pattern: purpose_group_utility_sensor
-        # Home Assistant strips the domain prefix, so we want: consumption_daily_metered_cold_water_kaldtvann_bad
+        # Build unique_id following pattern: purpose_group_utility_meter_sensor
+        # Home Assistant strips the domain prefix, so we want: consumption_daily_metered_cold_water_meter_kaldtvann_bad
         # Use measuring_point_id to ensure uniqueness across nodes
         utility_slug = utility_code_to_slug(utility_code)
         sensor_name = slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
-        unique_id = f"{DOMAIN}_consumption_daily_metered_{utility_slug}_{sensor_name}"
+        unique_id = (
+            f"{DOMAIN}_consumption_daily_metered_{utility_slug}_meter_{sensor_name}"
+        )
         self._attr_unique_id = unique_id
         _LOGGER.debug("Daily consumption sensor unique_id: %s", unique_id)
 
@@ -309,16 +311,16 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
                 f'{reception_last_update} - {meter} "{measuring_point_display}"'
             )
 
-        # Build unique_id following pattern: purpose_group_utility_sensor
-        # Home Assistant strips the domain prefix, so we want: reception_last_update_cold_water_kaldtvann_bad
+        # Build unique_id following pattern: purpose_group_utility_meter_sensor
+        # Home Assistant strips the domain prefix, so we want: reception_last_update_cold_water_meter_kaldtvann_bad
         sensor_name = slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
         if utility_code:
             utility_slug = utility_code_to_slug(utility_code)
             self._attr_unique_id = (
-                f"{DOMAIN}_reception_last_update_{utility_slug}_{sensor_name}"
+                f"{DOMAIN}_reception_last_update_{utility_slug}_meter_{sensor_name}"
             )
         else:
-            self._attr_unique_id = f"{DOMAIN}_reception_last_update_{sensor_name}"
+            self._attr_unique_id = f"{DOMAIN}_reception_last_update_meter_{sensor_name}"
 
         # Sensor attributes
         # Use English default here; will be updated in async_added_to_hass
@@ -985,9 +987,11 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
         utility_slug = utility_code_to_slug(utility_code)
         sensor_name = slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
         if cost_type == "estimated":
-            unique_id_suffix = f"cost_daily_estimated_{utility_slug}_{sensor_name}"
+            unique_id_suffix = (
+                f"cost_daily_estimated_{utility_slug}_meter_{sensor_name}"
+            )
         else:
-            unique_id_suffix = f"cost_daily_metered_{utility_slug}_{sensor_name}"
+            unique_id_suffix = f"cost_daily_metered_{utility_slug}_meter_{sensor_name}"
         self._attr_unique_id = f"{DOMAIN}_{unique_id_suffix}"
 
         # Sensor attributes

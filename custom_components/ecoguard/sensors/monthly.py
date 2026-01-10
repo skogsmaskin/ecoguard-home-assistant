@@ -28,8 +28,8 @@ from ..sensor_base import EcoGuardBaseSensor
 _LOGGER = logging.getLogger(__name__)
 
 
-class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
-    """Sensor for monthly aggregate consumption or price."""
+class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
+    """Sensor for monthly accumulated consumption or price."""
 
     def __init__(
         self,
@@ -39,7 +39,7 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
         aggregate_type: str,
         cost_type: str = "actual",
     ) -> None:
-        """Initialize the monthly aggregate sensor.
+        """Initialize the monthly accumulated sensor.
 
         Args:
             hass: Home Assistant instance
@@ -51,16 +51,16 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
         Note:
             The aggregate_type parameter uses "price" to match the EcoGuard API terminology
             (the API uses "[price]" in utility codes like "HW[price]"). However, user-facing
-            sensor names use "cost" terminology (e.g., "Cost Monthly Aggregated") as it's more
+            sensor names use "cost" terminology (e.g., "Cost Monthly Accumulated") as it's more
             natural in English. This distinction is intentional: "price" for API/internal use,
             "cost" for user-facing display.
         """
         if aggregate_type == "con":
-            description_key = "description.consumption_monthly_aggregated"
+            description_key = "description.consumption_monthly_accumulated"
         elif cost_type == "estimated":
-            description_key = "description.cost_monthly_aggregated_estimated"
+            description_key = "description.cost_monthly_accumulated_estimated"
         else:
-            description_key = "description.cost_monthly_aggregated_metered"
+            description_key = "description.cost_monthly_accumulated_metered"
         super().__init__(coordinator, hass=hass, description_key=description_key)
         self._hass = hass
         self._utility_code = utility_code
@@ -74,13 +74,13 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
             utility_name = utility_code
 
         if aggregate_type == "con":
-            # Use "Consumption Monthly Aggregated" format to ensure entity_id starts with "consumption_monthly_aggregated_"
+            # Use "Consumption Monthly Accumulated" format to ensure entity_id starts with "consumption_monthly_accumulated_"
             aggregate_name = get_translation_default(
-                "name.consumption_monthly_aggregated"
+                "name.consumption_monthly_accumulated"
             )
         else:
-            # Use "Cost Monthly Aggregated" format to ensure entity_id starts with "cost_monthly_aggregated_"
-            aggregate_name = get_translation_default("name.cost_monthly_aggregated")
+            # Use "Cost Monthly Accumulated" format to ensure entity_id starts with "cost_monthly_accumulated_"
+            aggregate_name = get_translation_default("name.cost_monthly_accumulated")
 
         # Add cost type suffix for price sensors
         if aggregate_type == "price" and cost_type == "estimated":
@@ -95,15 +95,15 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
         self._attr_name = f"{aggregate_name} - {utility_name}"
 
         # Build unique ID following pattern: purpose_group_utility
-        # Home Assistant strips the domain prefix, so we want: consumption_monthly_aggregated_cold_water
+        # Home Assistant strips the domain prefix, so we want: consumption_monthly_accumulated_cold_water
         utility_slug = utility_code_to_slug(utility_code)
         if aggregate_type == "con":
-            unique_id_suffix = f"consumption_monthly_aggregated_{utility_slug}"
+            unique_id_suffix = f"consumption_monthly_accumulated_{utility_slug}"
         elif aggregate_type == "price" and cost_type == "estimated":
-            unique_id_suffix = f"cost_monthly_aggregated_estimated_{utility_slug}"
+            unique_id_suffix = f"cost_monthly_accumulated_estimated_{utility_slug}"
         else:
             # For "actual" cost_type, use "metered" in the ID for clarity
-            unique_id_suffix = f"cost_monthly_aggregated_metered_{utility_slug}"
+            unique_id_suffix = f"cost_monthly_accumulated_metered_{utility_slug}"
 
         self._attr_unique_id = f"{DOMAIN}_{unique_id_suffix}"
 
@@ -177,14 +177,14 @@ class EcoGuardMonthlyAggregateSensor(EcoGuardBaseSensor):
             utility_name = await self._get_translated_utility_name(self._utility_code)
 
             if self._aggregate_type == "con":
-                # Keep "Consumption Monthly Aggregated" format to maintain entity_id starting with "consumption_monthly_aggregated_"
+                # Keep "Consumption Monthly Accumulated" format to maintain entity_id starting with "consumption_monthly_accumulated_"
                 aggregate_name = await async_get_translation(
-                    self._hass, "name.consumption_monthly_aggregated"
+                    self._hass, "name.consumption_monthly_accumulated"
                 )
             else:
-                # Keep "Cost Monthly Aggregated" format to maintain entity_id starting with "cost_monthly_aggregated_"
+                # Keep "Cost Monthly Accumulated" format to maintain entity_id starting with "cost_monthly_accumulated_"
                 aggregate_name = await async_get_translation(
-                    self._hass, "name.cost_monthly_aggregated"
+                    self._hass, "name.cost_monthly_accumulated"
                 )
 
             if self._aggregate_type == "price" and self._cost_type == "estimated":
@@ -537,7 +537,7 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
         Note:
             The aggregate_type parameter uses "price" to match the EcoGuard API terminology
             (the API uses "[price]" in utility codes like "HW[price]"). However, user-facing
-            sensor names use "cost" terminology (e.g., "Cost Monthly Aggregated") as it's more
+            sensor names use "cost" terminology (e.g., "Cost Monthly Accumulated") as it's more
             natural in English. This distinction is intentional: "price" for API/internal use,
             "cost" for user-facing display.
         """
@@ -570,10 +570,10 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
 
         if aggregate_type == "con":
             aggregate_name = get_translation_default(
-                "name.consumption_monthly_aggregated"
+                "name.consumption_monthly_accumulated"
             )
         else:
-            aggregate_name = get_translation_default("name.cost_monthly_aggregated")
+            aggregate_name = get_translation_default("name.cost_monthly_accumulated")
 
         # Add cost type suffix for price sensors
         if aggregate_type == "price" and cost_type == "estimated":
@@ -589,20 +589,20 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
             f'{aggregate_name} - {meter} "{measuring_point_display}" ({utility_name})'
         )
 
-        # Build unique_id following pattern: purpose_group_utility_sensor
+        # Build unique_id following pattern: purpose_group_utility_meter_sensor
         utility_slug = utility_code_to_slug(utility_code)
         sensor_name = slugify_name(measuring_point_name) or f"mp{measuring_point_id}"
         if aggregate_type == "con":
             unique_id_suffix = (
-                f"consumption_monthly_metered_{utility_slug}_{sensor_name}"
+                f"consumption_monthly_accumulated_{utility_slug}_meter_{sensor_name}"
             )
         elif aggregate_type == "price" and cost_type == "estimated":
             unique_id_suffix = (
-                f"cost_monthly_aggregated_estimated_{utility_slug}_{sensor_name}"
+                f"cost_monthly_accumulated_estimated_{utility_slug}_meter_{sensor_name}"
             )
         else:
             unique_id_suffix = (
-                f"cost_monthly_aggregated_metered_{utility_slug}_{sensor_name}"
+                f"cost_monthly_accumulated_metered_{utility_slug}_meter_{sensor_name}"
             )
 
         self._attr_unique_id = f"{DOMAIN}_{unique_id_suffix}"
@@ -695,11 +695,11 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
 
             if self._aggregate_type == "con":
                 aggregate_name = await async_get_translation(
-                    self._hass, "name.consumption_monthly_aggregated"
+                    self._hass, "name.consumption_monthly_accumulated"
                 )
             else:
                 aggregate_name = await async_get_translation(
-                    self._hass, "name.cost_monthly_aggregated"
+                    self._hass, "name.cost_monthly_accumulated"
                 )
 
             if self._aggregate_type == "price" and self._cost_type == "estimated":
@@ -1361,7 +1361,7 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
         Note:
             The aggregate_type parameter uses "price" to match the EcoGuard API terminology
             (the API uses "[price]" in utility codes like "HW[price]"). However, user-facing
-            sensor names use "cost" terminology (e.g., "Cost Monthly Aggregated") as it's more
+            sensor names use "cost" terminology (e.g., "Cost Monthly Accumulated") as it's more
             natural in English. This distinction is intentional: "price" for API/internal use,
             "cost" for user-facing display.
         """
@@ -1378,10 +1378,10 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
 
         if aggregate_type == "con":
             aggregate_name = get_translation_default(
-                "name.consumption_monthly_aggregated"
+                "name.consumption_monthly_accumulated"
             )
         else:
-            aggregate_name = get_translation_default("name.cost_monthly_aggregated")
+            aggregate_name = get_translation_default("name.cost_monthly_accumulated")
 
         if aggregate_type == "price" and cost_type == "estimated":
             estimated = get_translation_default("name.estimated")
@@ -1398,11 +1398,11 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
 
         # Build unique_id following pattern: purpose_group_combined_water
         if aggregate_type == "con":
-            unique_id_suffix = "consumption_monthly_aggregated_combined_water"
+            unique_id_suffix = "consumption_monthly_accumulated_combined_water"
         elif aggregate_type == "price" and cost_type == "estimated":
-            unique_id_suffix = "cost_monthly_aggregated_estimated_combined_water"
+            unique_id_suffix = "cost_monthly_accumulated_estimated_combined_water"
         else:
-            unique_id_suffix = "cost_monthly_aggregated_metered_combined_water"
+            unique_id_suffix = "cost_monthly_accumulated_metered_combined_water"
 
         self._attr_unique_id = f"{DOMAIN}_{unique_id_suffix}"
 
@@ -1464,11 +1464,11 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
         try:
             if self._aggregate_type == "con":
                 aggregate_name = await async_get_translation(
-                    self._hass, "name.consumption_monthly_aggregated"
+                    self._hass, "name.consumption_monthly_accumulated"
                 )
             else:
                 aggregate_name = await async_get_translation(
-                    self._hass, "name.cost_monthly_aggregated"
+                    self._hass, "name.cost_monthly_accumulated"
                 )
 
             if self._aggregate_type == "price" and self._cost_type == "estimated":

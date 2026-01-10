@@ -15,7 +15,7 @@ from .daily import (
 
 # Monthly sensors
 from .monthly import (
-    EcoGuardMonthlyAggregateSensor,
+    EcoGuardMonthlyAccumulatedSensor,
     EcoGuardMonthlyMeterSensor,
     EcoGuardCombinedWaterSensor,
 )
@@ -37,7 +37,7 @@ __all__ = [
     "EcoGuardDailyCostAggregateSensor",
     "EcoGuardDailyCombinedWaterCostSensor",
     # Monthly sensors
-    "EcoGuardMonthlyAggregateSensor",
+    "EcoGuardMonthlyAccumulatedSensor",
     "EcoGuardMonthlyMeterSensor",
     "EcoGuardCombinedWaterSensor",
     # Special sensors

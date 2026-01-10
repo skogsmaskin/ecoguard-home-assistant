@@ -5,6 +5,34 @@ All notable changes to the EcoGuard Home Assistant integration will be documente
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2025-01-09
+
+### Breaking Changes
+- **Renamed monthly sensors from "Aggregated" to "Accumulated"**: Monthly sensors that track running totals for the current month have been renamed to use "Accumulated" terminology instead of "Aggregated"
+  - `Consumption Monthly Aggregated` → `Consumption Monthly Accumulated`
+  - `Cost Monthly Aggregated` → `Cost Monthly Accumulated`
+  - Entity IDs have changed: `consumption_monthly_aggregated_*` → `consumption_monthly_accumulated_*`
+  - Entity IDs have changed: `cost_monthly_aggregated_*` → `cost_monthly_accumulated_*`
+  - **Note**: "Aggregated" is now reserved for sensors that combine multiple meters (daily aggregate sensors). "Accumulated" is used for monthly running totals that build up over time.
+
+- **Added `_meter_` indicator to individual meter sensor entity IDs**: All individual meter sensors now include `_meter_` in their entity IDs for clarity. This is a breaking change as entity IDs have changed.
+  - Daily consumption: `consumption_daily_metered_{utility}_{meter_name}` → `consumption_daily_metered_{utility}_meter_{meter_name}`
+  - Daily cost: `cost_daily_metered_{utility}_{meter_name}` → `cost_daily_metered_{utility}_meter_{meter_name}`
+  - Daily cost (estimated): `cost_daily_estimated_{utility}_{meter_name}` → `cost_daily_estimated_{utility}_meter_{meter_name}`
+  - Monthly consumption: `consumption_monthly_accumulated_{utility}_{meter_name}` → `consumption_monthly_accumulated_{utility}_meter_{meter_name}`
+  - Monthly cost: `cost_monthly_accumulated_metered_{utility}_{meter_name}` → `cost_monthly_accumulated_metered_{utility}_meter_{meter_name}`
+  - Monthly cost (estimated): `cost_monthly_accumulated_estimated_{utility}_{meter_name}` → `cost_monthly_accumulated_estimated_{utility}_meter_{meter_name}`
+  - Reception: `reception_last_update_{utility}_{meter_name}` → `reception_last_update_{utility}_meter_{meter_name}`
+  - **Note**: Aggregate/accumulated sensors (combining multiple meters) do NOT include `_meter_` in their entity IDs.
+
+### Changed
+- Updated all translation keys: `consumption_monthly_aggregated` → `consumption_monthly_accumulated`, `cost_monthly_aggregated` → `cost_monthly_accumulated`
+- Updated class names: `EcoGuardMonthlyAggregateSensor` → `EcoGuardMonthlyAccumulatedSensor`
+- Updated function names: `create_monthly_aggregate_sensors` → `create_monthly_accumulated_sensors`
+- Updated base translation file (`strings.json`) to use "accumulated" terminology
+- Updated entity registry updater to use new translation keys
+- Updated documentation, dashboard guides, and Lovelace dashboard YAML files
+
 ## [2.0.0] - 2026-01-07
 
 Major bump because breaking changes. Strictly following semantic versioning.
@@ -16,8 +44,8 @@ Major bump because breaking changes. Strictly following semantic versioning.
   - Separate sensors for metered (actual API data) and estimated (calculated) costs
   - Format: `Cost Daily Metered - Meter "Measuring Point" (Utility)` or `Cost Daily Metered - Utility`
 - **Monthly Meter Sensors**: Monthly consumption and cost per individual meter
-  - Format: `Consumption Monthly Aggregated - Meter "Measuring Point" (Utility)`
-  - Format: `Cost Monthly Aggregated Metered - Meter "Measuring Point" (Utility)`
+  - Format: `Consumption Monthly Accumulated - Meter "Measuring Point" (Utility)`
+  - Format: `Cost Monthly Accumulated Metered - Meter "Measuring Point" (Utility)`
 - **Combined Water Sensors**: Combined hot and cold water consumption and costs
   - Daily consumption: `Consumption Daily Metered - Combined Water`
   - Daily cost: `Cost Daily Metered - Combined Water` / `Cost Daily Estimated - Combined Water`
@@ -62,12 +90,12 @@ Sensor names have been restructured to improve grouping and sorting in lists. Wh
 - **Consumption sensors**: Renamed from "Daily Consumption" to "Consumption Daily" format
   - Individual meters: `Consumption Daily - Meter "Measuring Point" (Utility)`
   - Aggregated: `Consumption Daily Metered - Utility`
-- **Cost sensors**: Renamed to "Cost Daily" and "Cost Monthly Aggregated" format
+- **Cost sensors**: Renamed to "Cost Daily" and "Cost Monthly Accumulated" format
   - Individual meters: `Cost Daily Metered - Meter "Measuring Point" (Utility)`
-  - Aggregated: `Cost Monthly Aggregated Metered - Utility`
+  - Accumulated: `Cost Monthly Accumulated Metered - Utility`
 - **Reception sensors**: Renamed from "Latest Measurement" to "Reception Last Update"
   - Format: `Reception Last Update - Meter "Measuring Point" (Utility)`
-- **Total cost sensors**: Updated to "Cost Monthly Aggregated Metered/Estimated - All Utilities"
+- **Total cost sensors**: Updated to "Cost Monthly Accumulated Metered/Estimated - All Utilities"
 - All sensor names now use consistent hyphen separators for better readability
 - "Meter" prefix added to all individual meter sensor names for clarity
 
@@ -81,9 +109,14 @@ Sensor names have been restructured to improve grouping and sorting in lists. Wh
 - Existing enabled sensors remain enabled (only new installations are affected)
 
 #### Entity ID Format
-- Updated entity ID format to follow pattern: `{purpose}_{group}_{utility}_{sensor_name}`
+- Updated entity ID format to follow pattern: `{purpose}_{group}_{utility}_{sensor_name}` for aggregate/accumulated sensors
+- Individual meter sensors include `_meter_` indicator: `{purpose}_{group}_{utility}_meter_{sensor_name}`
 - Removed node ID prefix from entity IDs for cleaner naming
-- Example: `sensor.consumption_daily_cold_water_kaldtvann_bad`
+- Examples:
+  - Aggregate: `sensor.consumption_daily_metered_cold_water`
+  - Individual meter: `sensor.consumption_daily_metered_cold_water_meter_kaldtvann_bad`
+  - Monthly accumulated: `sensor.consumption_monthly_accumulated_cold_water`
+  - Monthly meter: `sensor.consumption_monthly_accumulated_cold_water_meter_kaldtvann_bad`
 
 #### Translation Keys
 - Updated translation keys to match new naming conventions:

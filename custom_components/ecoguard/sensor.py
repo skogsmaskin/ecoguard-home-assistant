@@ -23,7 +23,7 @@ from .sensor_factory import (
     create_installation_sensors,
     create_daily_aggregate_sensors,
     create_daily_combined_water_sensors,
-    create_monthly_aggregate_sensors,
+    create_monthly_accumulated_sensors,
     create_monthly_meter_sensors,
     create_combined_water_sensors,
     create_special_sensors,
@@ -114,13 +114,13 @@ async def async_setup_entry(
     )
     sensors.extend(daily_combined_sensors)
 
-    # Create monthly aggregate sensors
-    monthly_aggregate_sensors = create_monthly_aggregate_sensors(
+    # Create monthly accumulated sensors
+    monthly_accumulated_sensors = create_monthly_accumulated_sensors(
         hass=hass,
         coordinator=coordinator,
         utility_codes=utility_codes,
     )
-    sensors.extend(monthly_aggregate_sensors)
+    sensors.extend(monthly_accumulated_sensors)
 
     # Create monthly per-meter sensors
     monthly_meter_sensors = create_monthly_meter_sensors(

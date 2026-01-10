@@ -1,0 +1,162 @@
+# EcoGuard Dashboard Configuration
+# 
+# This is a pre-configured Lovelace dashboard for the EcoGuard integration.
+# 
+# To use this dashboard:
+# 1. Copy this file to your Home Assistant config directory
+# 2. In Home Assistant, go to Settings → Dashboards
+# 3. Click the three dots menu → Import dashboard
+# 4. Select this YAML file
+# 
+# Note: Entity IDs will be automatically generated based on your sensor names.
+# You may need to adjust entity IDs in this file to match your actual sensors.
+# You can find your entity IDs in Settings → Devices & Services → EcoGuard → Entities
+
+title: EcoGuard
+views:
+  - title: Overview
+    path: ecoguard-overview
+    icon: mdi:water-pump
+    cards:
+      # Summary Section - Key Metrics
+      - type: vertical-stack
+        cards:
+          - type: entities
+            title: Daily Summary
+            show_header_toggle: false
+            entities:
+              - entity: sensor.consumption_daily_metered_combined_water
+                name: Total Water Consumption
+                icon: mdi:water
+              - entity: sensor.cost_daily_estimated_combined_water
+                name: Daily Cost (Estimated)
+                icon: mdi:currency-usd
+          
+          # Monthly Cost Gauge
+          - type: gauge
+            entity: sensor.cost_monthly_accumulated_estimated_all_utilities
+            name: Monthly Cost (Estimated)
+            min: 0
+            max: 5000
+            severity:
+              green: 0
+              yellow: 2000
+              red: 4000
+            unit: ""
+      
+      # Consumption by Utility
+      - type: entities
+        title: Monthly Consumption by Utility
+        show_header_toggle: false
+        entities:
+          - entity: sensor.consumption_monthly_accumulated_hot_water
+            name: Hot Water
+            icon: mdi:water-thermometer
+          - entity: sensor.consumption_monthly_accumulated_cold_water
+            name: Cold Water
+            icon: mdi:water
+      
+      # Cost Breakdown
+      - type: entities
+        title: Monthly Costs
+        show_header_toggle: false
+        entities:
+          - entity: sensor.cost_monthly_accumulated_estimated_hot_water
+            name: Hot Water Cost
+            icon: mdi:currency-usd
+          - entity: sensor.cost_monthly_accumulated_estimated_cold_water
+            name: Cold Water Cost
+            icon: mdi:currency-usd
+          - entity: sensor.cost_monthly_other_items
+            name: Other Items
+            icon: mdi:receipt
+          - entity: sensor.cost_monthly_estimated_final_settlement
+            name: Estimated Final Settlement
+            icon: mdi:calculator
+      
+      # Consumption Trends
+      - type: history-graph
+        title: Consumption Trends (7 days)
+        entities:
+          - entity: sensor.consumption_daily_metered_hot_water
+            name: Hot Water
+          - entity: sensor.consumption_daily_metered_cold_water
+            name: Cold Water
+        hours_to_show: 168
+        refresh_interval: 3600
+      
+      # Cost Trends
+      - type: history-graph
+        title: Daily Cost Trends (7 days)
+        entities:
+          - entity: sensor.cost_daily_estimated_hot_water
+            name: Hot Water Cost
+          - entity: sensor.cost_daily_estimated_cold_water
+            name: Cold Water Cost
+        hours_to_show: 168
+        refresh_interval: 3600
+
+  - title: Daily Details
+    path: ecoguard-daily
+    icon: mdi:calendar-today
+    cards:
+      - type: entities
+        title: Daily Consumption
+        entities:
+          - entity: sensor.consumption_daily_metered_hot_water
+          - entity: sensor.consumption_daily_metered_cold_water
+          - entity: sensor.consumption_daily_metered_combined_water
+      
+      - type: entities
+        title: Daily Costs
+        entities:
+          - entity: sensor.cost_daily_metered_hot_water
+          - entity: sensor.cost_daily_estimated_hot_water
+          - entity: sensor.cost_daily_metered_cold_water
+          - entity: sensor.cost_daily_estimated_cold_water
+          - entity: sensor.cost_daily_metered_combined_water
+          - entity: sensor.cost_daily_estimated_combined_water
+      
+      - type: history-graph
+        title: Daily Consumption (30 days)
+        entities:
+          - entity: sensor.consumption_daily_metered_hot_water
+          - entity: sensor.consumption_daily_metered_cold_water
+        hours_to_show: 720
+        refresh_interval: 3600
+
+  - title: Monthly Details
+    path: ecoguard-monthly
+    icon: mdi:calendar-month
+    cards:
+      - type: entities
+        title: Monthly Consumption
+        entities:
+          - entity: sensor.consumption_monthly_accumulated_hot_water
+          - entity: sensor.consumption_monthly_accumulated_cold_water
+      
+      - type: entities
+        title: Monthly Costs
+        entities:
+          - entity: sensor.cost_monthly_accumulated_metered_hot_water
+          - entity: sensor.cost_monthly_accumulated_estimated_hot_water
+          - entity: sensor.cost_monthly_accumulated_metered_cold_water
+          - entity: sensor.cost_monthly_accumulated_estimated_cold_water
+          - entity: sensor.cost_monthly_accumulated_metered_all_utilities
+          - entity: sensor.cost_monthly_accumulated_estimated_all_utilities
+      
+      - type: entities
+        title: Billing Information
+        entities:
+          - entity: sensor.cost_monthly_other_items
+          - entity: sensor.cost_monthly_estimated_final_settlement
+      
+      - type: gauge
+        entity: sensor.cost_monthly_accumulated_estimated_all_utilities
+        name: Total Monthly Cost
+        min: 0
+        max: 5000
+        severity:
+          green: 0
+          yellow: 2000
+          red: 4000

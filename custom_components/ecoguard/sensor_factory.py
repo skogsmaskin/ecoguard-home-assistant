@@ -228,12 +228,12 @@ def create_daily_combined_water_sensors(
     return sensors
 
 
-def create_monthly_aggregate_sensors(
+def create_monthly_accumulated_sensors(
     hass: HomeAssistant,
     coordinator: EcoGuardDataUpdateCoordinator,
     utility_codes: set[str],
 ) -> list[Any]:
-    """Create monthly aggregate sensors for each utility (CW, HW).
+    """Create monthly accumulated sensors for each utility (CW, HW).
 
     Args:
         hass: Home Assistant instance
@@ -244,15 +244,15 @@ def create_monthly_aggregate_sensors(
         List of created sensors
     """
     # Import here to avoid circular import
-    from .sensors import EcoGuardMonthlyAggregateSensor
+    from .sensors import EcoGuardMonthlyAccumulatedSensor
 
     sensors: list[Any] = []
 
-    # Create monthly aggregate sensors for each utility (CW, HW)
+    # Create monthly accumulated sensors for each utility (CW, HW)
     for utility_code in utility_codes:
         if utility_code in WATER_UTILITIES:
             # Monthly consumption sensor
-            monthly_con_sensor = EcoGuardMonthlyAggregateSensor(
+            monthly_con_sensor = EcoGuardMonthlyAccumulatedSensor(
                 hass=hass,
                 coordinator=coordinator,
                 utility_code=utility_code,
@@ -261,7 +261,7 @@ def create_monthly_aggregate_sensors(
             sensors.append(monthly_con_sensor)
 
             # Monthly cost sensors: metered and estimated
-            monthly_cost_metered_sensor = EcoGuardMonthlyAggregateSensor(
+            monthly_cost_metered_sensor = EcoGuardMonthlyAccumulatedSensor(
                 hass=hass,
                 coordinator=coordinator,
                 utility_code=utility_code,
@@ -270,7 +270,7 @@ def create_monthly_aggregate_sensors(
             )
             sensors.append(monthly_cost_metered_sensor)
 
-            monthly_cost_estimated_sensor = EcoGuardMonthlyAggregateSensor(
+            monthly_cost_estimated_sensor = EcoGuardMonthlyAccumulatedSensor(
                 hass=hass,
                 coordinator=coordinator,
                 utility_code=utility_code,
