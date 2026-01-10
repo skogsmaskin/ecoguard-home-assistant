@@ -169,6 +169,123 @@ async def test_daily_consumption_sensor_fetch_value(hass: HomeAssistant, coordin
         assert sensor._attr_native_unit_of_measurement == "m³"
 
 
+async def test_daily_consumption_sensor_last_data_date_and_lag(
+    hass: HomeAssistant, coordinator
+):
+    """Test daily consumption sensor sets last_data_date and lag detection correctly."""
+    from datetime import datetime, timedelta
+    from custom_components.ecoguard.helpers import get_timezone
+
+    installation = {
+        "MeasuringPointID": 1,
+        "ExternalKey": "test-key",
+        "Registers": [{"UtilityCode": "CW"}],
+    }
+
+    sensor = EcoGuardDailyConsumptionSensor(
+        hass=hass,
+        coordinator=coordinator,
+        installation=installation,
+        utility_code="CW",
+        measuring_point_id=1,
+        measuring_point_name=None,
+    )
+
+    sensor.hass = hass
+    sensor.platform = MagicMock()
+    sensor.entity_id = "sensor.test_daily_consumption"
+
+    # Set timezone
+    coordinator._settings = [{"Name": "TimeZoneIANA", "Value": "Europe/Oslo"}]
+
+    tz = get_timezone("Europe/Oslo")
+    now = datetime.now(tz)
+    yesterday = now - timedelta(days=1)
+    two_days_ago = now - timedelta(days=2)
+
+    # Set coordinator data with both latest cache and daily cache
+    # Daily cache has data from 2 days ago (lagging)
+    coordinator.data = {
+        "latest_consumption_cache": {
+            "CW_1": {
+                "value": 10.5,
+                "unit": "m³",
+                "time": int(now.timestamp()),  # Latest timestamp is today
+            }
+        },
+        "daily_consumption_cache": {
+            "CW_1": [
+                {
+                    "time": int(two_days_ago.timestamp()),
+                    "value": 8.0,
+                    "unit": "m³",
+                },
+                {
+                    "time": int(yesterday.timestamp()),
+                    "value": None,  # Missing data for yesterday
+                    "unit": "m³",
+                },
+                {
+                    "time": int(now.timestamp()),
+                    "value": None,  # Missing data for today
+                    "unit": "m³",
+                },
+            ]
+        },
+    }
+
+    with patch.object(sensor, "async_write_ha_state", new_callable=AsyncMock):
+        sensor._update_from_coordinator_data()
+
+        # Should use actual last data date from daily cache (2 days ago), not latest timestamp
+        assert sensor._last_data_date is not None
+        assert sensor._last_data_date.date() == two_days_ago.date()
+
+        # Should detect lag (2 days ago vs expected yesterday = 1 day lag)
+        assert sensor._data_lagging is True
+        assert sensor._data_lag_days == 1
+
+        # Check attributes
+        attrs = sensor.extra_state_attributes
+        assert "last_data_date" in attrs
+        assert attrs["data_lagging"] is True
+        assert attrs["data_lag_days"] == 1
+
+    # Test with up-to-date data (yesterday, which is expected)
+    coordinator.data = {
+        "latest_consumption_cache": {
+            "CW_1": {
+                "value": 10.5,
+                "unit": "m³",
+                "time": int(yesterday.timestamp()),
+            }
+        },
+        "daily_consumption_cache": {
+            "CW_1": [
+                {
+                    "time": int(yesterday.timestamp()),
+                    "value": 10.5,
+                    "unit": "m³",
+                },
+            ]
+        },
+    }
+
+    with patch.object(sensor, "async_write_ha_state", new_callable=AsyncMock):
+        sensor._update_from_coordinator_data()
+
+        assert sensor._last_data_date is not None
+        assert sensor._last_data_date.date() == yesterday.date()
+
+        # Should not be lagging (yesterday is expected)
+        assert sensor._data_lagging is False
+        assert sensor._data_lag_days == 0
+
+        attrs = sensor.extra_state_attributes
+        assert attrs["data_lagging"] is False
+        assert attrs["data_lag_days"] == 0
+
+
 async def test_latest_reception_sensor(
     hass: HomeAssistant, latest_reception_coordinator
 ):
