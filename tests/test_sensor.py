@@ -843,11 +843,11 @@ async def test_daily_consumption_aggregate_sensor_with_aggregated_cache(
         # Should use aggregated value
         assert sensor._attr_native_value == 25.5
         assert sensor._attr_native_unit_of_measurement == "m³"
-        
+
         # meter_count should be populated from individual meter caches
         assert len(sensor._meters_with_data) == 2
         assert sensor.extra_state_attributes["meter_count"] == 2
-        
+
         # Verify meter details
         meters = sensor.extra_state_attributes["meters"]
         assert len(meters) == 2
