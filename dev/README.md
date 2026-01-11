@@ -19,7 +19,7 @@ hass --config dev
 Or use the helper script:
 
 ```bash
-./run_hass.sh
+./dev.sh run-hass
 ```
 
 ## Symlink
@@ -31,4 +31,4 @@ The `custom_components/ecoguard` directory is a symlink to the actual integratio
 - ✅ No file copying needed
 - ✅ Keeps the repo root clean
 
-If the symlink is missing, it will be automatically created when you run `./run_hass.sh`.
+If the symlink is missing, it will be automatically created when you run `./dev.sh run-hass`.

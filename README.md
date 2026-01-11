@@ -258,9 +258,11 @@ custom_components/ecoguard/
    hass --config dev
    ```
    
-   Or use the helper script:
+   Or use the development script:
    ```bash
-   ./run_hass.sh
+   ./dev.sh run-hass
+   # or
+   ./dev.sh hass
    ```
    
    The `dev/custom_components/ecoguard` is a symlink to the actual integration code, so you can edit files directly in `custom_components/ecoguard/` and changes will be immediately available. All Home Assistant data (database, storage, etc.) will be stored in `dev/.homeassistant/` (this directory is gitignored).
@@ -315,9 +317,11 @@ See `tests/README.md` for more details on running tests.
    hass --config dev
    ```
    
-   Or use the helper script:
+   Or use the development script:
    ```bash
-   ./run_hass.sh
+   ./dev.sh run-hass
+   # or
+   ./dev.sh hass
    ```
    
    If using your existing Home Assistant installation:
