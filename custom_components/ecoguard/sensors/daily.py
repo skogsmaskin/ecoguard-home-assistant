@@ -656,7 +656,7 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
             measuring_point_name, and value.
         """
         meters_with_data = []
-        
+
         for installation in active_installations:
             registers = installation.get("Registers", [])
             measuring_point_id = installation.get("MeasuringPointID")
@@ -693,7 +693,7 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
                         "value": meter_consumption_data.get("value", 0.0),
                     }
                 )
-        
+
         return meters_with_data
 
     async def _async_update_translated_name(self) -> None:
@@ -826,26 +826,26 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
         meters_with_data = self._collect_meters_with_data(
             active_installations, consumption_cache
         )
-        
+
         # Calculate total and track latest timestamp
         total_value = 0.0
         unit = None
         latest_timestamp = None
-        
+
         for meter in meters_with_data:
             value = meter.get("value", 0.0)
             total_value += value
-            
+
             # Get unit and timestamp from cache
             measuring_point_id = meter.get("measuring_point_id")
             cache_key = f"{self._utility_code}_{measuring_point_id}"
             consumption_data = consumption_cache.get(cache_key)
-            
+
             if consumption_data:
                 # Use unit from first meter with data
                 if unit is None:
                     unit = consumption_data.get("unit")
-                
+
                 # Track latest timestamp
                 time_stamp = consumption_data.get("time")
                 if time_stamp:
