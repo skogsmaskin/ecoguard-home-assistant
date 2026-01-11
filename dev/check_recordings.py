@@ -26,8 +26,6 @@ Expected intervals:
 import sqlite3
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta
-from collections import defaultdict
 from typing import Any
 
 # Expected recording intervals for different sensor types (in seconds)
@@ -106,9 +104,9 @@ def analyze_recordings(db_path: Path) -> dict[str, Any]:
                 COUNT(*) as state_count
             FROM states s
             JOIN states_meta sm ON s.metadata_id = sm.metadata_id
-            WHERE sm.entity_id LIKE '%ecoguard%' 
-               OR sm.entity_id LIKE '%consumption%'
-               OR sm.entity_id LIKE '%cost%'
+            WHERE sm.entity_id LIKE 'sensor.%ecoguard%' 
+               OR sm.entity_id LIKE 'sensor.consumption_%'
+               OR sm.entity_id LIKE 'sensor.cost_%'
             GROUP BY sm.entity_id, sm.metadata_id
             ORDER BY sm.entity_id
         """
@@ -214,7 +212,9 @@ def detect_partial_recordings(entity_id: str, history: list) -> list[str]:
                 value = float(state)
                 numeric_values_with_order.append((value, idx))
             except (ValueError, TypeError):
-                pass
+                # Intentionally ignore non-numeric or malformed states; they are not
+                # relevant for numeric analysis of partial recordings.
+                continue
 
     # Get unique values in order of appearance
     seen_values = {}
@@ -365,6 +365,8 @@ def check_sensor_integrity(entity_id: str, sensor_info: dict) -> dict[str, Any]:
                 stats["value_progression"] = (
                     f"{numeric_values[0]} → {numeric_values[-1]}"
                 )
+        # Non-numeric state values are expected here and are intentionally
+        # ignored; they are not relevant for combining sensor statistics.
 
     return {
         "issues": issues,
