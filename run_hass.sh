@@ -5,9 +5,8 @@
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-# Change to the dev directory
+# Define the dev directory path
 DEV_DIR="$SCRIPT_DIR/dev"
-cd "$DEV_DIR"
 
 # Check if dev directory exists
 if [ ! -d "$DEV_DIR" ]; then
@@ -15,6 +14,9 @@ if [ ! -d "$DEV_DIR" ]; then
     echo "Please run this script from the repository root."
     exit 1
 fi
+
+# Change to the dev directory
+cd "$DEV_DIR"
 
 # Check if symlink exists
 if [ ! -L "$DEV_DIR/custom_components/ecoguard" ]; then
