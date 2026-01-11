@@ -247,18 +247,9 @@ class EcoGuardBaseSensor(
         # Check if value has changed
         value_changed = new_value != self._last_written_value
 
-        # For daily sensors: write if value changed OR date changed (but only if we have a value)
-        if data_date is not None:
-            date_changed = data_date != self._last_written_date
-            # Only write on date change if we have a valid value (don't write None on date change)
-            if value_changed:
-                return True
-            if date_changed and new_value is not None:
-                return True
-            return False
-
         # For monthly sensors: write if value changed OR month changed OR date changed
         # Monthly accumulated sensors should record daily to track progression
+        # Check monthly first since monthly sensors might have both data_date and data_month
         if data_month is not None:
             month_changed = data_month != self._last_written_month
             # Also check date for monthly accumulated sensors (they should record daily)
@@ -269,6 +260,16 @@ class EcoGuardBaseSensor(
             if value_changed:
                 return True
             if (month_changed or date_changed) and new_value is not None:
+                return True
+            return False
+
+        # For daily sensors: write if value changed OR date changed (but only if we have a value)
+        if data_date is not None:
+            date_changed = data_date != self._last_written_date
+            # Only write on date change if we have a valid value (don't write None on date change)
+            if value_changed:
+                return True
+            if date_changed and new_value is not None:
                 return True
             return False
 
