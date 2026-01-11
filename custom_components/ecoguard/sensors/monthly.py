@@ -31,6 +31,10 @@ _LOGGER = logging.getLogger(__name__)
 class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
     """Sensor for monthly accumulated consumption or price."""
 
+    # Record once per day for monthly accumulated sensors (monthly data updates daily)
+    # Set to None to record all updates
+    RECORDING_INTERVAL: int = 86400  # 24 hours (once per day)
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -216,7 +220,7 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
                 default_unit = self.coordinator.get_setting("Currency") or "NOK"
             self._attr_native_unit_of_measurement = default_unit
             self._attr_available = True
-            self.async_write_ha_state()
+            # Don't write state - wait for coordinator data to be available
             return
 
         # Get current month
@@ -376,6 +380,13 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
                 self._current_year or year,
                 self._current_month or month,
             )
+            # Write state only if value, month, or date has meaningfully changed
+            # Monthly accumulated sensors should record daily to track progression
+            data_month = (self._current_year or year, self._current_month or month)
+            data_date = now.date()  # Current date for daily recording
+            self._async_write_ha_state_if_changed(
+                data_date=data_date, data_month=data_month
+            )
         else:
             # No data available yet
             # For estimated costs (especially HW), trigger async fetch to calculate using spot prices
@@ -421,13 +432,12 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             self._attr_available = True
 
             _LOGGER.debug(
-                "No cached monthly aggregate for %s (cache_key: %s, available keys: %s)",
+                "No cached monthly aggregate for %s (cache_key: %s, available keys: %s) - skipping state write",
                 self.entity_id,
                 cache_key,
                 list(monthly_cache.keys())[:5],
             )
-
-        self.async_write_ha_state()
+            # Don't write state when value is None - wait for data to be available
 
     async def _async_fetch_value(self) -> None:
         """Fetch current month's aggregate value."""
@@ -498,18 +508,34 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             self._current_month = None
             self._attr_available = True
             _LOGGER.debug(
-                "No monthly aggregate data returned for %s (utility=%s, cost_type=%s)",
+                "No monthly aggregate data returned for %s (utility=%s, cost_type=%s) - skipping state write",
                 self.entity_id,
                 self._utility_code,
                 cost_type_to_use,
             )
+            # Don't write state when value is None - wait for data to be available
+            return
 
-        # Notify Home Assistant that the state has changed
-        self.async_write_ha_state()
+        # Write state only if value, month, or date has meaningfully changed
+        # Monthly accumulated sensors should record daily to track progression
+        data_date = now.date()
+        data_month = (
+            (self._current_year or year, self._current_month or month)
+            if self._current_year
+            else (year, month)
+        )
+        self._async_write_ha_state_if_changed(
+            data_date=data_date, data_month=data_month
+        )
 
 
 class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
     """Sensor for monthly consumption or cost for a specific meter."""
+
+    # Record once per day for monthly meter sensors (monthly data updates daily)
+    # Set to None to record all updates, or False to disable recording
+    RECORDING_ENABLED: bool = True
+    RECORDING_INTERVAL: int = 86400  # 24 hours (once per day)
 
     def __init__(
         self,
@@ -730,7 +756,7 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
                 default_unit = self.coordinator.get_setting("Currency") or "NOK"
             self._attr_native_unit_of_measurement = default_unit
             self._attr_available = True
-            self.async_write_ha_state()
+            # Don't write state when value is None - wait for data to be available
             return
 
         # Get current month
@@ -1085,14 +1111,21 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
                     self._current_month or month,
                 )
 
-            self.async_write_ha_state()
+            # Write state only if value, month, or date has meaningfully changed
+            # Monthly meter sensors should record daily to track progression
+            now = datetime.now()
+            data_date = now.date()
+            data_month = (self._current_year or year, self._current_month or month)
+            self._async_write_ha_state_if_changed(
+                data_date=data_date, data_month=data_month
+            )
             return
 
         # No cached data - set placeholder
         self._attr_native_value = None
         self._attr_native_unit_of_measurement = default_unit
         self._attr_available = True
-        self.async_write_ha_state()
+        # Don't write state when value is None - wait for data to be available
 
         # For estimated costs: if we don't have per-meter data, fetch aggregate data directly
         # This makes the sensor self-sufficient - it doesn't depend on other sensors
@@ -1289,7 +1322,12 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
             self._current_year = year
             self._current_month = month
             self._attr_available = True
-            self.async_write_ha_state()
+            now = datetime.now()
+            data_date = now.date()
+            data_month = (year, month)
+            self._async_write_ha_state_if_changed(
+                data_date=data_date, data_month=data_month
+            )
         else:
             _LOGGER.debug(
                 "Cannot calculate proportional cost for %s: per_meter_consumption=%s, total_consumption=%s, total_estimated_cost=%s",
@@ -1331,13 +1369,23 @@ class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
             )
             self._current_year = aggregate_data.get("year")
             self._current_month = aggregate_data.get("month")
+            # Write state only if value, month, or date has meaningfully changed
+            # Monthly accumulated sensors should record daily to track progression
+            data_date = now.date()
+            data_month = (
+                (self._current_year or year, self._current_month or month)
+                if self._current_year
+                else (year, month)
+            )
+            self._async_write_ha_state_if_changed(
+                data_date=data_date, data_month=data_month
+            )
         else:
             self._attr_native_value = None
             self._attr_native_unit_of_measurement = default_unit
             self._current_year = None
             self._current_month = None
-
-        self.async_write_ha_state()
+            # Don't write state when value is None - wait for data to be available
 
 
 class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
@@ -1541,13 +1589,19 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
                 self._current_year = year
                 self._current_month = month
                 self._attr_available = True
-                self.async_write_ha_state()
+                now = datetime.now()
+                data_date = now.date()
+                data_month = (year, month)
+                self._async_write_ha_state_if_changed(
+                    data_date=data_date, data_month=data_month
+                )
                 return
             else:
-                # Missing data for one or both utilities - show Unknown
+                # Missing data for one or both utilities - don't write state yet
+                # Wait until both dependencies are available to avoid recording "unknown" states
                 if self._aggregate_type == "price" and self._cost_type == "actual":
                     _LOGGER.debug(
-                        "Missing data for monthly combined water cost: %s (hw_value=%s, cw_value=%s) - showing Unknown",
+                        "Skipping state write for monthly combined water cost: %s (hw_value=%s, cw_value=%s) - waiting for both dependencies",
                         self.entity_id,
                         hw_value,
                         cw_value,
@@ -1561,10 +1615,11 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
                     default_unit = "m³"
                 self._attr_native_unit_of_measurement = default_unit
                 self._attr_available = True
-                self.async_write_ha_state()
+                # Don't write state - wait for both dependencies
                 return
 
         # No cached data - set placeholder and defer async fetch until after startup
+        # Don't write state yet - wait for data to be available
         default_unit = ""
         if self._aggregate_type == "price":
             default_unit = self.coordinator.get_setting("Currency") or "NOK"
@@ -1574,7 +1629,7 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
         self._attr_native_value = None
         self._attr_native_unit_of_measurement = default_unit
         self._attr_available = True
-        self.async_write_ha_state()
+        # Don't write state - wait for data to be fetched
 
         # Only trigger async fetch if HA is fully started (not during startup)
         from homeassistant.core import CoreState
@@ -1625,6 +1680,8 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
         hw_value = hw_data.get("value") if hw_data else None
         cw_value = cw_data.get("value") if cw_data else None
 
+        # Only show a value if we have data for BOTH HW and CW
+        # This prevents recording partial totals (e.g., just CW when HW is missing)
         if hw_value is not None and cw_value is not None:
             total_value = hw_value + cw_value
             self._attr_native_value = round_to_max_digits(total_value)
@@ -1633,22 +1690,24 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
             self._attr_native_unit_of_measurement = unit
             self._current_year = year
             self._current_month = month
-        elif hw_value is not None:
-            # Only HW data available
-            self._attr_native_value = round_to_max_digits(hw_value)
-            self._attr_native_unit_of_measurement = hw_data.get("unit") or default_unit
-            self._current_year = year
-            self._current_month = month
-        elif cw_value is not None:
-            # Only CW data available
-            self._attr_native_value = round_to_max_digits(cw_value)
-            self._attr_native_unit_of_measurement = cw_data.get("unit") or default_unit
-            self._current_year = year
-            self._current_month = month
+            # Write state only if value, month, or date has meaningfully changed
+            # Monthly accumulated sensors should record daily to track progression
+            data_date = now.date()
+            data_month = (year, month)
+            self._async_write_ha_state_if_changed(
+                data_date=data_date, data_month=data_month
+            )
         else:
+            # Missing data for one or both utilities - don't write state yet
+            # Wait until both dependencies are available to avoid recording "unknown" states
+            _LOGGER.debug(
+                "Skipping state write for %s: missing dependencies (hw_value=%s, cw_value=%s)",
+                self.entity_id,
+                hw_value,
+                cw_value,
+            )
             self._attr_native_value = None
             self._attr_native_unit_of_measurement = default_unit
             self._current_year = None
             self._current_month = None
-
-        self.async_write_ha_state()
+            # Don't write state - wait for both dependencies

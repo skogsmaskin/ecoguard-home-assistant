@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 import logging
+from datetime import date
 
 from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -34,7 +35,18 @@ class EcoGuardBaseSensor(
     - Template method for translation updates
     - Common coordinator update handling
     - Common device info setup
+    - Recording configuration metadata via RECORDING_ENABLED and RECORDING_INTERVAL
     """
+
+    # Class-level attributes for recording configuration metadata
+    # These are informational only - actual recording control should be done via:
+    # 1. Recorder exclude/include configuration
+    # 2. Filter sensors with throttle filters
+    # RECORDING_ENABLED: Recommended recording setting (True/False)
+    # RECORDING_INTERVAL: Recommended recording interval in seconds (None = record all updates)
+    #   Examples: 3600 (hourly), 86400 (daily), None (record all updates)
+    RECORDING_ENABLED: bool = True
+    RECORDING_INTERVAL: int | None = None  # None = record all updates
 
     def __init__(
         self,
@@ -53,6 +65,13 @@ class EcoGuardBaseSensor(
         self._hass = hass
         self._description_key = description_key
         self._description_text: str | None = None
+        # Track last written state for value-based state writes
+        # Only write state when value or context (date/month) changes meaningfully
+        self._last_written_value: Any = None
+        self._last_written_date: date | None = None  # For daily sensors
+        self._last_written_month: tuple[int, int] | None = (
+            None  # (year, month) for monthly sensors
+        )
         # Entity description will be set by _set_entity_description() after name and unique_id are set
 
     async def async_added_to_hass(self) -> None:
@@ -69,11 +88,12 @@ class EcoGuardBaseSensor(
         await self._async_update_translated_name()
         # Set sensor to Unknown state (available=True, native_value=None)
         # No API calls during startup - sensors will show as "Unknown"
+        # Don't write state during initialization - wait for first data update
         self._attr_native_value = None
         self._attr_available = True
-        self.async_write_ha_state()
         _LOGGER.debug(
-            "Sensor %s added to hass (Unknown state, no API calls)", self.entity_id
+            "Sensor %s added to hass (Unknown state, no API calls, will not record until data available)",
+            self.entity_id,
         )
 
     def _set_entity_description(self) -> None:
@@ -185,7 +205,137 @@ class EcoGuardBaseSensor(
         # Default implementation - subclasses should override
         self._attr_native_value = None
         self._attr_available = True
-        self.async_write_ha_state()
+        # Don't write state when value is None - wait for subclass to provide data
+
+    def _should_write_state(
+        self,
+        new_value: Any,
+        data_date: date | None = None,
+        data_month: tuple[int, int] | None = None,
+    ) -> bool:
+        """Check if state should be written based on value and context changes.
+
+        This implements value-based state writes: only write when the value or
+        context (date/month) meaningfully changes. This reduces recorder entries
+        while maintaining accurate historical data.
+
+        Note: This method assumes new_value is not None (that check is done in _async_write_ha_state_if_changed).
+        This method will never be called with a None value.
+
+        Args:
+            new_value: The new sensor value (guaranteed to not be None)
+            data_date: The date associated with the data (for daily sensors)
+            data_month: Tuple of (year, month) for monthly sensors
+
+        Returns:
+            True if state should be written, False otherwise
+        """
+
+        # Always write if recording is disabled (sensor still needs to update)
+        if not self.RECORDING_ENABLED:
+            return True
+
+        # Always write if no interval is configured (record all updates)
+        if self.RECORDING_INTERVAL is None:
+            return True
+
+        # Always write on first update (but only if we have a valid value)
+        if self._last_written_value is None:
+            # Only write on first update if we have a valid value (not None)
+            return new_value is not None
+
+        # Check if value has changed
+        value_changed = new_value != self._last_written_value
+
+        # For daily sensors: write if value changed OR date changed (but only if we have a value)
+        if data_date is not None:
+            date_changed = data_date != self._last_written_date
+            # Only write on date change if we have a valid value (don't write None on date change)
+            if value_changed:
+                return True
+            if date_changed and new_value is not None:
+                return True
+            return False
+
+        # For monthly sensors: write if value changed OR month changed OR date changed
+        # Monthly accumulated sensors should record daily to track progression
+        if data_month is not None:
+            month_changed = data_month != self._last_written_month
+            # Also check date for monthly accumulated sensors (they should record daily)
+            date_changed = False
+            if data_date is not None:
+                date_changed = data_date != self._last_written_date
+            # Only write on month/date change if we have a valid value (don't write None on date/month change)
+            if value_changed:
+                return True
+            if (month_changed or date_changed) and new_value is not None:
+                return True
+            return False
+
+        # For other sensors: only write if value changed
+        return value_changed
+
+    def _async_write_ha_state_if_changed(
+        self,
+        new_value: Any | None = None,
+        data_date: date | None = None,
+        data_month: tuple[int, int] | None = None,
+    ) -> None:
+        """Write state only if value or context has meaningfully changed.
+
+        This method implements value-based state writes to reduce recorder entries
+        while maintaining accurate historical data. It's called by subclasses
+        after updating sensor values.
+
+        Args:
+            new_value: The new sensor value (defaults to self._attr_native_value)
+            data_date: The date associated with the data (for daily sensors)
+            data_month: Tuple of (year, month) for monthly sensors
+        """
+        if new_value is None:
+            new_value = self._attr_native_value
+
+        # Never write state when value is None/unknown
+        # This prevents recording "unknown" states during startup or when data is temporarily unavailable
+        # We don't even write transitions from value to None - if data becomes unavailable,
+        # it's better to keep the last known value rather than recording "unknown"
+        if new_value is None:
+            # Skip writing None/unknown states entirely - don't record during startup or when data is missing
+            _LOGGER.debug(
+                "Skipping state write for %s: value is None/unknown (will not record unknown states)",
+                self.entity_id,
+            )
+            return
+
+        if self._should_write_state(new_value, data_date, data_month):
+            # Update tracking variables
+            self._last_written_value = new_value
+            if data_date is not None:
+                self._last_written_date = data_date
+            if data_month is not None:
+                self._last_written_month = data_month
+
+            # Write state
+            self.async_write_ha_state()
+            _LOGGER.debug(
+                "State written for %s: value=%s, date=%s, month=%s",
+                self.entity_id,
+                new_value,
+                data_date,
+                data_month,
+            )
+        else:
+            # Value hasn't changed meaningfully - skip write
+            _LOGGER.debug(
+                "Skipping state write for %s (no meaningful change: value=%s, date=%s, month=%s, last_written_value=%s, last_written_date=%s, last_written_month=%s)",
+                self.entity_id,
+                new_value,
+                data_date,
+                data_month,
+                self._last_written_value,
+                self._last_written_date,
+                self._last_written_month,
+            )
 
     def _get_base_extra_state_attributes(self) -> dict[str, Any]:
         """Get base extra state attributes including description.
@@ -209,6 +359,30 @@ class EcoGuardBaseSensor(
         # Add description to attributes so it's visible in the UI
         if description:
             attrs["description"] = description
+
+        # Add recording configuration metadata (informational only)
+        # These attributes help users understand recommended recording settings
+        # Actual recording control should be done via recorder configuration or filter sensors
+        attrs["recording_enabled"] = self.RECORDING_ENABLED
+        if self.RECORDING_INTERVAL is not None:
+            attrs["recording_interval_seconds"] = self.RECORDING_INTERVAL
+            # Convert to human-readable format
+            if self.RECORDING_INTERVAL >= 86400:
+                attrs["recording_interval"] = (
+                    f"{self.RECORDING_INTERVAL // 86400} day(s)"
+                )
+            elif self.RECORDING_INTERVAL >= 3600:
+                attrs["recording_interval"] = (
+                    f"{self.RECORDING_INTERVAL // 3600} hour(s)"
+                )
+            elif self.RECORDING_INTERVAL >= 60:
+                attrs["recording_interval"] = (
+                    f"{self.RECORDING_INTERVAL // 60} minute(s)"
+                )
+            else:
+                attrs["recording_interval"] = f"{self.RECORDING_INTERVAL} second(s)"
+        else:
+            attrs["recording_interval"] = "all updates"
 
         return attrs
 

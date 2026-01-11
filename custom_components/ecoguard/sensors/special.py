@@ -123,7 +123,7 @@ class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
             self._attr_available = True
-            self.async_write_ha_state()
+            # Don't write state - wait for coordinator data to be available
             return
 
         # Try to get from billing results cache (coordinator has this cached)
@@ -149,15 +149,21 @@ class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
                 self._item_count = cost_data.get("item_count")
                 self._items = cost_data.get("items", [])
                 self._attr_available = True
-                self.async_write_ha_state()
+                # Write state only if value, month, or date has meaningfully changed
+                data_date = now.date()
+                data_month = (self._current_year or year, self._current_month or month)
+                self._async_write_ha_state_if_changed(
+                    data_date=data_date, data_month=data_month
+                )
                 return
 
         # No cached data - set placeholder and defer async fetch until after startup
+        # Don't write state yet - wait for data to be fetched
         self._attr_native_value = None
         currency = self.coordinator.get_setting("Currency") or ""
         self._attr_native_unit_of_measurement = currency
         self._attr_available = True
-        self.async_write_ha_state()
+        # Don't write state - wait for data to be available
 
         # Only trigger async fetch if HA is fully started (not during startup)
         from homeassistant.core import CoreState
@@ -212,9 +218,20 @@ class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
             self._current_month = None
             self._item_count = None
             self._items = []
+            # Don't write state when value is None - wait for data to be available
+            return
 
-        # Notify Home Assistant that the state has changed
-        self.async_write_ha_state()
+        # Write state only if value, month, or date has meaningfully changed
+        now = datetime.now()
+        data_date = now.date()
+        data_month = (
+            (self._current_year or now.year, self._current_month or now.month)
+            if self._current_year
+            else (now.year, now.month)
+        )
+        self._async_write_ha_state_if_changed(
+            data_date=data_date, data_month=data_month
+        )
 
 
 class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
@@ -226,6 +243,9 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
     Can be configured as "metered" (only metered API data) or "estimated" (includes
     estimated HW costs when price data is missing).
     """
+
+    # Record once per day (monthly sensors should record daily for progression)
+    RECORDING_INTERVAL: int = 86400  # 24 hours (once per day)
 
     def __init__(
         self,
@@ -365,21 +385,34 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
                     if utility_code and utility_code in VALID_UTILITY_CODES:
                         utility_codes.add(utility_code)
 
-            for utility_code in sorted(utility_codes):
-                if utility_code in WATER_UTILITIES:
-                    cache_key = f"{utility_code}_{year}_{month}_price_{self._cost_type}"
-                    price_data = monthly_cache.get(cache_key)
-                    if price_data and price_data.get("value") is not None:
-                        cost = price_data.get("value", 0.0)
-                        total_cost += cost
-                        utilities_with_data.append(utility_code)
+            # Get all water utilities that should be included
+            expected_water_utilities = [
+                uc for uc in sorted(utility_codes) if uc in WATER_UTILITIES
+            ]
 
-            if utilities_with_data:
+            for utility_code in expected_water_utilities:
+                cache_key = f"{utility_code}_{year}_{month}_price_{self._cost_type}"
+                price_data = monthly_cache.get(cache_key)
+                if price_data and price_data.get("value") is not None:
+                    cost = price_data.get("value", 0.0)
+                    total_cost += cost
+                    utilities_with_data.append(utility_code)
+
+            # Only show a value if we have data for ALL expected water utilities
+            # This prevents recording partial totals during startup
+            if utilities_with_data and len(utilities_with_data) == len(
+                expected_water_utilities
+            ):
                 currency = self.coordinator.get_setting("Currency") or ""
                 self._attr_native_value = round_to_max_digits(total_cost)
                 self._attr_native_unit_of_measurement = currency
                 self._attr_available = True
-                self.async_write_ha_state()
+                # Write state only if value, month, or date has meaningfully changed
+                data_date = now.date()
+                data_month = (year, month)
+                self._async_write_ha_state_if_changed(
+                    data_date=data_date, data_month=data_month
+                )
                 return
 
         # No cached data - set placeholder and defer async fetch until after startup
@@ -387,7 +420,12 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
         currency = self.coordinator.get_setting("Currency") or ""
         self._attr_native_unit_of_measurement = currency
         self._attr_available = True
-        self.async_write_ha_state()
+        now = datetime.now()
+        data_date = now.date()
+        data_month = (now.year, now.month)
+        self._async_write_ha_state_if_changed(
+            data_date=data_date, data_month=data_month
+        )
 
         # Only trigger async fetch if HA is fully started (not during startup)
         from homeassistant.core import CoreState
@@ -425,25 +463,33 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
         total_cost = 0.0
         utilities_with_data = []
 
-        for utility_code in sorted(utility_codes):
-            if utility_code in WATER_UTILITIES:
-                price_data = await self.coordinator.get_monthly_aggregate(
-                    utility_code=utility_code,
-                    year=year,
-                    month=month,
-                    aggregate_type="price",
-                    cost_type=self._cost_type,
-                )
+        # Get all water utilities that should be included
+        expected_water_utilities = [
+            uc for uc in sorted(utility_codes) if uc in WATER_UTILITIES
+        ]
 
-                if price_data and price_data.get("value") is not None:
-                    cost = price_data.get("value", 0.0)
-                    total_cost += cost
-                    utilities_with_data.append(utility_code)
+        for utility_code in expected_water_utilities:
+            price_data = await self.coordinator.get_monthly_aggregate(
+                utility_code=utility_code,
+                year=year,
+                month=month,
+                aggregate_type="price",
+                cost_type=self._cost_type,
+            )
+
+            if price_data and price_data.get("value") is not None:
+                cost = price_data.get("value", 0.0)
+                total_cost += cost
+                utilities_with_data.append(utility_code)
 
         # Always set currency unit to prevent statistics issues
         currency = self.coordinator.get_setting("Currency") or ""
 
-        if utilities_with_data:
+        # Only show a value if we have data for ALL expected water utilities
+        # This prevents recording partial totals during startup
+        if utilities_with_data and len(utilities_with_data) == len(
+            expected_water_utilities
+        ):
             raw_value = total_cost
 
             self._attr_native_value = (
@@ -463,8 +509,17 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
             self._current_month = None
             self._utilities = []
 
-        # Notify Home Assistant that the state has changed
-        self.async_write_ha_state()
+        # Write state only if value, month, or date has meaningfully changed
+        now = datetime.now()
+        data_date = now.date()
+        data_month = (
+            (self._current_year or now.year, self._current_month or now.month)
+            if self._current_year
+            else (now.year, now.month)
+        )
+        self._async_write_ha_state_if_changed(
+            data_date=data_date, data_month=data_month
+        )
 
 
 class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
@@ -652,7 +707,12 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
         currency = self.coordinator.get_setting("Currency") or ""
         self._attr_native_unit_of_measurement = currency
         self._attr_available = True
-        self.async_write_ha_state()
+        now = datetime.now()
+        data_date = now.date()
+        data_month = (now.year, now.month)
+        self._async_write_ha_state_if_changed(
+            data_date=data_date, data_month=data_month
+        )
 
         # Trigger async fetch (with delay during startup to avoid blocking)
         # Only create a new task if one isn't already pending
@@ -709,12 +769,65 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
         default_currency = self.coordinator.get_setting("Currency") or ""
 
         if estimate_data:
+            # Only record if we have meaningful utility data (at least one utility with data)
+            # This prevents recording estimates with only other_items_cost during startup
+            hw_price_estimate = estimate_data.get("hw_price_estimate", 0) or 0
+            cw_price_estimate = estimate_data.get("cw_price_estimate", 0) or 0
+            has_hw_data = hw_price_estimate > 0
+            has_cw_data = cw_price_estimate > 0
+
+            # Only record if we have data for at least one utility (HW or CW)
+            # This ensures we don't record partial estimates during startup
+            if not (has_hw_data or has_cw_data):
+                _LOGGER.debug(
+                    "Skipping estimate recording for %s: no utility data yet (HW: %.2f, CW: %.2f)",
+                    self.entity_id,
+                    hw_price_estimate,
+                    cw_price_estimate,
+                )
+                # Set to None and update all attributes, but don't write state yet
+                self._attr_native_value = None
+                self._attr_native_unit_of_measurement = default_currency
+                self._current_year = estimate_data.get("year")
+                self._current_month = estimate_data.get("month")
+                self._days_elapsed_calendar = estimate_data.get("days_elapsed_calendar")
+                self._days_with_data = estimate_data.get("days_with_data")
+                self._days_remaining = estimate_data.get("days_remaining")
+                self._total_days_in_month = estimate_data.get("total_days_in_month")
+                self._latest_data_timestamp = estimate_data.get("latest_data_timestamp")
+                self._hw_consumption_estimate = estimate_data.get(
+                    "hw_consumption_estimate"
+                )
+                self._hw_price_estimate = estimate_data.get("hw_price_estimate")
+                self._cw_consumption_estimate = estimate_data.get(
+                    "cw_consumption_estimate"
+                )
+                self._cw_price_estimate = estimate_data.get("cw_price_estimate")
+                self._other_items_cost = estimate_data.get("other_items_cost")
+                self._hw_mean_daily_consumption = estimate_data.get(
+                    "hw_mean_daily_consumption"
+                )
+                self._hw_mean_daily_price = estimate_data.get("hw_mean_daily_price")
+                self._cw_mean_daily_consumption = estimate_data.get(
+                    "cw_mean_daily_consumption"
+                )
+                self._cw_mean_daily_price = estimate_data.get("cw_mean_daily_price")
+                self._hw_consumption_so_far = estimate_data.get("hw_consumption_so_far")
+                self._hw_price_so_far = estimate_data.get("hw_price_so_far")
+                self._cw_consumption_so_far = estimate_data.get("cw_consumption_so_far")
+                self._cw_price_so_far = estimate_data.get("cw_price_so_far")
+                self._hw_price_is_estimated = estimate_data.get(
+                    "hw_price_is_estimated", False
+                )
+                # Don't write state - wait for utility data
+                return
+
             _LOGGER.info(
                 "Updated sensor.cost_monthly_estimated_final_settlement: %.2f %s (HW: %.2f, CW: %.2f, Other: %.2f)",
                 estimate_data.get("total_bill_estimate", 0),
                 estimate_data.get("currency", default_currency),
-                estimate_data.get("hw_price_estimate", 0),
-                estimate_data.get("cw_price_estimate", 0),
+                hw_price_estimate,
+                cw_price_estimate,
                 estimate_data.get("other_items_cost", 0),
             )
             raw_value = estimate_data.get("total_bill_estimate")
@@ -784,4 +897,14 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
                 "No estimate data available for sensor.cost_monthly_estimated_final_settlement (get_end_of_month_estimate returned None)"
             )
 
-        self.async_write_ha_state()
+        # Write state only if value, month, or date has meaningfully changed
+        now = datetime.now()
+        data_date = now.date()
+        data_month = (
+            (self._current_year or now.year, self._current_month or now.month)
+            if self._current_year
+            else (now.year, now.month)
+        )
+        self._async_write_ha_state_if_changed(
+            data_date=data_date, data_month=data_month
+        )
