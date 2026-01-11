@@ -13,7 +13,7 @@ from homeassistant.core import HomeAssistant
 
 from ..const import DOMAIN
 from ..coordinator import EcoGuardDataUpdateCoordinator
-from ..helpers import round_to_max_digits, get_timezone
+from ..helpers import round_to_max_digits, get_timezone, get_month_timestamps
 from ..translations import (
     async_get_translation,
     get_translation_default,
@@ -21,6 +21,7 @@ from ..translations import (
 
 from ..sensor_helpers import (
     collect_meters_with_data,
+    create_monthly_meter_data_getter,
     slugify_name,
     utility_code_to_slug,
 )
@@ -195,6 +196,9 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
     ) -> list[dict[str, Any]]:
         """Collect meters with data for the current utility code and month.
 
+        First tries to get data from monthly aggregate cache. If per-meter
+        monthly data is not available, calculates from daily consumption cache.
+
         Args:
             active_installations: List of active installations.
             monthly_cache: Monthly aggregate cache dictionary.
@@ -206,13 +210,29 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             measuring_point_name, and value.
         """
         cost_type = self._cost_type if self._aggregate_type == "price" else "actual"
+        coordinator_data = self.coordinator.data
+        daily_cache = (
+            coordinator_data.get("daily_consumption_cache", {})
+            if coordinator_data
+            else {}
+        )
 
-        def get_meter_data(
-            measuring_point_id: int, utility_code: str
-        ) -> dict[str, Any] | None:
-            """Get meter data from monthly cache."""
-            cache_key = f"{utility_code}_{measuring_point_id}_{year}_{month}_{self._aggregate_type}_{cost_type}"
-            return monthly_cache.get(cache_key)
+        # Get timezone and calculate month boundaries
+        timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+        tz = get_timezone(timezone_str)
+        from_time, to_time = get_month_timestamps(year, month, tz)
+
+        # Create the meter data getter callback
+        get_meter_data = create_monthly_meter_data_getter(
+            monthly_cache,
+            daily_cache,
+            self._aggregate_type,
+            cost_type,
+            year,
+            month,
+            from_time,
+            to_time,
+        )
 
         return collect_meters_with_data(
             active_installations,
@@ -1611,6 +1631,9 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
     ) -> list[dict[str, Any]]:
         """Collect meters with data for a specific utility code and month.
 
+        First tries to get data from monthly aggregate cache. If per-meter
+        monthly data is not available, calculates from daily consumption cache.
+
         Args:
             active_installations: List of active installations.
             monthly_cache: Monthly aggregate cache dictionary.
@@ -1623,13 +1646,29 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
             measuring_point_name, and value.
         """
         cost_type = self._cost_type if self._aggregate_type == "price" else "actual"
+        coordinator_data = self.coordinator.data
+        daily_cache = (
+            coordinator_data.get("daily_consumption_cache", {})
+            if coordinator_data
+            else {}
+        )
 
-        def get_meter_data(
-            measuring_point_id: int, utility_code_param: str
-        ) -> dict[str, Any] | None:
-            """Get meter data from monthly cache."""
-            cache_key = f"{utility_code_param}_{measuring_point_id}_{year}_{month}_{self._aggregate_type}_{cost_type}"
-            return monthly_cache.get(cache_key)
+        # Get timezone and calculate month boundaries
+        timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+        tz = get_timezone(timezone_str)
+        from_time, to_time = get_month_timestamps(year, month, tz)
+
+        # Create the meter data getter callback
+        get_meter_data = create_monthly_meter_data_getter(
+            monthly_cache,
+            daily_cache,
+            self._aggregate_type,
+            cost_type,
+            year,
+            month,
+            from_time,
+            to_time,
+        )
 
         return collect_meters_with_data(
             active_installations,
