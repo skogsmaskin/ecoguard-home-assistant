@@ -723,6 +723,49 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
                 self._data_lagging = True
                 self._data_lag_days = None
 
+            # Populate meters_with_data for meter_count attribute
+            # Even when using aggregated cache, we need to know which meters have data
+            active_installations = self.coordinator.get_active_installations()
+            meters_with_data = []
+            for installation in active_installations:
+                registers = installation.get("Registers", [])
+                measuring_point_id = installation.get("MeasuringPointID")
+
+                # Check if this installation has the utility we're looking for
+                has_utility = False
+                for register in registers:
+                    if register.get("UtilityCode") == self._utility_code:
+                        has_utility = True
+                        break
+
+                if not has_utility:
+                    continue
+
+                # Get measuring point name
+                measuring_point_name = None
+                for mp in self.coordinator.get_measuring_points():
+                    if mp.get("ID") == measuring_point_id:
+                        measuring_point_name = mp.get("Name")
+                        break
+
+                # Check if this meter has data in the cache
+                cache_key = f"{self._utility_code}_{measuring_point_id}"
+                meter_consumption_data = consumption_cache.get(cache_key)
+
+                if (
+                    meter_consumption_data
+                    and meter_consumption_data.get("value") is not None
+                ):
+                    meters_with_data.append(
+                        {
+                            "measuring_point_id": measuring_point_id,
+                            "measuring_point_name": measuring_point_name,
+                            "value": meter_consumption_data.get("value", 0.0),
+                        }
+                    )
+
+            self._meters_with_data = meters_with_data
+
             # Mark sensor as available when we have data
             self._attr_available = True
 
@@ -736,7 +779,7 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
                 else:
                     lag_info = ""
                 _LOGGER.info(
-                    "Updated %s: %s -> %s %s (cache key: %s, last data: %s)%s",
+                    "Updated %s: %s -> %s %s (cache key: %s, last data: %s, meters: %d)%s",
                     self.entity_id,
                     old_value,
                     new_value,
@@ -747,6 +790,7 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
                         if self._last_data_date
                         else "None"
                     ),
+                    len(meters_with_data),
                     lag_info,
                 )
 
