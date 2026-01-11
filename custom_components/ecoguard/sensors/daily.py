@@ -640,6 +640,62 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
 
         return attrs
 
+    def _collect_meters_with_data(
+        self,
+        active_installations: list[dict[str, Any]],
+        consumption_cache: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Collect meters with data for the current utility code.
+        
+        Args:
+            active_installations: List of active installations
+            consumption_cache: Consumption cache dictionary
+            
+        Returns:
+            List of meters with data, each containing measuring_point_id, 
+            measuring_point_name, and value
+        """
+        meters_with_data = []
+        
+        for installation in active_installations:
+            registers = installation.get("Registers", [])
+            measuring_point_id = installation.get("MeasuringPointID")
+
+            # Check if this installation has the utility we're looking for
+            has_utility = False
+            for register in registers:
+                if register.get("UtilityCode") == self._utility_code:
+                    has_utility = True
+                    break
+
+            if not has_utility:
+                continue
+
+            # Get measuring point name
+            measuring_point_name = None
+            for mp in self.coordinator.get_measuring_points():
+                if mp.get("ID") == measuring_point_id:
+                    measuring_point_name = mp.get("Name")
+                    break
+
+            # Check if this meter has data in the cache
+            cache_key = f"{self._utility_code}_{measuring_point_id}"
+            meter_consumption_data = consumption_cache.get(cache_key)
+
+            if (
+                meter_consumption_data
+                and meter_consumption_data.get("value") is not None
+            ):
+                meters_with_data.append(
+                    {
+                        "measuring_point_id": measuring_point_id,
+                        "measuring_point_name": measuring_point_name,
+                        "value": meter_consumption_data.get("value", 0.0),
+                    }
+                )
+        
+        return meters_with_data
+
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
         if not self.hass or not self._hass:
@@ -726,45 +782,9 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
             # Populate meters_with_data for meter_count attribute
             # Even when using aggregated cache, we need to know which meters have data
             active_installations = self.coordinator.get_active_installations()
-            meters_with_data = []
-            for installation in active_installations:
-                registers = installation.get("Registers", [])
-                measuring_point_id = installation.get("MeasuringPointID")
-
-                # Check if this installation has the utility we're looking for
-                has_utility = False
-                for register in registers:
-                    if register.get("UtilityCode") == self._utility_code:
-                        has_utility = True
-                        break
-
-                if not has_utility:
-                    continue
-
-                # Get measuring point name
-                measuring_point_name = None
-                for mp in self.coordinator.get_measuring_points():
-                    if mp.get("ID") == measuring_point_id:
-                        measuring_point_name = mp.get("Name")
-                        break
-
-                # Check if this meter has data in the cache
-                cache_key = f"{self._utility_code}_{measuring_point_id}"
-                meter_consumption_data = consumption_cache.get(cache_key)
-
-                if (
-                    meter_consumption_data
-                    and meter_consumption_data.get("value") is not None
-                ):
-                    meters_with_data.append(
-                        {
-                            "measuring_point_id": measuring_point_id,
-                            "measuring_point_name": measuring_point_name,
-                            "value": meter_consumption_data.get("value", 0.0),
-                        }
-                    )
-
-            self._meters_with_data = meters_with_data
+            self._meters_with_data = self._collect_meters_with_data(
+                active_installations, consumption_cache
+            )
 
             # Mark sensor as available when we have data
             self._attr_available = True
@@ -790,7 +810,7 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
                         if self._last_data_date
                         else "None"
                     ),
-                    len(meters_with_data),
+                    len(self._meters_with_data),
                     lag_info,
                 )
 
@@ -803,57 +823,34 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
 
         # Fallback: Sum consumption across all meters for this utility
         active_installations = self.coordinator.get_active_installations()
+        meters_with_data = self._collect_meters_with_data(
+            active_installations, consumption_cache
+        )
+        
+        # Calculate total and track latest timestamp
         total_value = 0.0
         unit = None
         latest_timestamp = None
-        meters_with_data = []
-
-        for installation in active_installations:
-            registers = installation.get("Registers", [])
-            measuring_point_id = installation.get("MeasuringPointID")
-
-            # Check if this installation has the utility we're looking for
-            has_utility = False
-            for register in registers:
-                if register.get("UtilityCode") == self._utility_code:
-                    has_utility = True
-                    break
-
-            if not has_utility:
-                continue
-
-            # Get measuring point name
-            measuring_point_name = None
-            for mp in self.coordinator.get_measuring_points():
-                if mp.get("ID") == measuring_point_id:
-                    measuring_point_name = mp.get("Name")
-                    break
-
-            # Read consumption from cache (no API call)
+        
+        for meter in meters_with_data:
+            value = meter.get("value", 0.0)
+            total_value += value
+            
+            # Get unit and timestamp from cache
+            measuring_point_id = meter.get("measuring_point_id")
             cache_key = f"{self._utility_code}_{measuring_point_id}"
             consumption_data = consumption_cache.get(cache_key)
-
-            if consumption_data and consumption_data.get("value") is not None:
-                value = consumption_data.get("value", 0.0)
-                total_value += value
-
+            
+            if consumption_data:
                 # Use unit from first meter with data
                 if unit is None:
                     unit = consumption_data.get("unit")
-
+                
                 # Track latest timestamp
                 time_stamp = consumption_data.get("time")
                 if time_stamp:
                     if latest_timestamp is None or time_stamp > latest_timestamp:
                         latest_timestamp = time_stamp
-
-                meters_with_data.append(
-                    {
-                        "measuring_point_id": measuring_point_id,
-                        "measuring_point_name": measuring_point_name,
-                        "value": value,
-                    }
-                )
 
         # Find actual last data date from daily consumption cache (fallback case)
         if not actual_last_data_date and latest_timestamp:
