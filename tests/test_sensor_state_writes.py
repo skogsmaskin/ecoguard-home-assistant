@@ -664,8 +664,6 @@ class TestCombinedSensorDataCompleteness:
             coordinator=coordinator,
         )
 
-        datetime.now().date()
-
         sensor.async_write_ha_state = MagicMock()
 
         # Only HW data available - should not write

@@ -222,7 +222,6 @@ class EcoGuardOtherItemsSensor(EcoGuardBaseSensor):
             return
 
         # Write state only if value, month, or date has meaningfully changed
-        now = datetime.now()
         data_date = now.date()
         data_month = (
             (self._current_year or now.year, self._current_month or now.month)
@@ -510,7 +509,6 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
             self._utilities = []
 
         # Write state only if value, month, or date has meaningfully changed
-        now = datetime.now()
         data_date = now.date()
         data_month = (
             (self._current_year or now.year, self._current_month or now.month)
