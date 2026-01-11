@@ -419,12 +419,8 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
         currency = self.coordinator.get_setting("Currency") or ""
         self._attr_native_unit_of_measurement = currency
         self._attr_available = True
-        now = datetime.now()
-        data_date = now.date()
-        data_month = (now.year, now.month)
-        self._async_write_ha_state_if_changed(
-            data_date=data_date, data_month=data_month
-        )
+        # Do not write state when value is None - _async_write_ha_state_if_changed
+        # guards against None, but it's cleaner to not call it at all
 
         # Only trigger async fetch if HA is fully started (not during startup)
         from homeassistant.core import CoreState
@@ -705,12 +701,8 @@ class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
         currency = self.coordinator.get_setting("Currency") or ""
         self._attr_native_unit_of_measurement = currency
         self._attr_available = True
-        now = datetime.now()
-        data_date = now.date()
-        data_month = (now.year, now.month)
-        self._async_write_ha_state_if_changed(
-            data_date=data_date, data_month=data_month
-        )
+        # Do not write state when value is None - _async_write_ha_state_if_changed
+        # guards against None, but it's cleaner to not call it at all
 
         # Trigger async fetch (with delay during startup to avoid blocking)
         # Only create a new task if one isn't already pending
