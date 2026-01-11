@@ -1057,35 +1057,49 @@ async def test_monthly_accumulated_sensor_consumption_with_meter_count(
     """Test monthly accumulated sensor for consumption with meter_count.
 
     This test verifies that the sensor correctly populates meter_count
-    by checking individual meter caches in the monthly aggregate cache.
+    by calculating from daily cache when per-meter monthly cache entries
+    are not available (the common real-world scenario).
     """
     now = datetime.now()
     year = now.year
     month = now.month
 
-    # Set up coordinator data with monthly aggregate cache
+    # Calculate month boundaries for filtering daily values
+    from datetime import timezone
+    from_date = datetime(year, month, 1, tzinfo=timezone.utc)
+    if month == 12:
+        to_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        to_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+
+    from_time = int(from_date.timestamp())
+    to_time = int(to_date.timestamp())
+
+    # Set up coordinator data with:
+    # 1. Monthly aggregate cache (only aggregate entry, no per-meter entries)
+    # 2. Daily consumption cache (per-meter entries that we'll calculate from)
     coordinator.data = {
         "monthly_aggregate_cache": {
-            # Aggregated cache for all HW meters
+            # Only aggregated cache (no per-meter entries)
+            # This simulates the real-world scenario where per-meter monthly
+            # cache entries don't exist
             f"HW_{year}_{month}_con_actual": {
                 "value": 45.5,
                 "unit": "m³",
                 "year": year,
                 "month": month,
             },
-            # Individual meter caches (needed for meter_count)
-            f"HW_1_{year}_{month}_con_actual": {
-                "value": 20.0,
-                "unit": "m³",
-                "year": year,
-                "month": month,
-            },
-            f"HW_2_{year}_{month}_con_actual": {
-                "value": 25.5,
-                "unit": "m³",
-                "year": year,
-                "month": month,
-            },
+        },
+        "daily_consumption_cache": {
+            # Daily consumption data for each meter
+            "HW_1": [
+                {"time": from_time + 86400, "value": 10.0, "unit": "m³"},  # Day 1
+                {"time": from_time + 172800, "value": 10.0, "unit": "m³"},  # Day 2
+            ],
+            "HW_2": [
+                {"time": from_time + 86400, "value": 12.75, "unit": "m³"},  # Day 1
+                {"time": from_time + 172800, "value": 12.75, "unit": "m³"},  # Day 2
+            ],
         },
     }
     coordinator._installations = [
@@ -1116,18 +1130,21 @@ async def test_monthly_accumulated_sensor_consumption_with_meter_count(
         assert sensor._attr_native_value == 45.5
         assert sensor._attr_native_unit_of_measurement == "m³"
 
-        # meter_count should be populated from individual meter caches
+        # meter_count should be populated by calculating from daily cache
+        # (since per-meter monthly cache entries don't exist)
         assert len(sensor._meters_with_data) == 2
         assert sensor.extra_state_attributes["meter_count"] == 2
 
-        # Verify meter details
+        # Verify meter details (calculated from daily cache)
         meters = sensor.extra_state_attributes["meters"]
         assert len(meters) == 2
         assert meters[0]["measuring_point_id"] == 1
         assert meters[0]["measuring_point_name"] == "Hot Water Meter 1"
+        # Value should be sum of daily values: 10.0 + 10.0 = 20.0
         assert meters[0]["value"] == 20.0
         assert meters[1]["measuring_point_id"] == 2
         assert meters[1]["measuring_point_name"] == "Hot Water Meter 2"
+        # Value should be sum of daily values: 12.75 + 12.75 = 25.5
         assert meters[1]["value"] == 25.5
 
 
@@ -1137,13 +1154,15 @@ async def test_monthly_accumulated_sensor_cost_with_meter_count(
     """Test monthly accumulated sensor for cost with meter_count.
 
     This test verifies that the sensor correctly populates meter_count
-    for cost sensors by checking individual meter caches.
+    for cost sensors. For cost sensors, per-meter monthly cache entries
+    are more likely to exist since they're fetched via API.
     """
     now = datetime.now()
     year = now.year
     month = now.month
 
     # Set up coordinator data with monthly aggregate cache
+    # For cost sensors, per-meter entries are more likely to exist
     coordinator.data = {
         "monthly_aggregate_cache": {
             # Aggregated cache for all CW meters
@@ -1154,6 +1173,8 @@ async def test_monthly_accumulated_sensor_cost_with_meter_count(
                 "month": month,
             },
             # Individual meter caches (needed for meter_count)
+            # These are more likely to exist for cost sensors since they're
+            # fetched via API calls
             f"CW_1_{year}_{month}_price_actual": {
                 "value": 60.0,
                 "unit": "NOK",
@@ -1218,16 +1239,32 @@ async def test_monthly_combined_water_sensor_with_meter_count(
     """Test monthly combined water sensor with hw_meter_count and cw_meter_count.
 
     This test verifies that the sensor correctly populates hw_meter_count
-    and cw_meter_count by checking individual meter caches.
+    and cw_meter_count by calculating from daily cache when per-meter
+    monthly cache entries are not available (the common real-world scenario).
     """
     now = datetime.now()
     year = now.year
     month = now.month
 
-    # Set up coordinator data with monthly aggregate cache
+    # Calculate month boundaries for filtering daily values
+    from datetime import timezone
+    from_date = datetime(year, month, 1, tzinfo=timezone.utc)
+    if month == 12:
+        to_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        to_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+
+    from_time = int(from_date.timestamp())
+    to_time = int(to_date.timestamp())
+
+    # Set up coordinator data with:
+    # 1. Monthly aggregate cache (only aggregate entries, no per-meter entries)
+    # 2. Daily consumption cache (per-meter entries that we'll calculate from)
     coordinator.data = {
         "monthly_aggregate_cache": {
-            # Aggregated caches for HW and CW
+            # Only aggregated caches for HW and CW (no per-meter entries)
+            # This simulates the real-world scenario where per-meter monthly
+            # cache entries don't exist
             f"HW_{year}_{month}_con_actual": {
                 "value": 30.0,
                 "unit": "m³",
@@ -1240,32 +1277,25 @@ async def test_monthly_combined_water_sensor_with_meter_count(
                 "year": year,
                 "month": month,
             },
-            # Individual HW meter caches
-            f"HW_1_{year}_{month}_con_actual": {
-                "value": 15.0,
-                "unit": "m³",
-                "year": year,
-                "month": month,
-            },
-            f"HW_2_{year}_{month}_con_actual": {
-                "value": 15.0,
-                "unit": "m³",
-                "year": year,
-                "month": month,
-            },
-            # Individual CW meter caches
-            f"CW_1_{year}_{month}_con_actual": {
-                "value": 25.0,
-                "unit": "m³",
-                "year": year,
-                "month": month,
-            },
-            f"CW_2_{year}_{month}_con_actual": {
-                "value": 25.0,
-                "unit": "m³",
-                "year": year,
-                "month": month,
-            },
+        },
+        "daily_consumption_cache": {
+            # Daily consumption data for each meter
+            "HW_1": [
+                {"time": from_time + 86400, "value": 0.5, "unit": "m³"},  # Day 1
+                {"time": from_time + 172800, "value": 0.5, "unit": "m³"},  # Day 2
+            ],
+            "HW_2": [
+                {"time": from_time + 86400, "value": 0.5, "unit": "m³"},  # Day 1
+                {"time": from_time + 172800, "value": 0.5, "unit": "m³"},  # Day 2
+            ],
+            "CW_1": [
+                {"time": from_time + 86400, "value": 0.8, "unit": "m³"},  # Day 1
+                {"time": from_time + 172800, "value": 0.7, "unit": "m³"},  # Day 2
+            ],
+            "CW_2": [
+                {"time": from_time + 86400, "value": 0.8, "unit": "m³"},  # Day 1
+                {"time": from_time + 172800, "value": 0.7, "unit": "m³"},  # Day 2
+            ],
         },
     }
     coordinator._installations = [
@@ -1295,31 +1325,34 @@ async def test_monthly_combined_water_sensor_with_meter_count(
         assert sensor._attr_native_value == 80.0
         assert sensor._attr_native_unit_of_measurement == "m³"
 
-        # meter_count should be populated from individual meter caches
+        # meter_count should be populated by calculating from daily cache
+        # (since per-meter monthly cache entries don't exist)
         assert len(sensor._hw_meters_with_data) == 2
         assert len(sensor._cw_meters_with_data) == 2
         assert sensor.extra_state_attributes["hw_meter_count"] == 2
         assert sensor.extra_state_attributes["cw_meter_count"] == 2
 
-        # Verify HW meter details
+        # Verify HW meter details (calculated from daily cache)
         hw_meters = sensor.extra_state_attributes["hw_meters"]
         assert len(hw_meters) == 2
         assert hw_meters[0]["measuring_point_id"] == 1
         assert hw_meters[0]["measuring_point_name"] == "Water Meter 1"
-        assert hw_meters[0]["value"] == 15.0
+        # Value should be sum of daily values: 0.5 + 0.5 = 1.0
+        assert hw_meters[0]["value"] == 1.0
         assert hw_meters[1]["measuring_point_id"] == 2
         assert hw_meters[1]["measuring_point_name"] == "Water Meter 2"
-        assert hw_meters[1]["value"] == 15.0
+        assert hw_meters[1]["value"] == 1.0
 
-        # Verify CW meter details
+        # Verify CW meter details (calculated from daily cache)
         cw_meters = sensor.extra_state_attributes["cw_meters"]
         assert len(cw_meters) == 2
         assert cw_meters[0]["measuring_point_id"] == 1
         assert cw_meters[0]["measuring_point_name"] == "Water Meter 1"
-        assert cw_meters[0]["value"] == 25.0
+        # Value should be sum of daily values: 0.8 + 0.7 = 1.5
+        assert cw_meters[0]["value"] == 1.5
         assert cw_meters[1]["measuring_point_id"] == 2
         assert cw_meters[1]["measuring_point_name"] == "Water Meter 2"
-        assert cw_meters[1]["value"] == 25.0
+        assert cw_meters[1]["value"] == 1.5
 
 
 async def test_sensor_descriptions(
