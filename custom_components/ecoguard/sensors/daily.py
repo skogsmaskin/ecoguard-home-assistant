@@ -208,7 +208,8 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
             self._data_lagging = True
             self._data_lag_days = None
             self._attr_available = True
-            self._async_write_ha_state_if_changed()
+            # Don't write state when value is None - wait for coordinator data to be available
+            # Availability will be updated when we next write state with a valid value
             return
 
         # Get consumption cache from coordinator data
@@ -672,7 +673,8 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
             self._attr_native_value = None
             self._attr_native_unit_of_measurement = None
             self._attr_available = True
-            self._async_write_ha_state_if_changed()
+            # Don't write state when value is None - wait for coordinator data to be available
+            # Availability will be updated when we next write state with a valid value
             return
 
         # Get consumption cache from coordinator data
@@ -1326,7 +1328,8 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
             self._last_data_date = None
-            self._async_write_ha_state_if_changed()
+            # Don't write state when value is None - wait for coordinator data to be available
+            # Availability will be updated when we next write state with a valid value
             return
 
         # Get cost cache from coordinator data
