@@ -520,6 +520,10 @@ async def test_end_of_month_estimate_sensor_fetch_value(
             "month": 1,
             "days_elapsed_calendar": 15,
             "days_with_data": 14,
+            # Include utility estimates so the sensor doesn't skip recording
+            # At least one utility must have data > 0 for the sensor to record
+            "hw_price_estimate": 200.0,
+            "cw_price_estimate": 300.0,
         },
     ), patch.object(sensor, "async_write_ha_state", new_callable=AsyncMock):
         await sensor._async_fetch_value()
