@@ -104,9 +104,10 @@ def analyze_recordings(db_path: Path) -> dict[str, Any]:
                 COUNT(*) as state_count
             FROM states s
             JOIN states_meta sm ON s.metadata_id = sm.metadata_id
-            WHERE sm.entity_id LIKE 'sensor.%ecoguard%' 
+            WHERE sm.entity_id LIKE 'sensor.%ecoguard%'
                OR sm.entity_id LIKE 'sensor.consumption_%'
                OR sm.entity_id LIKE 'sensor.cost_%'
+               OR sm.entity_id LIKE 'sensor.reception_%'
             GROUP BY sm.entity_id, sm.metadata_id
             ORDER BY sm.entity_id
         """
