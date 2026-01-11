@@ -448,7 +448,7 @@ def print_report(results: dict[str, Any]) -> None:
         ):
             print(f"\n📌 {entity_id}")
             if is_combining:
-                print(f"   🔗 Combining sensor (combines data from multiple sources)")
+                print("   🔗 Combining sensor (combines data from multiple sources)")
             print(f"   States recorded: {sensor_info['state_count']}")
             print(f"   Current state: {sensor_info['current_state']}")
             print(f"   Should record: {sensor_info['should_record']}")
@@ -551,7 +551,7 @@ def main():
         # Try alternative location
         db_path = script_dir / ".homeassistant" / "home-assistant_v2.db"
         if not db_path.exists():
-            print(f"❌ Database not found. Tried:")
+            print("❌ Database not found. Tried:")
             print(f"   - {script_dir / 'home-assistant_v2.db'}")
             print(f"   - {script_dir / '.homeassistant' / 'home-assistant_v2.db'}")
             sys.exit(1)

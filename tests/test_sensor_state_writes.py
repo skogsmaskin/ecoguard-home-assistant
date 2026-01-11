@@ -5,7 +5,7 @@ This test suite verifies that sensors only write state when values or context
 maintaining accurate historical data.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 import pytest
 from datetime import date, datetime, timedelta
 
@@ -14,7 +14,6 @@ from homeassistant.core import HomeAssistant
 from custom_components.ecoguard.sensor_base import EcoGuardBaseSensor
 from custom_components.ecoguard.sensors.daily import EcoGuardDailyConsumptionSensor
 from custom_components.ecoguard.sensors.monthly import EcoGuardMonthlyAccumulatedSensor
-from custom_components.ecoguard.coordinator import EcoGuardDataUpdateCoordinator
 
 
 class TestShouldWriteState:
@@ -473,11 +472,6 @@ class TestMonthlySensorIntegration:
         ]
         coordinator._settings = [{"Name": "Currency", "Value": "NOK"}]
 
-        installation = {
-            "MeasuringPointID": 1,
-            "ExternalKey": "test-key",
-            "Registers": [{"UtilityCode": "CW"}],
-        }
 
         sensor = EcoGuardMonthlyAccumulatedSensor(
             hass=hass,
@@ -550,11 +544,6 @@ class TestMonthlySensorIntegration:
         ]
         coordinator._settings = [{"Name": "Currency", "Value": "NOK"}]
 
-        installation = {
-            "MeasuringPointID": 1,
-            "ExternalKey": "test-key",
-            "Registers": [{"UtilityCode": "CW"}],
-        }
 
         sensor = EcoGuardMonthlyAccumulatedSensor(
             hass=hass,
@@ -625,11 +614,6 @@ class TestMonthlySensorIntegration:
         ]
         coordinator._settings = [{"Name": "Currency", "Value": "NOK"}]
 
-        installation = {
-            "MeasuringPointID": 1,
-            "ExternalKey": "test-key",
-            "Registers": [{"UtilityCode": "CW"}],
-        }
 
         sensor = EcoGuardMonthlyAccumulatedSensor(
             hass=hass,
@@ -680,7 +664,7 @@ class TestCombinedSensorDataCompleteness:
             coordinator=coordinator,
         )
 
-        today = datetime.now().date()
+        datetime.now().date()
 
         sensor.async_write_ha_state = MagicMock()
 
