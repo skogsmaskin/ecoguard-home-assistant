@@ -1100,7 +1100,7 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
             self._data_lagging = True
             self._data_lag_days = None
 
-        if has_hw_data and has_cw_data and total_value > 0:
+        if has_hw_data and has_cw_data and total_value >= 0:
             self._attr_native_value = round_to_max_digits(total_value)
             self._attr_native_unit_of_measurement = unit
             self._hw_meters_with_data = hw_meters_with_data
