@@ -220,7 +220,8 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
                 default_unit = self.coordinator.get_setting("Currency") or "NOK"
             self._attr_native_unit_of_measurement = default_unit
             self._attr_available = True
-            # Don't write state - wait for coordinator data to be available
+            # Ensure the entity is registered in Home Assistant even before data is available
+            self.async_write_ha_state()
             return
 
         # Get current month
