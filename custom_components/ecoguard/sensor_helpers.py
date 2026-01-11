@@ -149,3 +149,71 @@ def collect_meters_with_data(
             )
 
     return meters_with_data
+
+
+def create_monthly_meter_data_getter(
+    monthly_cache: dict[str, Any],
+    daily_cache: dict[str, Any],
+    aggregate_type: str,
+    cost_type: str,
+    year: int,
+    month: int,
+    from_time: int,
+    to_time: int,
+) -> Callable[[int, str], dict[str, Any] | None]:
+    """Create a get_meter_data callback for monthly sensors.
+
+    This helper creates a callback function that:
+    1. First tries to get data from monthly aggregate cache
+    2. Falls back to calculating from daily consumption cache if not found
+
+    Args:
+        monthly_cache: Monthly aggregate cache dictionary.
+        daily_cache: Daily consumption cache dictionary.
+        aggregate_type: "con" for consumption, "price" for price/cost.
+        cost_type: "actual" for metered API data, "estimated" for estimated.
+        year: Year to check.
+        month: Month to check.
+        from_time: Start timestamp for the month.
+        to_time: End timestamp for the month.
+
+    Returns:
+        A callback function that takes (measuring_point_id, utility_code)
+        and returns meter data dict or None.
+    """
+    def get_meter_data(
+        measuring_point_id: int, utility_code: str
+    ) -> dict[str, Any] | None:
+        """Get meter data from monthly cache or calculate from daily cache."""
+        # First try monthly aggregate cache
+        cache_key = f"{utility_code}_{measuring_point_id}_{year}_{month}_{aggregate_type}_{cost_type}"
+        meter_data = monthly_cache.get(cache_key)
+
+        if meter_data and meter_data.get("value") is not None:
+            return meter_data
+
+        # If not in monthly cache and this is consumption, calculate from daily cache
+        if aggregate_type == "con" and daily_cache:
+            daily_cache_key = f"{utility_code}_{measuring_point_id}"
+            daily_values = daily_cache.get(daily_cache_key)
+
+            if daily_values:
+                # Filter daily values for this month
+                month_values = [
+                    v
+                    for v in daily_values
+                    if from_time <= v.get("time", 0) < to_time
+                    and v.get("value") is not None
+                ]
+
+                if month_values:
+                    total_value = sum(v["value"] for v in month_values)
+                    unit = month_values[0].get("unit", "") if month_values else ""
+                    return {
+                        "value": total_value,
+                        "unit": unit,
+                    }
+
+        return None
+
+    return get_meter_data
