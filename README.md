@@ -108,7 +108,7 @@ The integration creates the following sensors, organized by purpose (Consumption
 
 #### Daily Consumption (Aggregated by Utility)
 - **Format**: `Consumption Daily Metered - Utility`
-- **Examples**: 
+- **Examples**:
   - `Consumption Daily Metered - Hot Water`
   - `Consumption Daily Metered - Cold Water`
 - Aggregated daily consumption across all meters for each utility type
@@ -119,7 +119,7 @@ The integration creates the following sensors, organized by purpose (Consumption
 
 #### Monthly Consumption (Accumulated by Utility)
 - **Format**: `Consumption Monthly Accumulated - Utility`
-- **Examples**: 
+- **Examples**:
   - `Consumption Monthly Accumulated - Hot Water`
   - `Consumption Monthly Accumulated - Cold Water`
 - Total consumption accumulated for the current month (m³), aggregated across all meters
@@ -134,7 +134,7 @@ The integration creates the following sensors, organized by purpose (Consumption
 
 #### Daily Cost (Individual Meters)
 - **Format**: `Cost Daily Metered - Meter "Measuring Point" (Utility)` or `Cost Daily Estimated - Meter "Measuring Point" (Utility)`
-- **Examples**: 
+- **Examples**:
   - `Cost Daily Metered - Meter "Kaldtvann Bad" (Cold Water)`
   - `Cost Daily Estimated - Meter "Varmtvann Bad" (Hot Water)`
 - Daily cost for each meter (metered uses actual API data, estimated uses calculations)
@@ -142,7 +142,7 @@ The integration creates the following sensors, organized by purpose (Consumption
 
 #### Daily Cost (Aggregated by Utility)
 - **Format**: `Cost Daily Metered - Utility` or `Cost Daily Estimated - Utility`
-- **Examples**: 
+- **Examples**:
   - `Cost Daily Metered - Hot Water`
   - `Cost Daily Estimated - Cold Water`
 - Aggregated daily cost across all meters for each utility type
@@ -249,26 +249,26 @@ custom_components/ecoguard/
    ```
 
 3. Run Home Assistant from the `dev/` subfolder:
-   
+
    **Option A: Run from dev/ subfolder (Recommended for development)**
-   
+
    The repository includes a `dev/` subfolder with a minimal `configuration.yaml` and a symlink to `custom_components/ecoguard`. This keeps your repo root clean:
    ```bash
    # From the repository root directory
    hass --config dev
    ```
-   
+
    Or use the development script:
    ```bash
    ./dev.sh run-hass
    # or
    ./dev.sh hass
    ```
-   
+
    The `dev/custom_components/ecoguard` is a symlink to the actual integration code, so you can edit files directly in `custom_components/ecoguard/` and changes will be immediately available. All Home Assistant data (database, storage, etc.) will be stored in `dev/.homeassistant/` (this directory is gitignored).
-   
+
    **Option B: Use your existing Home Assistant installation**
-   
+
    If you prefer to use your existing Home Assistant installation, copy the integration:
    ```bash
    cp -r custom_components/ecoguard ~/.homeassistant/custom_components/
@@ -312,18 +312,18 @@ See `tests/README.md` for more details on running tests.
    ```bash
    # Check configuration
    hass --config dev --script check_config
-   
+
    # Or start Home Assistant
    hass --config dev
    ```
-   
+
    Or use the development script:
    ```bash
    ./dev.sh run-hass
    # or
    ./dev.sh hass
    ```
-   
+
    If using your existing Home Assistant installation:
    ```bash
    hass --script check_config
@@ -336,7 +336,7 @@ See `tests/README.md` for more details on running tests.
      ```bash
      # When running from dev/ subfolder
      tail -f dev/.homeassistant/home-assistant.log
-     
+
      # When using existing installation
      tail -f ~/.homeassistant/home-assistant.log
      ```
@@ -427,6 +427,19 @@ The integration uses tenant authentication:
 - Latest reception: 15 minutes
 - Billing data: 24 hours (cached)
 - Nord Pool prices: Daily (cached)
+
+### Recorder Configuration
+
+The integration implements **value-based state writes** that automatically reduce recorder entries while maintaining accurate historical data. Sensors only write state (and thus get recorded) when values or context (date/month) meaningfully change.
+
+**Recording Behavior:**
+- **Daily sensors**: Record once per day (when date changes), even though they update hourly internally
+- **Monthly sensors**: Record daily to track progression of running totals throughout the month
+- **Other sensors**: Record only when the value changes
+
+The UI always shows current values (sensors update internally), but historical data has appropriate granularity to reduce database size.
+
+**Note about "unknown" states:** Home Assistant automatically records the initial state when entities are first registered. This means **"unknown" values will be recorded in the database when Home Assistant starts** (or restarts), even before sensors have fetched their first data. This is expected Home Assistant core behavior and cannot be prevented. The integration prevents writing "unknown" states programmatically after initialization.
 
 ### Data Caching
 

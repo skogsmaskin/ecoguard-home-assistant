@@ -34,6 +34,11 @@ _LOGGER = logging.getLogger(__name__)
 class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
     """Sensor for last known daily consumption for a specific meter."""
 
+    # Record once per day for individual meter sensors (daily consumption data)
+    # Set to None to record all updates, or False to disable recording
+    RECORDING_ENABLED: bool = True
+    RECORDING_INTERVAL: int = 86400  # 24 hours (once per day)
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -203,7 +208,8 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
             self._data_lagging = True
             self._data_lag_days = None
             self._attr_available = True
-            self.async_write_ha_state()
+            # Don't write state when value is None - wait for coordinator data to be available
+            # Availability will be updated when we next write state with a valid value
             return
 
         # Get consumption cache from coordinator data
@@ -301,12 +307,21 @@ class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
             self._attr_native_unit_of_measurement = None
             self._attr_available = True  # Keep available, just show None/unknown
 
-        # Notify Home Assistant that the state has changed
-        self.async_write_ha_state()
+        # Write state only if value or date has meaningfully changed
+        # Extract date from _last_data_date for value-based state writes
+        data_date = None
+        if self._last_data_date:
+            data_date = self._last_data_date.date()
+        self._async_write_ha_state_if_changed(data_date=data_date)
 
 
 class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
     """Sensor for last update timestamp for a specific meter."""
+
+    # Disable recording for reception sensors (timestamps update frequently)
+    # These don't need historical recording
+    RECORDING_ENABLED: bool = False
+    RECORDING_INTERVAL: int | None = None  # Not applicable when disabled
 
     def __init__(
         self,
@@ -456,7 +471,7 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
         if not latest_reception_data:
             self._attr_native_value = None
             self._attr_available = True
-            self.async_write_ha_state()
+            # Don't write state - wait for coordinator data to be available
             return
 
         # Find the latest reception entry for this measuring point
@@ -479,10 +494,13 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
         if latest_timestamp is None:
             # No reception data found for this measuring point
             self._attr_native_value = None
+            self._attr_available = True
+            # Don't write state when value is None - wait for data to be available
+            return
 
         self._attr_available = True
-        # Notify Home Assistant that the state has changed
-        self.async_write_ha_state()
+        # Write state only if we have a valid timestamp
+        self._async_write_ha_state_if_changed()
 
     async def _async_fetch_value(self) -> None:
         """Fetch latest reception timestamp for this measuring point."""
@@ -491,7 +509,7 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
 
         if not latest_reception_data:
             self._attr_native_value = None
-            self.async_write_ha_state()
+            # Don't write state - wait for coordinator data to be available
             return
 
         # Find the latest reception entry for this measuring point
@@ -514,13 +532,19 @@ class EcoGuardLatestReceptionSensor(EcoGuardBaseSensor):
         if latest_timestamp is None:
             # No reception data found for this measuring point
             self._attr_native_value = None
+            # Don't write state when value is None - wait for data to be available
+            return
 
-        # Notify Home Assistant that the state has changed
-        self.async_write_ha_state()
+        # Write state only if we have a valid timestamp
+        self._async_write_ha_state_if_changed()
 
 
 class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
     """Sensor for aggregated daily consumption across all meters of a utility type."""
+
+    # Record once per hour for aggregate sensors (data updates hourly)
+    # Set to None to record all updates
+    RECORDING_INTERVAL: int = 3600  # 1 hour
 
     def __init__(
         self,
@@ -649,7 +673,8 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
             self._attr_native_value = None
             self._attr_native_unit_of_measurement = None
             self._attr_available = True
-            self.async_write_ha_state()
+            # Don't write state when value is None - wait for coordinator data to be available
+            # Availability will be updated when we next write state with a valid value
             return
 
         # Get consumption cache from coordinator data
@@ -725,7 +750,11 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
                     lag_info,
                 )
 
-            self.async_write_ha_state()
+            # Write state only if value or date has meaningfully changed
+            data_date = None
+            if self._last_data_date:
+                data_date = self._last_data_date.date()
+            self._async_write_ha_state_if_changed(data_date=data_date)
             return
 
         # Fallback: Sum consumption across all meters for this utility
@@ -826,7 +855,11 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
             self._data_lag_days = None
             self._meters_with_data = []
 
-        self.async_write_ha_state()
+        # Write state only if value or date has meaningfully changed
+        data_date = None
+        if self._last_data_date:
+            data_date = self._last_data_date.date()
+        self._async_write_ha_state_if_changed(data_date=data_date)
 
 
 class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
@@ -952,7 +985,7 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
             self._attr_native_value = None
             self._attr_native_unit_of_measurement = None
             self._attr_available = True  # Keep available even if no data
-            self.async_write_ha_state()
+            # Don't write state - wait for coordinator data to be available
             return
 
         # Get consumption cache from coordinator data
@@ -1041,6 +1074,12 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
         total_value = hw_total + cw_total
         old_value = self._attr_native_value
 
+        # Only show a value if we have data for BOTH HW and CW
+        # This ensures the combined sensor only shows a value when both utilities are available
+        # (showing partial data would be misleading - it looks like total combined consumption but is missing one utility)
+        has_hw_data = len(hw_meters_with_data) > 0
+        has_cw_data = len(cw_meters_with_data) > 0
+
         # Use the earliest of HW and CW last data dates (most conservative)
         # This ensures we show lag if either utility is lagging
         if hw_last_data_date and cw_last_data_date:
@@ -1063,7 +1102,7 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
             self._data_lagging = True
             self._data_lag_days = None
 
-        if total_value > 0:
+        if has_hw_data and has_cw_data and total_value >= 0:
             self._attr_native_value = round_to_max_digits(total_value)
             self._attr_native_unit_of_measurement = unit
             self._hw_meters_with_data = hw_meters_with_data
@@ -1106,11 +1145,20 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
                     "Updated %s: %s -> None (no data found)", self.entity_id, old_value
                 )
 
-        self.async_write_ha_state()
+        # Write state only if value or date has meaningfully changed
+        data_date = None
+        if self._last_data_date:
+            data_date = self._last_data_date.date()
+        self._async_write_ha_state_if_changed(data_date=data_date)
 
 
 class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
     """Sensor for last known daily cost for a specific meter."""
+
+    # Record once per day for individual meter sensors (daily cost data)
+    # Set to None to record all updates, or False to disable recording
+    RECORDING_ENABLED: bool = True
+    RECORDING_INTERVAL: int = 86400  # 24 hours (once per day)
 
     def __init__(
         self,
@@ -1280,7 +1328,8 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
             self._last_data_date = None
-            self.async_write_ha_state()
+            # Don't write state when value is None - wait for coordinator data to be available
+            # Availability will be updated when we next write state with a valid value
             return
 
         # Get cost cache from coordinator data
@@ -1402,8 +1451,11 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
             self._data_lagging = True
             self._data_lag_days = None
 
-        # Notify Home Assistant that the state has changed
-        self.async_write_ha_state()
+        # Write state only if value or date has meaningfully changed
+        data_date = None
+        if self._last_data_date:
+            data_date = self._last_data_date.date()
+        self._async_write_ha_state_if_changed(data_date=data_date)
 
     async def _async_fetch_value(self) -> None:
         """Fetch estimated cost when metered cost is not available."""
@@ -1442,7 +1494,7 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
 
             # For estimated costs, use consumption cache to find actual last data date
             # since estimated costs are calculated from consumption data
-            
+
             coordinator_data = self.coordinator.data
             if coordinator_data:
                 daily_consumption_cache = coordinator_data.get(
@@ -1496,9 +1548,14 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
             self._last_data_date = None
             self._data_lagging = True
             self._data_lag_days = None
+            # Don't write state when value is None - wait for data to be available
+            return
 
-        # Notify Home Assistant that the state has changed
-        self.async_write_ha_state()
+        # Write state only if value or date has meaningfully changed
+        data_date = None
+        if self._last_data_date:
+            data_date = self._last_data_date.date()
+        self._async_write_ha_state_if_changed(data_date=data_date)
 
 
 class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
@@ -1643,7 +1700,7 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             self._data_lagging = True
             self._data_lag_days = None
             self._attr_available = True
-            self.async_write_ha_state()
+            # Don't write state - wait for coordinator data to be available
             return
 
         # Get cost cache from coordinator data
@@ -1751,6 +1808,11 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
                 currency,
                 len(meters_with_data),
             )
+            # Write state only if value or date has meaningfully changed
+            data_date = None
+            if self._last_data_date:
+                data_date = self._last_data_date.date()
+            self._async_write_ha_state_if_changed(data_date=data_date)
         else:
             # No metered cost data available
             # For estimated costs, trigger async fetch to calculate from consumption + rate/spot prices
@@ -1802,8 +1864,14 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             self._data_lagging = True
             self._data_lag_days = None
             self._attr_available = True
+            # Don't write state when value is None - wait for data to be available
+            return
 
-        self.async_write_ha_state()
+        # Write state only if value or date has meaningfully changed
+        data_date = None
+        if self._last_data_date:
+            data_date = self._last_data_date.date()
+        self._async_write_ha_state_if_changed(data_date=data_date)
 
     async def _async_fetch_value(self) -> None:
         """Fetch aggregated daily cost across all meters of this utility type."""
@@ -1878,12 +1946,21 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             self._attr_native_unit_of_measurement = currency
             self._last_data_date = None
             self._meters_with_data = []
+            # Don't write state when value is None - wait for data to be available
+            return
 
-        self.async_write_ha_state()
+        # Write state only if value or date has meaningfully changed
+        data_date = None
+        if self._last_data_date:
+            data_date = self._last_data_date.date()
+        self._async_write_ha_state_if_changed(data_date=data_date)
 
 
 class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
     """Sensor for combined daily water cost (HW + CW) across all meters."""
+
+    # Record once per day (daily sensors should record when date changes)
+    RECORDING_INTERVAL: int = 86400  # 24 hours (once per day)
 
     def __init__(
         self,
@@ -2023,7 +2100,7 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
             self._attr_available = True  # Keep available even if no data
-            self.async_write_ha_state()
+            # Don't write state - wait for coordinator data to be available
             return
 
         # Get cost cache from coordinator data
@@ -2203,19 +2280,18 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
                 total_value,
             )
         else:
-            # Missing data for one or both utilities - show Unknown
-            # This is especially important for metered costs: if HW is Unknown (all 0 values),
-            # we show Unknown rather than just CW cost (which would be misleading)
+            # Missing data for one or both utilities - don't write state yet
+            # Wait until both dependencies are available to avoid recording "unknown" states
             if self._cost_type == "estimated":
                 _LOGGER.debug(
-                    "Waiting for both utilities: %s (has_hw_data=%s, has_cw_data=%s)",
+                    "Skipping state write for %s: waiting for both utilities (has_hw_data=%s, has_cw_data=%s)",
                     self.entity_id,
                     has_hw_data,
                     has_cw_data,
                 )
             elif self._cost_type == "actual":
                 _LOGGER.debug(
-                    "Missing data for combined water cost: %s (has_hw_data=%s, has_cw_data=%s) - showing Unknown",
+                    "Skipping state write for %s: waiting for both utilities (has_hw_data=%s, has_cw_data=%s)",
                     self.entity_id,
                     has_hw_data,
                     has_cw_data,
@@ -2231,8 +2307,14 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
             # Mark as lagging when data is missing
             self._data_lagging = True
             self._data_lag_days = None
+            # Don't write state - wait for both dependencies
+            return
 
-        self.async_write_ha_state()
+        # Write state only if value or date has meaningfully changed
+        data_date = None
+        if self._last_data_date:
+            data_date = self._last_data_date.date()
+        self._async_write_ha_state_if_changed(data_date=data_date)
 
     async def _async_fetch_value(self) -> None:
         """Fetch estimated combined water cost by fetching costs for all HW and CW meters."""
@@ -2322,6 +2404,7 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
             )
         else:
             # Missing data for one or both utilities - don't show a value yet
+            # Don't write state - wait for both dependencies to avoid recording "unknown"
             self._attr_native_value = None
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
@@ -2330,10 +2413,15 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
             self._cw_meters_with_data = []
             self._attr_available = True
             _LOGGER.debug(
-                "Waiting for both utilities in %s (has_hw_data=%s, has_cw_data=%s)",
+                "Skipping state write for %s: waiting for both utilities (has_hw_data=%s, has_cw_data=%s)",
                 self.entity_id,
                 has_hw_data,
                 has_cw_data,
             )
+            return
 
-        self.async_write_ha_state()
+        # Write state only if value or date has meaningfully changed
+        data_date = None
+        if self._last_data_date:
+            data_date = self._last_data_date.date()
+        self._async_write_ha_state_if_changed(data_date=data_date)

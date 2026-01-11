@@ -20,6 +20,10 @@ logger:
 
 # Recorder - enable to store historical data
 recorder:
+  # Purge settings
+  purge_keep_days: 7
+  # Commit interval (how often to commit to database)
+  commit_interval: 5
   # Uncomment to exclude specific sensors from recording
   # exclude:
   #   entities:

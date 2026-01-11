@@ -16,6 +16,12 @@ The script will:
 - Report warnings (sensors recording when they shouldn't, or only unknown states)
 - Show statistics about recording intervals for sensors with timestamps
 
+Note: Home Assistant automatically records the initial state when entities are first registered
+(including on each restart). If a sensor doesn't have data yet, this initial state will be
+"unknown". This is expected Home Assistant behavior and cannot be prevented. The integration's
+code prevents writing "unknown" states programmatically, but the initial state recording on
+entity registration is a core Home Assistant feature.
+
 Expected intervals:
 - Daily sensors: 86400 seconds (once per day, when date changes)
 - Daily aggregate sensors: 3600 seconds (once per hour)
@@ -325,6 +331,13 @@ def check_sensor_integrity(entity_id: str, sensor_info: dict) -> dict[str, Any]:
             warnings.append(
                 "All recorded states are 'unknown' - sensor may not have data yet"
             )
+        elif unknown_count > 0 and unknown_count < len(history):
+            # Some unknown states but also valid values - likely from HA initial state recording
+            # This is expected behavior when HA restarts (HA records initial state on entity registration)
+            # This is normal and cannot be prevented - it's a core Home Assistant feature
+            warnings.append(
+                f"{unknown_count} 'unknown' state(s) recorded (expected: HA records initial state on entity registration/restart)"
+            )
 
     # Check state changes
     unique_states = set(
@@ -435,7 +448,7 @@ def print_report(results: dict[str, Any]) -> None:
         ):
             print(f"\n📌 {entity_id}")
             if is_combining:
-                print(f"   🔗 Combining sensor (combines data from multiple sources)")
+                print("   🔗 Combining sensor (combines data from multiple sources)")
             print(f"   States recorded: {sensor_info['state_count']}")
             print(f"   Current state: {sensor_info['current_state']}")
             print(f"   Should record: {sensor_info['should_record']}")
@@ -538,7 +551,7 @@ def main():
         # Try alternative location
         db_path = script_dir / ".homeassistant" / "home-assistant_v2.db"
         if not db_path.exists():
-            print(f"❌ Database not found. Tried:")
+            print("❌ Database not found. Tried:")
             print(f"   - {script_dir / 'home-assistant_v2.db'}")
             print(f"   - {script_dir / '.homeassistant' / 'home-assistant_v2.db'}")
             sys.exit(1)

@@ -5,6 +5,81 @@ All notable changes to the EcoGuard Home Assistant integration will be documente
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-01-11
+
+### Added
+
+#### Value-Based State Writes
+- **Automatic recorder optimization**: Sensors now implement intelligent value-based state writes that automatically reduce recorder database entries while maintaining accurate historical data
+  - Sensors only write state (and thus get recorded) when values or context (date/month) meaningfully change
+  - **Daily sensors**: Record once per day (when date changes), even though they update hourly internally
+  - **Monthly sensors**: Record daily to track progression of running totals throughout the month
+  - **Combined sensors**: Only record when all dependencies (e.g., HW + CW) have data available
+  - Works automatically without any user configuration
+  - UI remains responsive as sensors update internally, but only meaningful state changes are recorded
+
+#### Recording Configuration Metadata
+- **Sensor attributes**: All sensors now expose recording configuration metadata in state attributes
+  - `recording_enabled`: Recommended recording setting
+  - `recording_interval_seconds`: Recommended interval in seconds (if set)
+  - `recording_interval`: Human-readable interval (e.g., "1 day(s)", "1 hour(s)")
+
+#### Comprehensive Test Suite
+- **Value-based state write tests**: Added comprehensive test suite with 21 tests covering:
+  - Core logic (`_should_write_state`, `_async_write_ha_state_if_changed`)
+  - Daily sensor integration (date change detection)
+  - Monthly sensor integration (date/month change detection)
+  - Combined sensor data completeness (dependency waiting)
+  - Verification that "unknown" states are never written programmatically
+
+### Changed
+
+#### Recording Behavior (Minor Breaking Change)
+- **Historical data granularity**: Sensors will no longer record every update
+  - **Daily sensors**: One entry per day (instead of hourly)
+  - **Monthly accumulated sensors**: Daily progression entries (instead of every update)
+  - This provides more meaningful historical data with significantly reduced database size
+  - The UI always shows current values (sensors update internally, just don't record every update)
+
+### Fixed
+
+#### Unknown State Prevention
+- **Prevented programmatic "unknown" state recording**: Integration code now never writes "unknown" states to the database
+  - Sensors wait for valid data before writing state
+  - Combined sensors wait for all dependencies before recording
+  - Note: Home Assistant automatically records an initial "unknown" state when entities are first registered (on startup/restart). This is expected Home Assistant core behavior and cannot be prevented.
+
+#### Data Completeness
+- **Combined sensors**: Fixed to only record when all dependencies have data
+  - Prevents recording partial/incomplete totals during startup
+  - Ensures accurate combined values (e.g., HW + CW) are only recorded when both utilities have data
+- **Zero consumption handling**: Fixed combined water sensor to allow zero consumption values (changed `> 0` to `>= 0`)
+
+#### Code Quality
+- **Removed redundant state writes**: Fixed issue where `_async_write_ha_state_if_changed()` was called with `None` values
+  - Method returns early for `None` values, so these calls were no-ops
+  - Removed unnecessary calls to prevent confusion and improve code clarity
+  - Availability status will be updated when sensors next write state with valid values
+
+### Technical Improvements
+
+#### Code Refactoring
+- **Centralized value-based write logic**: Added `_should_write_state()` and `_async_write_ha_state_if_changed()` methods to base sensor class
+  - Tracks last written value and context (date/month) to determine when state should be written
+  - Reduces code duplication across sensor types
+  - Follows Home Assistant best practices (doesn't override core methods)
+
+#### Documentation
+- **Updated README**: Added concise recorder configuration section explaining value-based state writes
+- **Clarified "unknown" state behavior**: Documented that Home Assistant automatically records initial "unknown" states on entity registration
+
+### Minor Breaking Changes
+- **Historical data format**: Sensors will now show fewer entries in historical data
+  - Daily sensors: One entry per day instead of hourly
+  - Monthly accumulated sensors: Daily progression instead of every update
+  - This is intentional and provides more meaningful data with reduced database size
+  - The UI always shows current values, but historical data has appropriate granularity
+
 ## [3.1.0] - 2026-01-10
 
 ### Added
@@ -425,6 +500,7 @@ Sensor names have been restructured to improve grouping and sorting in lists. Wh
 - Configuration guide
 - Nord Pool integration explanation
 
+[3.2.0]: https://github.com/skogsmaskin/ecoguard-home-assistant/releases/tag/v3.2.0
 [3.1.0]: https://github.com/skogsmaskin/ecoguard-home-assistant/releases/tag/v3.1.0
 [3.0.0]: https://github.com/skogsmaskin/ecoguard-home-assistant/releases/tag/v3.0.0
 [2.0.0]: https://github.com/skogsmaskin/ecoguard-home-assistant/releases/tag/v2.0.0
