@@ -87,7 +87,10 @@ cmd_run_hass() {
     echo "   Config directory: $DEV_DIR"
     echo ""
 
-    cd "$DEV_DIR"
+    if ! cd "$DEV_DIR"; then
+        error "Failed to change directory to: $DEV_DIR"
+        return 1
+    fi
     hass --config .
 }
 
@@ -156,9 +159,9 @@ cmd_db() {
         ecoguard_count=$(sqlite3 "$db_file" "
             SELECT COUNT(*) FROM states s
             JOIN states_meta sm ON s.metadata_id = sm.metadata_id
-            WHERE sm.entity_id LIKE '%ecoguard%'
-               OR sm.entity_id LIKE '%consumption%'
-               OR sm.entity_id LIKE '%cost%'
+            WHERE sm.entity_id LIKE 'sensor.%ecoguard%'
+               OR sm.entity_id LIKE 'sensor.consumption_%'
+               OR sm.entity_id LIKE 'sensor.cost_%'
         " 2>/dev/null || echo "0")
 
         # Get database size
@@ -176,8 +179,8 @@ cmd_db() {
         echo "📊 Database: $db_file"
         echo "📋 Tables: $table_count"
         echo ""
-        printf "   States: %'d\n" "$state_count"
-        printf "   EcoGuard states: %'d\n" "$ecoguard_count"
+        printf "   States: %d\n" "$state_count"
+        printf "   EcoGuard states: %d\n" "$ecoguard_count"
         echo "   Size: $size_str"
 
     elif [[ "$operation" == "query" ]]; then
@@ -256,7 +259,7 @@ cmd_test() {
         test_cmd+=("-k" "$test_pattern")
     fi
 
-    cd "$REPO_ROOT"
+    cd "$REPO_ROOT" || return 1
     "${test_cmd[@]}"
 }
 
@@ -286,9 +289,9 @@ cmd_nuke_recordings() {
     count=$(sqlite3 "$db_file" "
         SELECT COUNT(*) FROM states s
         JOIN states_meta sm ON s.metadata_id = sm.metadata_id
-        WHERE sm.entity_id LIKE '%ecoguard%'
-           OR sm.entity_id LIKE '%consumption%'
-           OR sm.entity_id LIKE '%cost%'
+        WHERE sm.entity_id LIKE 'sensor.%ecoguard%'
+           OR sm.entity_id LIKE 'sensor.consumption_%'
+           OR sm.entity_id LIKE 'sensor.cost_%'
     " 2>/dev/null || echo "0")
 
     if [[ "$count" -eq 0 ]]; then
@@ -314,9 +317,9 @@ cmd_nuke_recordings() {
         DELETE FROM states
         WHERE metadata_id IN (
             SELECT metadata_id FROM states_meta
-            WHERE entity_id LIKE '%ecoguard%'
-               OR entity_id LIKE '%consumption%'
-               OR entity_id LIKE '%cost%'
+            WHERE entity_id LIKE 'sensor.%ecoguard%'
+               OR entity_id LIKE 'sensor.consumption_%'
+               OR entity_id LIKE 'sensor.cost_%'
         );
         SELECT changes();
     " 2>/dev/null || echo "0")
@@ -455,6 +458,16 @@ main() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     -n|--lines)
+                        if [[ $# -lt 2 ]]; then
+                            error "Option --lines requires a value"
+                            show_usage
+                            exit 1
+                        fi
+                        if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                            error "Invalid value for --lines: '$2' (must be a non-negative integer)"
+                            show_usage
+                            exit 1
+                        fi
                         lines="$2"
                         shift 2
                         ;;
@@ -512,10 +525,20 @@ main() {
                         shift
                         ;;
                     --file)
+                        if [[ $# -lt 2 ]]; then
+                            error "Option --file requires a value"
+                            show_usage
+                            exit 1
+                        fi
                         test_file="$2"
                         shift 2
                         ;;
                     --test)
+                        if [[ $# -lt 2 ]]; then
+                            error "Option --test requires a value"
+                            show_usage
+                            exit 1
+                        fi
                         test_pattern="$2"
                         shift 2
                         ;;
