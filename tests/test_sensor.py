@@ -790,7 +790,7 @@ async def test_daily_consumption_aggregate_sensor_with_aggregated_cache(
     hass: HomeAssistant, coordinator
 ):
     """Test daily consumption aggregate sensor with aggregated cache key.
-    
+
     This test verifies that when using the aggregated cache key (utility_code_all),
     the sensor correctly populates meter_count by checking individual meter caches.
     """

@@ -646,14 +646,14 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
         consumption_cache: dict[str, Any],
     ) -> list[dict[str, Any]]:
         """Collect meters with data for the current utility code.
-        
+
         Args:
-            active_installations: List of active installations
-            consumption_cache: Consumption cache dictionary
-            
+            active_installations: List of active installations.
+            consumption_cache: Consumption cache dictionary.
+
         Returns:
-            List of meters with data, each containing measuring_point_id, 
-            measuring_point_name, and value
+            List of meters with data, each containing measuring_point_id,
+            measuring_point_name, and value.
         """
         meters_with_data = []
         
