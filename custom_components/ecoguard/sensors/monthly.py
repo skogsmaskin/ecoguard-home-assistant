@@ -20,6 +20,7 @@ from ..translations import (
 )
 
 from ..sensor_helpers import (
+    collect_meters_with_data,
     slugify_name,
     utility_code_to_slug,
 )
@@ -132,6 +133,7 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             self._attr_native_unit_of_measurement = None
         self._current_year: int | None = None
         self._current_month: int | None = None
+        self._meters_with_data: list[dict[str, Any]] = []
 
         # Set icon based on aggregate type and utility type
         if aggregate_type == "con":
@@ -170,7 +172,54 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             attrs["month"] = self._current_month
             attrs["period"] = f"{self._current_year}-{self._current_month:02d}"
 
+        attrs["meter_count"] = len(self._meters_with_data)
+
+        if self._meters_with_data:
+            attrs["meters"] = [
+                {
+                    "measuring_point_id": m.get("measuring_point_id"),
+                    "measuring_point_name": m.get("measuring_point_name"),
+                    "value": m.get("value"),
+                }
+                for m in self._meters_with_data
+            ]
+
         return attrs
+
+    def _collect_meters_with_data(
+        self,
+        active_installations: list[dict[str, Any]],
+        monthly_cache: dict[str, Any],
+        year: int,
+        month: int,
+    ) -> list[dict[str, Any]]:
+        """Collect meters with data for the current utility code and month.
+
+        Args:
+            active_installations: List of active installations.
+            monthly_cache: Monthly aggregate cache dictionary.
+            year: Year to check.
+            month: Month to check.
+
+        Returns:
+            List of meters with data, each containing measuring_point_id,
+            measuring_point_name, and value.
+        """
+        cost_type = self._cost_type if self._aggregate_type == "price" else "actual"
+
+        def get_meter_data(
+            measuring_point_id: int, utility_code: str
+        ) -> dict[str, Any] | None:
+            """Get meter data from monthly cache."""
+            cache_key = f"{utility_code}_{measuring_point_id}_{year}_{month}_{self._aggregate_type}_{cost_type}"
+            return monthly_cache.get(cache_key)
+
+        return collect_meters_with_data(
+            active_installations,
+            self._utility_code,
+            self.coordinator,
+            get_meter_data,
+        )
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -370,15 +419,23 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             )
             self._current_year = aggregate_data.get("year")
             self._current_month = aggregate_data.get("month")
+
+            # Populate meters_with_data for meter_count attribute
+            active_installations = self.coordinator.get_active_installations()
+            self._meters_with_data = self._collect_meters_with_data(
+                active_installations, monthly_cache, year, month
+            )
+
             self._attr_available = True
 
             _LOGGER.info(
-                "Updated %s: %s %s (from cache, year=%d, month=%d)",
+                "Updated %s: %s %s (from cache, year=%d, month=%d, meters: %d)",
                 self.entity_id,
                 self._attr_native_value,
                 self._attr_native_unit_of_measurement,
                 self._current_year or year,
                 self._current_month or month,
+                len(self._meters_with_data),
             )
             # Write state only if value, month, or date has meaningfully changed
             # Monthly accumulated sensors should record daily to track progression
@@ -429,6 +486,7 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             self._attr_native_unit_of_measurement = default_unit
             self._current_year = None
             self._current_month = None
+            self._meters_with_data = []
             self._attr_available = True
 
             _LOGGER.debug(
@@ -486,16 +544,29 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             )
             self._current_year = aggregate_data.get("year")
             self._current_month = aggregate_data.get("month")
+
+            # Populate meters_with_data for meter_count attribute
+            coordinator_data = self.coordinator.data
+            if coordinator_data:
+                monthly_cache = coordinator_data.get("monthly_aggregate_cache", {})
+                active_installations = self.coordinator.get_active_installations()
+                self._meters_with_data = self._collect_meters_with_data(
+                    active_installations, monthly_cache, year, month
+                )
+            else:
+                self._meters_with_data = []
+
             self._attr_available = True
 
             _LOGGER.info(
-                "Updated %s (async fetch): %s %s (year=%d, month=%d, cost_type=%s)",
+                "Updated %s (async fetch): %s %s (year=%d, month=%d, cost_type=%s, meters: %d)",
                 self.entity_id,
                 self._attr_native_value,
                 self._attr_native_unit_of_measurement,
                 self._current_year or year,
                 self._current_month or month,
                 cost_type_to_use,
+                len(self._meters_with_data),
             )
 
             # Note: We don't trigger coordinator updates here because per-meter sensors are now
@@ -506,6 +577,7 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             self._attr_native_unit_of_measurement = default_unit
             self._current_year = None
             self._current_month = None
+            self._meters_with_data = []
             self._attr_available = True
             _LOGGER.debug(
                 "No monthly aggregate data returned for %s (utility=%s, cost_type=%s) - skipping state write",
@@ -1472,6 +1544,8 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
             self._attr_native_unit_of_measurement = "m³"
         self._current_year: int | None = None
         self._current_month: int | None = None
+        self._hw_meters_with_data: list[dict[str, Any]] = []
+        self._cw_meters_with_data: list[dict[str, Any]] = []
 
         # Set icon for combined water sensor
         if aggregate_type == "con":
@@ -1502,7 +1576,67 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
         if self._aggregate_type == "price":
             attrs["cost_type"] = self._cost_type
 
+        attrs["hw_meter_count"] = len(self._hw_meters_with_data)
+        attrs["cw_meter_count"] = len(self._cw_meters_with_data)
+
+        if self._hw_meters_with_data:
+            attrs["hw_meters"] = [
+                {
+                    "measuring_point_id": m.get("measuring_point_id"),
+                    "measuring_point_name": m.get("measuring_point_name"),
+                    "value": m.get("value"),
+                }
+                for m in self._hw_meters_with_data
+            ]
+
+        if self._cw_meters_with_data:
+            attrs["cw_meters"] = [
+                {
+                    "measuring_point_id": m.get("measuring_point_id"),
+                    "measuring_point_name": m.get("measuring_point_name"),
+                    "value": m.get("value"),
+                }
+                for m in self._cw_meters_with_data
+            ]
+
         return attrs
+
+    def _collect_meters_with_data(
+        self,
+        active_installations: list[dict[str, Any]],
+        monthly_cache: dict[str, Any],
+        utility_code: str,
+        year: int,
+        month: int,
+    ) -> list[dict[str, Any]]:
+        """Collect meters with data for a specific utility code and month.
+
+        Args:
+            active_installations: List of active installations.
+            monthly_cache: Monthly aggregate cache dictionary.
+            utility_code: Utility code to check (HW or CW).
+            year: Year to check.
+            month: Month to check.
+
+        Returns:
+            List of meters with data, each containing measuring_point_id,
+            measuring_point_name, and value.
+        """
+        cost_type = self._cost_type if self._aggregate_type == "price" else "actual"
+
+        def get_meter_data(
+            measuring_point_id: int, utility_code_param: str
+        ) -> dict[str, Any] | None:
+            """Get meter data from monthly cache."""
+            cache_key = f"{utility_code_param}_{measuring_point_id}_{year}_{month}_{self._aggregate_type}_{cost_type}"
+            return monthly_cache.get(cache_key)
+
+        return collect_meters_with_data(
+            active_installations,
+            utility_code,
+            self.coordinator,
+            get_meter_data,
+        )
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -1588,6 +1722,15 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
                 self._attr_native_unit_of_measurement = unit
                 self._current_year = year
                 self._current_month = month
+
+                # Populate meters_with_data for meter_count attributes
+                active_installations = self.coordinator.get_active_installations()
+                self._hw_meters_with_data = self._collect_meters_with_data(
+                    active_installations, monthly_cache, "HW", year, month
+                )
+                self._cw_meters_with_data = self._collect_meters_with_data(
+                    active_installations, monthly_cache, "CW", year, month
+                )
                 self._attr_available = True
                 now = datetime.now()
                 data_date = now.date()
@@ -1614,6 +1757,8 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
                     # For consumption, use "m³" as default
                     default_unit = "m³"
                 self._attr_native_unit_of_measurement = default_unit
+                self._hw_meters_with_data = []
+                self._cw_meters_with_data = []
                 self._attr_available = True
                 # Don't write state - wait for both dependencies
                 return
@@ -1628,6 +1773,8 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
             default_unit = "m³"
         self._attr_native_value = None
         self._attr_native_unit_of_measurement = default_unit
+        self._hw_meters_with_data = []
+        self._cw_meters_with_data = []
         self._attr_available = True
         # Don't write state - wait for data to be fetched
 
@@ -1690,6 +1837,22 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
             self._attr_native_unit_of_measurement = unit
             self._current_year = year
             self._current_month = month
+
+            # Populate meters_with_data for meter_count attributes
+            coordinator_data = self.coordinator.data
+            if coordinator_data:
+                monthly_cache = coordinator_data.get("monthly_aggregate_cache", {})
+                active_installations = self.coordinator.get_active_installations()
+                self._hw_meters_with_data = self._collect_meters_with_data(
+                    active_installations, monthly_cache, "HW", year, month
+                )
+                self._cw_meters_with_data = self._collect_meters_with_data(
+                    active_installations, monthly_cache, "CW", year, month
+                )
+            else:
+                self._hw_meters_with_data = []
+                self._cw_meters_with_data = []
+
             # Write state only if value, month, or date has meaningfully changed
             # Monthly accumulated sensors should record daily to track progression
             data_date = now.date()
@@ -1700,6 +1863,8 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
         else:
             # Missing data for one or both utilities - don't write state yet
             # Wait until both dependencies are available to avoid recording "unknown" states
+            self._hw_meters_with_data = []
+            self._cw_meters_with_data = []
             _LOGGER.debug(
                 "Skipping state write for %s: missing dependencies (hw_value=%s, cw_value=%s)",
                 self.entity_id,
