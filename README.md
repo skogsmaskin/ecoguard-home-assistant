@@ -248,7 +248,26 @@ custom_components/ecoguard/
    pip install homeassistant
    ```
 
-3. Copy the integration to your Home Assistant config:
+3. Run Home Assistant from the `dev/` subfolder:
+   
+   **Option A: Run from dev/ subfolder (Recommended for development)**
+   
+   The repository includes a `dev/` subfolder with a minimal `configuration.yaml` and a symlink to `custom_components/ecoguard`. This keeps your repo root clean:
+   ```bash
+   # From the repository root directory
+   hass --config dev
+   ```
+   
+   Or use the helper script:
+   ```bash
+   ./run_hass.sh
+   ```
+   
+   The `dev/custom_components/ecoguard` is a symlink to the actual integration code, so you can edit files directly in `custom_components/ecoguard/` and changes will be immediately available. All Home Assistant data (database, storage, etc.) will be stored in `dev/.homeassistant/` (this directory is gitignored).
+   
+   **Option B: Use your existing Home Assistant installation**
+   
+   If you prefer to use your existing Home Assistant installation, copy the integration:
    ```bash
    cp -r custom_components/ecoguard ~/.homeassistant/custom_components/
    ```
@@ -287,7 +306,21 @@ See `tests/README.md` for more details on running tests.
 
 #### Manual Testing
 
-1. Start Home Assistant in development mode:
+1. Start Home Assistant from the `dev/` subfolder:
+   ```bash
+   # Check configuration
+   hass --config dev --script check_config
+   
+   # Or start Home Assistant
+   hass --config dev
+   ```
+   
+   Or use the helper script:
+   ```bash
+   ./run_hass.sh
+   ```
+   
+   If using your existing Home Assistant installation:
    ```bash
    hass --script check_config
    ```
@@ -297,6 +330,10 @@ See `tests/README.md` for more details on running tests.
    - Verify sensors are created
    - Check logs for any errors:
      ```bash
+     # When running from dev/ subfolder
+     tail -f dev/.homeassistant/home-assistant.log
+     
+     # When using existing installation
      tail -f ~/.homeassistant/home-assistant.log
      ```
 

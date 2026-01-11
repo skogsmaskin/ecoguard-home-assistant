@@ -1,0 +1,26 @@
+# Minimal Home Assistant configuration for development
+# This allows running Home Assistant from the dev/ subfolder
+# The custom_components/ecoguard folder is symlinked from the repo root
+
+# Basic configuration
+homeassistant:
+  name: Home
+  latitude: 59.9139  # Oslo (change to your location)
+  longitude: 10.7522
+  elevation: 0
+  unit_system: metric
+  time_zone: Europe/Oslo
+  country: "NO"
+
+# Enable debug logging for the ecoguard integration
+logger:
+  default: info
+  logs:
+    custom_components.ecoguard: debug
+
+# Recorder (optional - comment out if you don't want to store data)
+# recorder:
+#   exclude:
+#     entities:
+#       - sensor.*ecoguard*_meter_*
+#       - sensor.reception_last_update_*
