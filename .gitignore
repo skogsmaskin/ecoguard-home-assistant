@@ -1,5 +1,19 @@
 hass
 private
+dev/.homeassistant/
+dev/.storage/
+dev/*.db
+dev/*.db-shm
+dev/*.db-wal
+dev/home-assistant.log*
+dev/.HA_VERSION
+dev/.ha_run.lock
+dev/blueprints
+.homeassistant/
+.storage/
+*.db
+*.db-shm
+*.db-wal
 
 # Python
 __pycache__/
