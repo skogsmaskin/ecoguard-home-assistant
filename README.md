@@ -430,132 +430,16 @@ The integration uses tenant authentication:
 
 ### Recorder Configuration
 
-Each sensor class includes metadata about recommended recording settings via class attributes. These are **informational only** - actual recording control should be done using Home Assistant's standard mechanisms.
+The integration implements **value-based state writes** that automatically reduce recorder entries while maintaining accurate historical data. Sensors only write state (and thus get recorded) when values or context (date/month) meaningfully change.
 
-**Recommended Recording Settings by Sensor Type:**
+**Recording Behavior:**
+- **Daily sensors**: Record once per day (when date changes), even though they update hourly internally
+- **Monthly sensors**: Record daily to track progression of running totals throughout the month
+- **Other sensors**: Record only when the value changes
 
-- **Individual meter sensors** (daily consumption, daily cost, monthly meter):
-  - `RECORDING_ENABLED: True`
-  - `RECORDING_INTERVAL: 86400` (recommended: once per day)
+The UI always shows current values (sensors update internally), but historical data has appropriate granularity to reduce database size.
 
-- **Daily aggregate sensors**:
-  - `RECORDING_ENABLED: True`
-  - `RECORDING_INTERVAL: 3600` (recommended: once per hour)
-
-- **Monthly accumulated sensors**:
-  - `RECORDING_ENABLED: True`
-  - `RECORDING_INTERVAL: 86400` (records once per day to track daily progression of monthly totals)
-
-- **Latest reception sensors**:
-  - `RECORDING_ENABLED: False` (timestamps don't need historical recording)
-
-**Viewing Recording Configuration:**
-
-Each sensor exposes recording configuration metadata in its state attributes:
-- `recording_enabled`: Recommended recording setting
-- `recording_interval_seconds`: Recommended interval in seconds (if set)
-- `recording_interval`: Human-readable interval (e.g., "1 hour(s)", "1 day(s)")
-
-**Controlling Recording (Home Assistant Best Practices):**
-
-#### Option 1: Use Filter Sensors (Recommended)
-
-Create filtered versions of sensors that throttle updates. This is the recommended Home Assistant approach:
-
-```yaml
-sensor:
-  # Throttle daily aggregate sensors to record once per hour
-  - platform: filter
-    name: "Consumption Daily Metered - Cold Water (Throttled)"
-    entity_id: sensor.consumption_daily_metered_cold_water
-    filters:
-      - filter: time_throttle
-        window_size: "01:00:00"  # 1 hour
-
-  # Throttle monthly sensors to record once per day
-  - platform: filter
-    name: "Consumption Monthly Accumulated - Cold Water (Throttled)"
-    entity_id: sensor.consumption_monthly_accumulated_cold_water
-    filters:
-      - filter: time_throttle
-        window_size: "24:00:00"  # 1 day
-```
-
-Then configure the recorder to exclude original sensors and only record filtered ones:
-
-```yaml
-recorder:
-  exclude:
-    entities:
-      - sensor.consumption_daily_metered_*
-      - sensor.consumption_monthly_accumulated_*
-  include:
-    entities:
-      - sensor.*_throttled
-```
-
-#### Option 2: Recorder Exclude/Include (Simpler)
-
-Use recorder configuration to control what gets recorded:
-
-```yaml
-recorder:
-  exclude:
-    entities:
-      # Exclude individual meter sensors (they have _meter_ in entity_id)
-      - sensor.*ecoguard*_meter_*
-      # Exclude reception sensors
-      - sensor.reception_last_update_*
-  include:
-    entities:
-      # Only record aggregate sensors
-      - sensor.consumption_daily_metered_*
-      - sensor.cost_daily_metered_*
-      - sensor.consumption_monthly_accumulated_*
-      - sensor.cost_monthly_accumulated_*
-```
-
-**Note about "unknown" states:** Home Assistant automatically records the initial state when entities are first registered (including on each restart). If a sensor doesn't have data yet, this initial state will be "unknown". This is expected Home Assistant behavior and cannot be prevented. The integration's code prevents writing "unknown" states programmatically, but the initial state recording is a core Home Assistant feature.
-
-#### Option 3: Value-Based State Writes (Automatic)
-
-The integration implements **value-based state writes** that automatically reduce recorder entries while maintaining accurate historical data:
-
-- **Daily sensors**: Only write state when the value changes OR when the data date changes (new day)
-  - This means daily consumption sensors will typically record once per day, even though they update hourly
-  - If the value changes during the day, it will still be recorded
-
-- **Monthly sensors**: Only write state when the value changes OR when the month/year changes OR when the date changes (daily)
-  - Monthly accumulated sensors record daily to track the progression of running totals
-  - This provides daily snapshots of monthly accumulation while preventing duplicate recordings within the same day
-
-- **Other sensors**: Only write state when the value changes (standard behavior)
-
-This approach:
-- ✅ Follows Home Assistant best practices (doesn't override core methods)
-- ✅ Keeps UI responsive (sensors still update internally)
-- ✅ Reduces database size automatically
-- ✅ Maintains accurate historical data
-
-**How It Works:**
-
-The integration tracks the last written value and context (date/month). State is only written to Home Assistant (and thus recorded) when:
-1. The value changes, OR
-2. The context changes:
-   - **Daily sensors**: New day (date changes)
-   - **Monthly sensors**: New day (date changes) OR new month (month/year changes)
-
-This means:
-- **Daily consumption sensors**: Update hourly internally but only record once per day (when date changes)
-- **Monthly accumulated sensors**: Update daily and record daily to track the progression of running totals throughout the month
-  - Records once per day to show how the monthly total accumulates day by day
-  - Also records when the month changes (new month starts)
-- **The UI always shows current values** (sensors update internally, even if not recorded)
-- **Historical data is accurate** with appropriate granularity:
-  - Daily sensors: One entry per day
-  - Monthly accumulated sensors: One entry per day (showing daily progression of monthly totals)
-
-**Note**: The `recording_enabled` and `recording_interval` attributes are informational metadata. The actual recording behavior is controlled by value-based state writes, which work automatically without any configuration needed.
+**Note about "unknown" states:** Home Assistant automatically records the initial state when entities are first registered. This means **"unknown" values will be recorded in the database when Home Assistant starts** (or restarts), even before sensors have fetched their first data. This is expected Home Assistant core behavior and cannot be prevented. The integration prevents writing "unknown" states programmatically after initialization.
 
 ### Data Caching
 
