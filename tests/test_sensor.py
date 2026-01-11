@@ -13,6 +13,7 @@ from custom_components.ecoguard.sensor import (
 )
 from custom_components.ecoguard.sensors import (
     EcoGuardDailyConsumptionSensor,
+    EcoGuardDailyConsumptionAggregateSensor,
     EcoGuardDailyCostSensor,
     EcoGuardDailyCostAggregateSensor,
     EcoGuardDailyCombinedWaterSensor,
@@ -783,6 +784,79 @@ async def test_daily_cost_aggregate_sensor_update_from_cache(
         # Should sum costs from both meters
         assert sensor._attr_native_value == 25.0
         assert len(sensor._meters_with_data) == 2
+
+
+async def test_daily_consumption_aggregate_sensor_with_aggregated_cache(
+    hass: HomeAssistant, coordinator
+):
+    """Test daily consumption aggregate sensor with aggregated cache key.
+    
+    This test verifies that when using the aggregated cache key (utility_code_all),
+    the sensor correctly populates meter_count by checking individual meter caches.
+    """
+    # Set up coordinator data with both aggregated cache and individual meter caches
+    coordinator.data = {
+        "latest_consumption_cache": {
+            # Aggregated cache for all HW meters
+            "HW_all": {
+                "value": 25.5,
+                "time": int(datetime.now().timestamp()),
+                "unit": "m³",
+            },
+            # Individual meter caches (needed for meter_count)
+            "HW_1": {
+                "value": 10.0,
+                "time": int(datetime.now().timestamp()),
+                "unit": "m³",
+            },
+            "HW_2": {
+                "value": 15.5,
+                "time": int(datetime.now().timestamp()),
+                "unit": "m³",
+            },
+        },
+        "daily_consumption_cache": {},
+    }
+    coordinator._installations = [
+        {"MeasuringPointID": 1, "Registers": [{"UtilityCode": "HW"}]},
+        {"MeasuringPointID": 2, "Registers": [{"UtilityCode": "HW"}]},
+    ]
+    coordinator._measuring_points = [
+        {"ID": 1, "Name": "Hot Water Meter 1"},
+        {"ID": 2, "Name": "Hot Water Meter 2"},
+    ]
+    coordinator._settings = [{"Name": "TimeZoneIANA", "Value": "UTC"}]
+
+    sensor = EcoGuardDailyConsumptionAggregateSensor(
+        hass=hass,
+        coordinator=coordinator,
+        utility_code="HW",
+    )
+
+    sensor.hass = hass
+    sensor.platform = MagicMock()
+    sensor.entity_id = "sensor.test_daily_consumption_aggregate"
+
+    with patch.object(sensor, "async_write_ha_state", new_callable=AsyncMock):
+        sensor._update_from_coordinator_data()
+
+        # Should use aggregated value
+        assert sensor._attr_native_value == 25.5
+        assert sensor._attr_native_unit_of_measurement == "m³"
+        
+        # meter_count should be populated from individual meter caches
+        assert len(sensor._meters_with_data) == 2
+        assert sensor.extra_state_attributes["meter_count"] == 2
+        
+        # Verify meter details
+        meters = sensor.extra_state_attributes["meters"]
+        assert len(meters) == 2
+        assert meters[0]["measuring_point_id"] == 1
+        assert meters[0]["measuring_point_name"] == "Hot Water Meter 1"
+        assert meters[0]["value"] == 10.0
+        assert meters[1]["measuring_point_id"] == 2
+        assert meters[1]["measuring_point_name"] == "Hot Water Meter 2"
+        assert meters[1]["value"] == 15.5
 
 
 async def test_daily_combined_water_sensor(
