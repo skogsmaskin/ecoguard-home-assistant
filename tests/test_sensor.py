@@ -1154,39 +1154,49 @@ async def test_monthly_accumulated_sensor_cost_with_meter_count(
     """Test monthly accumulated sensor for cost with meter_count.
 
     This test verifies that the sensor correctly populates meter_count
-    for cost sensors. For cost sensors, per-meter monthly cache entries
-    are more likely to exist since they're fetched via API.
+    by calculating from daily price cache when per-meter monthly cache entries
+    are not available (the common real-world scenario).
     """
     now = datetime.now()
     year = now.year
     month = now.month
 
-    # Set up coordinator data with monthly aggregate cache
-    # For cost sensors, per-meter entries are more likely to exist
+    # Calculate month boundaries for filtering daily values
+    from datetime import timezone
+    from_date = datetime(year, month, 1, tzinfo=timezone.utc)
+    if month == 12:
+        to_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        to_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+
+    from_time = int(from_date.timestamp())
+    to_time = int(to_date.timestamp())
+
+    # Set up coordinator data with:
+    # 1. Monthly aggregate cache (only aggregate entry, no per-meter entries)
+    # 2. Daily price cache (per-meter entries that we'll calculate from)
     coordinator.data = {
         "monthly_aggregate_cache": {
-            # Aggregated cache for all CW meters
+            # Only aggregated cache (no per-meter entries)
+            # This simulates the real-world scenario where per-meter monthly
+            # cache entries don't exist
             f"CW_{year}_{month}_price_actual": {
                 "value": 150.0,
                 "unit": "NOK",
                 "year": year,
                 "month": month,
             },
-            # Individual meter caches (needed for meter_count)
-            # These are more likely to exist for cost sensors since they're
-            # fetched via API calls
-            f"CW_1_{year}_{month}_price_actual": {
-                "value": 60.0,
-                "unit": "NOK",
-                "year": year,
-                "month": month,
-            },
-            f"CW_2_{year}_{month}_price_actual": {
-                "value": 90.0,
-                "unit": "NOK",
-                "year": year,
-                "month": month,
-            },
+        },
+        "daily_price_cache": {
+            # Daily price data for each meter
+            "CW_1_metered": [
+                {"time": from_time + 86400, "value": 2.0, "unit": "NOK"},  # Day 1
+                {"time": from_time + 172800, "value": 2.0, "unit": "NOK"},  # Day 2
+            ],
+            "CW_2_metered": [
+                {"time": from_time + 86400, "value": 3.0, "unit": "NOK"},  # Day 1
+                {"time": from_time + 172800, "value": 3.0, "unit": "NOK"},  # Day 2
+            ],
         },
     }
     coordinator._installations = [
@@ -1218,19 +1228,22 @@ async def test_monthly_accumulated_sensor_cost_with_meter_count(
         assert sensor._attr_native_value == 150.0
         assert sensor._attr_native_unit_of_measurement == "NOK"
 
-        # meter_count should be populated from individual meter caches
+        # meter_count should be populated by calculating from daily price cache
+        # (since per-meter monthly cache entries don't exist)
         assert len(sensor._meters_with_data) == 2
         assert sensor.extra_state_attributes["meter_count"] == 2
 
-        # Verify meter details
+        # Verify meter details (calculated from daily price cache)
         meters = sensor.extra_state_attributes["meters"]
         assert len(meters) == 2
         assert meters[0]["measuring_point_id"] == 1
         assert meters[0]["measuring_point_name"] == "Cold Water Meter 1"
-        assert meters[0]["value"] == 60.0
+        # Value should be sum of daily prices: 2.0 + 2.0 = 4.0
+        assert meters[0]["value"] == 4.0
         assert meters[1]["measuring_point_id"] == 2
         assert meters[1]["measuring_point_name"] == "Cold Water Meter 2"
-        assert meters[1]["value"] == 90.0
+        # Value should be sum of daily prices: 3.0 + 3.0 = 6.0
+        assert meters[1]["value"] == 6.0
 
 
 async def test_monthly_combined_water_sensor_with_meter_count(

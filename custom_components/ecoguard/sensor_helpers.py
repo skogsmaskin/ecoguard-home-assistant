@@ -154,6 +154,7 @@ def collect_meters_with_data(
 def create_monthly_meter_data_getter(
     monthly_cache: dict[str, Any],
     daily_cache: dict[str, Any],
+    daily_price_cache: dict[str, Any] | None,
     aggregate_type: str,
     cost_type: str,
     year: int,
@@ -165,11 +166,14 @@ def create_monthly_meter_data_getter(
 
     This helper creates a callback function that:
     1. First tries to get data from monthly aggregate cache
-    2. Falls back to calculating from daily consumption cache if not found
+    2. Falls back to calculating from daily cache if not found:
+       - For consumption: calculates from daily consumption cache
+       - For cost: calculates from daily price cache
 
     Args:
         monthly_cache: Monthly aggregate cache dictionary.
         daily_cache: Daily consumption cache dictionary.
+        daily_price_cache: Daily price cache dictionary (for cost sensors).
         aggregate_type: "con" for consumption, "price" for price/cost.
         cost_type: "actual" for metered API data, "estimated" for estimated.
         year: Year to check.
@@ -192,8 +196,9 @@ def create_monthly_meter_data_getter(
         if meter_data and meter_data.get("value") is not None:
             return meter_data
 
-        # If not in monthly cache and this is consumption, calculate from daily cache
+        # If not in monthly cache, calculate from daily cache
         if aggregate_type == "con" and daily_cache:
+            # For consumption: calculate from daily consumption cache
             daily_cache_key = f"{utility_code}_{measuring_point_id}"
             daily_values = daily_cache.get(daily_cache_key)
 
@@ -209,6 +214,29 @@ def create_monthly_meter_data_getter(
                 if month_values:
                     total_value = sum(v["value"] for v in month_values)
                     unit = month_values[0].get("unit", "") if month_values else ""
+                    return {
+                        "value": total_value,
+                        "unit": unit,
+                    }
+
+        elif aggregate_type == "price" and cost_type == "actual" and daily_price_cache:
+            # For cost: calculate from daily price cache
+            daily_price_cache_key = f"{utility_code}_{measuring_point_id}_metered"
+            daily_prices = daily_price_cache.get(daily_price_cache_key)
+
+            if daily_prices:
+                # Filter daily prices for this month
+                month_prices = [
+                    p
+                    for p in daily_prices
+                    if from_time <= p.get("time", 0) < to_time
+                    and p.get("value") is not None
+                    and p.get("value", 0) > 0
+                ]
+
+                if month_prices:
+                    total_value = sum(p["value"] for p in month_prices)
+                    unit = month_prices[0].get("unit", "") if month_prices else ""
                     return {
                         "value": total_value,
                         "unit": unit,

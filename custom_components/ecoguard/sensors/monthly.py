@@ -216,6 +216,9 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             if coordinator_data
             else {}
         )
+        daily_price_cache = (
+            coordinator_data.get("daily_price_cache", {}) if coordinator_data else None
+        )
 
         # Get timezone and calculate month boundaries
         timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
@@ -226,6 +229,7 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
         get_meter_data = create_monthly_meter_data_getter(
             monthly_cache,
             daily_cache,
+            daily_price_cache,
             self._aggregate_type,
             cost_type,
             year,
@@ -1652,6 +1656,9 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
             if coordinator_data
             else {}
         )
+        daily_price_cache = (
+            coordinator_data.get("daily_price_cache", {}) if coordinator_data else None
+        )
 
         # Get timezone and calculate month boundaries
         timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
@@ -1662,6 +1669,7 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
         get_meter_data = create_monthly_meter_data_getter(
             monthly_cache,
             daily_cache,
+            daily_price_cache,
             self._aggregate_type,
             cost_type,
             year,
