@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any, Callable
 import logging
 
 from homeassistant.components.sensor import SensorEntity
@@ -88,3 +89,63 @@ def utility_code_to_slug(utility_code: str) -> str:
         "HE": "heat",
     }
     return utility_map.get(utility_code.upper(), utility_code.lower())
+
+
+def collect_meters_with_data(
+    active_installations: list[dict[str, Any]],
+    utility_code: str,
+    coordinator: Any,
+    get_meter_data: Callable[[int, str], dict[str, Any] | None],
+) -> list[dict[str, Any]]:
+    """Collect meters with data for a given utility code.
+
+    This is a shared helper function used by both daily and monthly aggregate sensors
+    to collect which meters have data, avoiding code duplication.
+
+    Args:
+        active_installations: List of active installations.
+        utility_code: Utility code to filter by (e.g., "HW", "CW").
+        coordinator: The coordinator instance (for accessing measuring points).
+        get_meter_data: Callable that takes (measuring_point_id, utility_code) and
+            returns meter data dict with "value" key, or None if no data.
+
+    Returns:
+        List of meters with data, each containing measuring_point_id,
+        measuring_point_name, and value.
+    """
+    meters_with_data = []
+
+    for installation in active_installations:
+        registers = installation.get("Registers", [])
+        measuring_point_id = installation.get("MeasuringPointID")
+
+        # Check if this installation has the utility we're looking for
+        has_utility = False
+        for register in registers:
+            if register.get("UtilityCode") == utility_code:
+                has_utility = True
+                break
+
+        if not has_utility:
+            continue
+
+        # Get measuring point name
+        measuring_point_name = None
+        for mp in coordinator.get_measuring_points():
+            if mp.get("ID") == measuring_point_id:
+                measuring_point_name = mp.get("Name")
+                break
+
+        # Check if this meter has data using the provided callback
+        meter_data = get_meter_data(measuring_point_id, utility_code)
+
+        if meter_data and meter_data.get("value") is not None:
+            meters_with_data.append(
+                {
+                    "measuring_point_id": measuring_point_id,
+                    "measuring_point_name": measuring_point_name,
+                    "value": meter_data.get("value", 0.0),
+                }
+            )
+
+    return meters_with_data
