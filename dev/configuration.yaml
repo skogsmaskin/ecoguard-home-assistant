@@ -5,7 +5,7 @@
 # Basic configuration
 homeassistant:
   name: Home
-  latitude: 59.9139  # Oslo (change to your location)
+  latitude: 59.9139 # Oslo (change to your location)
   longitude: 10.7522
   elevation: 0
   unit_system: metric
@@ -18,9 +18,10 @@ logger:
   logs:
     custom_components.ecoguard: debug
 
-# Recorder (optional - comment out if you don't want to store data)
-# recorder:
-#   exclude:
-#     entities:
-#       - sensor.*ecoguard*_meter_*
-#       - sensor.reception_last_update_*
+# Recorder - enable to store historical data
+recorder:
+  # Uncomment to exclude specific sensors from recording
+  # exclude:
+  #   entities:
+  #     - sensor.*ecoguard*_meter_*
+  #     - sensor.reception_last_update_*
