@@ -1067,13 +1067,8 @@ async def test_monthly_accumulated_sensor_consumption_with_meter_count(
     year = now.year
     month = now.month
 
-    # Calculate month boundaries for filtering daily values
+    # Calculate month start for filtering daily values
     from_date = datetime(year, month, 1, tzinfo=timezone.utc)
-    if month == 12:
-        to_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
-    else:
-        to_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
-
     from_time = int(from_date.timestamp())
 
     # Set up coordinator data with:
@@ -1162,13 +1157,8 @@ async def test_monthly_accumulated_sensor_cost_with_meter_count(
     year = now.year
     month = now.month
 
-    # Calculate month boundaries for filtering daily values
+    # Calculate month start for filtering daily values
     from_date = datetime(year, month, 1, tzinfo=timezone.utc)
-    if month == 12:
-        to_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
-    else:
-        to_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
-
     from_time = int(from_date.timestamp())
 
     # Set up coordinator data with:
@@ -1258,13 +1248,8 @@ async def test_monthly_combined_water_sensor_with_meter_count(
     year = now.year
     month = now.month
 
-    # Calculate month boundaries for filtering daily values
+    # Calculate month start for filtering daily values
     from_date = datetime(year, month, 1, tzinfo=timezone.utc)
-    if month == 12:
-        to_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
-    else:
-        to_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
-
     from_time = int(from_date.timestamp())
 
     # Set up coordinator data with:
