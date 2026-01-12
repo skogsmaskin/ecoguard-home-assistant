@@ -2359,8 +2359,6 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         has_cw_price_data = any(
             m.get("_has_price_data", False) for m in cw_meters_with_data
         )
-        len(hw_meters_with_data) > 0
-        len(cw_meters_with_data) > 0
 
         # Only set a value if we have price data for BOTH HW and CW
         # This ensures the combined sensor only shows a value when both utilities have price data

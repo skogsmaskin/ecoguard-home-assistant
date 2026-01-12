@@ -236,6 +236,7 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             month,
             from_time,
             to_time,
+            self.coordinator,
         )
 
         return collect_meters_with_data(
@@ -541,8 +542,6 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             # Write state directly when value is None but we have meters
             # This ensures meter_count and meters list are visible even when value is Unknown
             if self._meters_with_data:
-                data_month = (year, month)
-                data_date = now.date()
                 self.async_write_ha_state()
             # If no meters, don't write state - wait for data to be available
 
@@ -651,8 +650,6 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             # Write state directly when value is None but we have meters
             # This ensures meter_count and meters list are visible even when value is Unknown
             if self._meters_with_data:
-                data_date = now.date()
-                data_month = (year, month)
                 self.async_write_ha_state()
             # If no meters, don't write state - wait for data to be available
             return
@@ -1729,6 +1726,7 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
             month,
             from_time,
             to_time,
+            self.coordinator,
         )
 
         return collect_meters_with_data(
@@ -1882,8 +1880,6 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
                 # Write state directly when value is None but we have meters
                 # This ensures meter_count and meters lists are visible even when value is Unknown
                 if self._hw_meters_with_data or self._cw_meters_with_data:
-                    data_date = now.date()
-                    data_month = (year, month)
                     self.async_write_ha_state()
                 # If no meters, don't write state - wait for data to be available
                 return
@@ -2029,7 +2025,5 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
             # Write state directly when value is None but we have meters
             # This ensures meter_count and meters lists are visible even when value is Unknown
             if self._hw_meters_with_data or self._cw_meters_with_data:
-                data_date = now.date()
-                data_month = (year, month)
                 self.async_write_ha_state()
             # If no meters, don't write state - wait for data to be available
