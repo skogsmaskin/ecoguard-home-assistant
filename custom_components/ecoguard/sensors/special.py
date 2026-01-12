@@ -12,13 +12,17 @@ from homeassistant.core import HomeAssistant
 
 from ..const import DOMAIN, VALID_UTILITY_CODES, WATER_UTILITIES
 from ..coordinator import EcoGuardDataUpdateCoordinator
-from ..helpers import round_to_max_digits
+from ..helpers import round_to_max_digits, get_timezone, get_month_timestamps
 from ..translations import (
     async_get_translation,
     get_translation_default,
 )
 
 from ..sensor_base import EcoGuardBaseSensor
+from ..sensor_helpers import (
+    collect_meters_with_data,
+    create_monthly_meter_data_getter,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -304,6 +308,7 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
         self._current_year: int | None = None
         self._current_month: int | None = None
         self._utilities: list[str] = []
+        self._meters_with_data: list[dict[str, Any]] = []
 
         # Set icon for cost sensor (all money units use dollar icon)
         self._attr_icon = "mdi:currency-usd"
@@ -332,6 +337,19 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
         attrs["cost_type"] = (
             "metered" if self._cost_type == "actual" else self._cost_type
         )
+
+        attrs["meter_count"] = len(self._meters_with_data)
+
+        if self._meters_with_data:
+            attrs["meters"] = [
+                {
+                    "measuring_point_id": m.get("measuring_point_id"),
+                    "measuring_point_name": m.get("measuring_point_name"),
+                    "utility_code": m.get("utility_code"),
+                    "value": m.get("value"),
+                }
+                for m in self._meters_with_data
+            ]
 
         return attrs
 
@@ -405,6 +423,15 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
                 currency = self.coordinator.get_setting("Currency") or ""
                 self._attr_native_value = round_to_max_digits(total_cost)
                 self._attr_native_unit_of_measurement = currency
+                self._current_year = year
+                self._current_month = month
+                self._utilities = utilities_with_data
+
+                # Populate meters_with_data for meter_count attribute
+                self._meters_with_data = self._collect_meters_with_data(
+                    active_installations, monthly_cache, year, month
+                )
+
                 self._attr_available = True
                 # Write state only if value, month, or date has meaningfully changed
                 data_date = now.date()
@@ -418,9 +445,29 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
         self._attr_native_value = None
         currency = self.coordinator.get_setting("Currency") or ""
         self._attr_native_unit_of_measurement = currency
+        self._current_year = year
+        self._current_month = month
+        self._utilities = []
+
+        # Populate meters_with_data even when no aggregate data exists
+        # This ensures meter_count is shown even when sensor value is Unknown
+        if coordinator_data:
+            active_installations = self.coordinator.get_active_installations()
+            self._meters_with_data = self._collect_meters_with_data(
+                active_installations, monthly_cache, year, month
+            )
+        else:
+            self._meters_with_data = []
+
         self._attr_available = True
-        # Do not write state when value is None - _async_write_ha_state_if_changed
-        # guards against None, but it's cleaner to not call it at all
+
+        # Write state directly when value is None but we have meters
+        # This ensures meter_count and meters list are visible even when value is Unknown
+        if self._meters_with_data:
+            data_date = now.date()
+            data_month = (year, month)
+            self.async_write_ha_state()
+        # If no meters, don't write state - wait for data to be available
 
         # Only trigger async fetch if HA is fully started (not during startup)
         from homeassistant.core import CoreState
@@ -496,13 +543,34 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
             self._current_year = year
             self._current_month = month
             self._utilities = utilities_with_data
+
+            # Populate meters_with_data for meter_count attribute
+            coordinator_data = self.coordinator.data
+            if coordinator_data:
+                monthly_cache = coordinator_data.get("monthly_aggregate_cache", {})
+                self._meters_with_data = self._collect_meters_with_data(
+                    active_installations, monthly_cache, year, month
+                )
+            else:
+                self._meters_with_data = []
         else:
             self._attr_native_value = None
             # Always set unit even when no data to maintain consistency for statistics
             self._attr_native_unit_of_measurement = currency
-            self._current_year = None
-            self._current_month = None
+            self._current_year = year
+            self._current_month = month
             self._utilities = []
+
+            # Populate meters_with_data even when no aggregate data exists
+            # This ensures meter_count is shown even when sensor value is Unknown
+            coordinator_data = self.coordinator.data
+            if coordinator_data:
+                monthly_cache = coordinator_data.get("monthly_aggregate_cache", {})
+                self._meters_with_data = self._collect_meters_with_data(
+                    active_installations, monthly_cache, year, month
+                )
+            else:
+                self._meters_with_data = []
 
         # Write state only if value, month, or date has meaningfully changed
         data_date = now.date()
@@ -511,9 +579,83 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
             if self._current_year
             else (now.year, now.month)
         )
-        self._async_write_ha_state_if_changed(
-            data_date=data_date, data_month=data_month
+
+        # If we have price data, use the normal write method (which skips None values)
+        # If we don't have price data but have meters, write state directly to show attributes
+        if self._attr_native_value is not None:
+            self._async_write_ha_state_if_changed(
+                data_date=data_date, data_month=data_month
+            )
+        elif self._meters_with_data:
+            # Write state directly when value is None but we have meters
+            # This ensures meter_count and meters list are visible even when value is Unknown
+            self.async_write_ha_state()
+
+    def _collect_meters_with_data(
+        self,
+        active_installations: list[dict[str, Any]],
+        monthly_cache: dict[str, Any],
+        year: int,
+        month: int,
+    ) -> list[dict[str, Any]]:
+        """Collect meters with data from all water utilities.
+
+        Args:
+            active_installations: List of active installations.
+            monthly_cache: Monthly aggregate cache dictionary.
+            year: Year to check.
+            month: Month to check.
+
+        Returns:
+            List of meters with data, each containing measuring_point_id,
+            measuring_point_name, utility_code, and value.
+        """
+        all_meters_with_data = []
+        coordinator_data = self.coordinator.data
+        daily_cache = (
+            coordinator_data.get("daily_consumption_cache", {})
+            if coordinator_data
+            else {}
         )
+        daily_price_cache = (
+            coordinator_data.get("daily_price_cache", {}) if coordinator_data else None
+        )
+
+        # Get timezone and calculate month boundaries
+        timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
+        tz = get_timezone(timezone_str)
+        from_time, to_time = get_month_timestamps(year, month, tz)
+
+        # Collect meters from all water utilities
+        for utility_code in WATER_UTILITIES:
+            cost_type = self._cost_type
+            # Create the meter data getter callback for this utility
+            get_meter_data = create_monthly_meter_data_getter(
+                monthly_cache,
+                daily_cache,
+                daily_price_cache,
+                "price",  # aggregate_type
+                cost_type,
+                year,
+                month,
+                from_time,
+                to_time,
+            )
+
+            # Collect meters for this utility
+            utility_meters = collect_meters_with_data(
+                active_installations,
+                utility_code,
+                self.coordinator,
+                get_meter_data,
+            )
+
+            # Add utility_code to each meter for clarity
+            for meter in utility_meters:
+                meter["utility_code"] = utility_code
+                all_meters_with_data.append(meter)
+
+        return all_meters_with_data
 
 
 class EcoGuardEndOfMonthEstimateSensor(EcoGuardBaseSensor):
