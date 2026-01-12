@@ -56,7 +56,11 @@ class TestDateSynchronization:
         ]
         cw_daily_cache = [
             {"time": hw_timestamp, "value": 10.0, "unit": "m³"},  # Old data
-            {"time": cw_timestamp, "value": 12.0, "unit": "m³"},  # Newer data (most recent)
+            {
+                "time": cw_timestamp,
+                "value": 12.0,
+                "unit": "m³",
+            },  # Newer data (most recent)
         ]
 
         # Latest cache: HW has data from 11 days ago (lagging), CW has data from today
@@ -95,12 +99,18 @@ class TestDateSynchronization:
             return None
 
         with patch.object(
-            coordinator, "get_active_installations", return_value=coordinator._installations
+            coordinator,
+            "get_active_installations",
+            return_value=coordinator._installations,
         ), patch.object(
-            coordinator, "get_measuring_points", return_value=coordinator._measuring_points
+            coordinator,
+            "get_measuring_points",
+            return_value=coordinator._measuring_points,
         ), patch.object(
             coordinator, "get_setting", side_effect=get_setting
-        ), patch.object(sensor, "async_write_ha_state", new_callable=AsyncMock):
+        ), patch.object(
+            sensor, "async_write_ha_state", new_callable=AsyncMock
+        ):
             sensor._update_from_coordinator_data()
 
             # Should use data from 11 days ago (common date) for both meters
@@ -153,7 +163,11 @@ class TestDateSynchronization:
         ]
         cw_price_cache = [
             {"time": hw_timestamp, "value": 100.0, "unit": "NOK"},  # Old data
-            {"time": cw_timestamp, "value": 120.0, "unit": "NOK"},  # Newer data (most recent)
+            {
+                "time": cw_timestamp,
+                "value": 120.0,
+                "unit": "NOK",
+            },  # Newer data (most recent)
         ]
 
         # Latest cache: HW has data from 11 days ago (lagging), CW has data from today
@@ -197,12 +211,18 @@ class TestDateSynchronization:
             return None
 
         with patch.object(
-            coordinator, "get_active_installations", return_value=coordinator._installations
+            coordinator,
+            "get_active_installations",
+            return_value=coordinator._installations,
         ), patch.object(
-            coordinator, "get_measuring_points", return_value=coordinator._measuring_points
+            coordinator,
+            "get_measuring_points",
+            return_value=coordinator._measuring_points,
         ), patch.object(
             coordinator, "get_setting", side_effect=get_setting
-        ), patch.object(sensor, "async_write_ha_state", new_callable=AsyncMock):
+        ), patch.object(
+            sensor, "async_write_ha_state", new_callable=AsyncMock
+        ):
             sensor._update_from_coordinator_data()
 
             # Should use data from 11 days ago (common date) for both meters
@@ -253,11 +273,19 @@ class TestDateSynchronization:
         # Daily cache: meter 1 only has data up to 5 days ago (lagging), meter 2 has data up to today
         # This simulates the real scenario where meter 1 data is lagging
         meter1_daily_cache = [
-            {"time": meter1_timestamp, "value": 10.0, "unit": "m³"},  # Last available data
+            {
+                "time": meter1_timestamp,
+                "value": 10.0,
+                "unit": "m³",
+            },  # Last available data
         ]
         meter2_daily_cache = [
             {"time": meter1_timestamp, "value": 15.0, "unit": "m³"},  # Old data
-            {"time": meter2_timestamp, "value": 18.0, "unit": "m³"},  # Newer data (most recent)
+            {
+                "time": meter2_timestamp,
+                "value": 18.0,
+                "unit": "m³",
+            },  # Newer data (most recent)
         ]
 
         # Latest cache: meter 1 has data from 5 days ago (lagging), meter 2 has data from today
@@ -297,19 +325,27 @@ class TestDateSynchronization:
             return None
 
         with patch.object(
-            coordinator, "get_active_installations", return_value=coordinator._installations
+            coordinator,
+            "get_active_installations",
+            return_value=coordinator._installations,
         ), patch.object(
-            coordinator, "get_measuring_points", return_value=coordinator._measuring_points
+            coordinator,
+            "get_measuring_points",
+            return_value=coordinator._measuring_points,
         ), patch.object(
             coordinator, "get_setting", side_effect=get_setting
-        ), patch.object(sensor, "async_write_ha_state", new_callable=AsyncMock):
+        ), patch.object(
+            sensor, "async_write_ha_state", new_callable=AsyncMock
+        ):
             sensor._update_from_coordinator_data()
 
             # Should use data from 5 days ago (common date) for both meters
             # Meter 1: 10.0, Meter 2: 15.0, Total: 25.0
             assert sensor._attr_native_value == 25.0
             assert len(sensor._meters_with_data) == 2
-            meter_values = {m["measuring_point_id"]: m["value"] for m in sensor._meters_with_data}
+            meter_values = {
+                m["measuring_point_id"]: m["value"] for m in sensor._meters_with_data
+            }
             assert meter_values[1] == 10.0
             assert meter_values[2] == 15.0
 
@@ -356,11 +392,19 @@ class TestDateSynchronization:
         # Daily price cache: meter 1 only has data up to 3 days ago (lagging), meter 2 has data up to today
         # This simulates the real scenario where meter 1 data is lagging
         meter1_price_cache = [
-            {"time": meter1_timestamp, "value": 30.0, "unit": "NOK"},  # Last available data
+            {
+                "time": meter1_timestamp,
+                "value": 30.0,
+                "unit": "NOK",
+            },  # Last available data
         ]
         meter2_price_cache = [
             {"time": meter1_timestamp, "value": 40.0, "unit": "NOK"},  # Old data
-            {"time": meter2_timestamp, "value": 45.0, "unit": "NOK"},  # Newer data (most recent)
+            {
+                "time": meter2_timestamp,
+                "value": 45.0,
+                "unit": "NOK",
+            },  # Newer data (most recent)
         ]
 
         # Latest cache: meter 1 has data from 3 days ago (lagging), meter 2 has data from today
@@ -405,19 +449,27 @@ class TestDateSynchronization:
             return None
 
         with patch.object(
-            coordinator, "get_active_installations", return_value=coordinator._installations
+            coordinator,
+            "get_active_installations",
+            return_value=coordinator._installations,
         ), patch.object(
-            coordinator, "get_measuring_points", return_value=coordinator._measuring_points
+            coordinator,
+            "get_measuring_points",
+            return_value=coordinator._measuring_points,
         ), patch.object(
             coordinator, "get_setting", side_effect=get_setting
-        ), patch.object(sensor, "async_write_ha_state", new_callable=AsyncMock):
+        ), patch.object(
+            sensor, "async_write_ha_state", new_callable=AsyncMock
+        ):
             sensor._update_from_coordinator_data()
 
             # Should use data from 3 days ago (common date) for both meters
             # Meter 1: 30.0, Meter 2: 40.0, Total: 70.0
             assert sensor._attr_native_value == 70.0
             assert len(sensor._meters_with_data) == 2
-            meter_values = {m["measuring_point_id"]: m["value"] for m in sensor._meters_with_data}
+            meter_values = {
+                m["measuring_point_id"]: m["value"] for m in sensor._meters_with_data
+            }
             assert meter_values[1] == 30.0
             assert meter_values[2] == 40.0
 
@@ -487,12 +539,18 @@ class TestDateSynchronization:
             return None
 
         with patch.object(
-            coordinator, "get_active_installations", return_value=coordinator._installations
+            coordinator,
+            "get_active_installations",
+            return_value=coordinator._installations,
         ), patch.object(
-            coordinator, "get_measuring_points", return_value=coordinator._measuring_points
+            coordinator,
+            "get_measuring_points",
+            return_value=coordinator._measuring_points,
         ), patch.object(
             coordinator, "get_setting", side_effect=get_setting
-        ), patch.object(sensor, "async_write_ha_state", new_callable=AsyncMock):
+        ), patch.object(
+            sensor, "async_write_ha_state", new_callable=AsyncMock
+        ):
             sensor._update_from_coordinator_data()
 
             # Should show Unknown when one utility has no data
@@ -566,15 +624,27 @@ class TestDateSynchronization:
             "daily_price_cache": {
                 # Meter 1: last data is 10 days ago (lagging)
                 "CW_1_metered": [
-                    {"time": ts_10_days, "value": 10.0, "unit": "NOK"},  # Last available data
+                    {
+                        "time": ts_10_days,
+                        "value": 10.0,
+                        "unit": "NOK",
+                    },  # Last available data
                 ],
                 # Meter 2: last data is 5 days ago
                 "CW_2_metered": [
-                    {"time": ts_5_days, "value": 25.0, "unit": "NOK"},  # Last available data
+                    {
+                        "time": ts_5_days,
+                        "value": 25.0,
+                        "unit": "NOK",
+                    },  # Last available data
                 ],
                 # Meter 3: last data is today
                 "CW_3_metered": [
-                    {"time": ts_today, "value": 40.0, "unit": "NOK"},  # Last available data
+                    {
+                        "time": ts_today,
+                        "value": 40.0,
+                        "unit": "NOK",
+                    },  # Last available data
                 ],
             },
             "daily_consumption_cache": {
@@ -602,12 +672,18 @@ class TestDateSynchronization:
             return None
 
         with patch.object(
-            coordinator, "get_active_installations", return_value=coordinator._installations
+            coordinator,
+            "get_active_installations",
+            return_value=coordinator._installations,
         ), patch.object(
-            coordinator, "get_measuring_points", return_value=coordinator._measuring_points
+            coordinator,
+            "get_measuring_points",
+            return_value=coordinator._measuring_points,
         ), patch.object(
             coordinator, "get_setting", side_effect=get_setting
-        ), patch.object(sensor, "async_write_ha_state", new_callable=AsyncMock):
+        ), patch.object(
+            sensor, "async_write_ha_state", new_callable=AsyncMock
+        ):
             sensor._update_from_coordinator_data()
 
             # Should use data from 10 days ago (earliest common date)
@@ -622,7 +698,7 @@ class TestDateSynchronization:
 
             # Actually, the common_date is the minimum of all last_data_dates where meters have data.
             # Meter 1: last date = 10 days ago
-            # Meter 2: last date = 5 days ago  
+            # Meter 2: last date = 5 days ago
             # Meter 3: last date = today
             # Common date = min(10 days, 5 days, today) = 10 days ago
             # But meter 2 and 3 don't have entries from 10 days ago, so they won't contribute.
@@ -632,7 +708,9 @@ class TestDateSynchronization:
             # So the sensor should only show meter 1's value: 10.0
             assert sensor._attr_native_value == 10.0
             assert len(sensor._meters_with_data) == 3  # All meters are listed
-            meter_values = {m["measuring_point_id"]: m["value"] for m in sensor._meters_with_data}
+            meter_values = {
+                m["measuring_point_id"]: m["value"] for m in sensor._meters_with_data
+            }
             assert meter_values[1] == 10.0
             assert meter_values[2] == 0.0  # No data from common date
             assert meter_values[3] == 0.0  # No data from common date
@@ -712,12 +790,18 @@ class TestDateSynchronization:
             return None
 
         with patch.object(
-            coordinator, "get_active_installations", return_value=coordinator._installations
+            coordinator,
+            "get_active_installations",
+            return_value=coordinator._installations,
         ), patch.object(
-            coordinator, "get_measuring_points", return_value=coordinator._measuring_points
+            coordinator,
+            "get_measuring_points",
+            return_value=coordinator._measuring_points,
         ), patch.object(
             coordinator, "get_setting", side_effect=get_setting
-        ), patch.object(sensor, "async_write_ha_state", new_callable=AsyncMock):
+        ), patch.object(
+            sensor, "async_write_ha_state", new_callable=AsyncMock
+        ):
             sensor._update_from_coordinator_data()
 
             # Should work normally when all meters have data from the same date
