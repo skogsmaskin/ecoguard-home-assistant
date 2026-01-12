@@ -2902,9 +2902,7 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         # For metered costs, check if we have actual price data for both utilities
         if self._cost_type == "estimated":
             # For estimated costs, don't set value here - async fetch will handle it
-            # Just ensure we have meters to calculate from
-            has_hw_data = len(hw_meters_with_data) > 0
-            has_cw_data = len(cw_meters_with_data) > 0
+            # We already computed has_hw_data and has_cw_data above, so just use those values
             if not has_hw_data or not has_cw_data:
                 # Missing meters for one or both utilities - keep value as None (Unknown)
                 self._attr_native_value = None
@@ -3014,7 +3012,7 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
             )
         else:
             # For metered costs, use the variables defined in the else block above
-            # (has_hw_price_data and has_cw_price_data are defined at lines 2892-2896)
+            # (has_hw_price_data and has_cw_price_data are defined in the metered-costs branch)
             if has_hw_price_data and has_cw_price_data:
                 self._async_write_ha_state_if_changed(data_date=data_date)
             else:
@@ -3107,7 +3105,9 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         has_hw_data = len(hw_meters_with_data) > 0
         has_cw_data = len(cw_meters_with_data) > 0
 
-        # Set value if we have data for both utilities (even if total_value is 0, that's a valid cost)
+        # Set value if we have data for both utilities
+        # Note: total_value can be 0 (valid case: zero cost/consumption), so we don't check > 0
+        # We only verify that we have actual data from BOTH utilities (has_hw_data and has_cw_data)
         if has_hw_data and has_cw_data:
             self._attr_native_value = round_to_max_digits(total_value)
             currency = self.coordinator.get_setting("Currency") or ""
