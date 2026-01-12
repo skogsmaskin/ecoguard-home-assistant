@@ -27,10 +27,10 @@ from ..sensor_helpers import (
 )
 from ..sensor_base import EcoGuardBaseSensor
 
-_LOGGER = logging.getLogger(__name__)
-
 # Import estimation metadata keys from daily module to maintain consistency
 from .daily import ESTIMATION_METADATA_KEYS
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):

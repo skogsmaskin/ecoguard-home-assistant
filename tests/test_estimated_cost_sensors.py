@@ -8,7 +8,6 @@ This test suite verifies:
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
-import pytest
 from datetime import datetime, timezone
 
 from homeassistant.core import HomeAssistant, CoreState
@@ -25,17 +24,21 @@ async def test_estimated_aggregate_sensor_skips_metered_cache(
 ):
     """Test that estimated aggregate sensor doesn't use metered cache."""
     coordinator._installations = [
-        {"MeasuringPointID": 1, "ExternalKey": "test-key", "Registers": [{"UtilityCode": "HW"}]},
+        {
+            "MeasuringPointID": 1,
+            "ExternalKey": "test-key",
+            "Registers": [{"UtilityCode": "HW"}],
+        },
     ]
     coordinator._measuring_points = [{"ID": 1, "Name": "MP1"}]
-    
+
     def mock_get_setting(name):
         if name == "Currency":
             return "NOK"
         elif name == "TimeZoneIANA":
             return "Europe/Oslo"
         return None
-    
+
     with patch.object(
         coordinator, "get_active_installations", return_value=coordinator._installations
     ), patch.object(
@@ -93,10 +96,14 @@ async def test_estimated_aggregate_sensor_skips_metered_cache(
         sensor._update_from_coordinator_data()
 
         # Verify that async fetch was triggered (not using metered cache)
-        assert hass.async_create_task.called, "Async fetch should be triggered for estimated costs"
-        
+        assert (
+            hass.async_create_task.called
+        ), "Async fetch should be triggered for estimated costs"
+
         # Verify value is None (waiting for async fetch)
-        assert sensor._attr_native_value is None, "Value should be None until async fetch completes"
+        assert (
+            sensor._attr_native_value is None
+        ), "Value should be None until async fetch completes"
 
 
 async def test_estimated_combined_water_sensor_skips_metered_cache(
@@ -114,14 +121,14 @@ async def test_estimated_combined_water_sensor_skips_metered_cache(
         },
     ]
     coordinator._measuring_points = [{"ID": 1, "Name": "MP1"}]
-    
+
     def mock_get_setting(name):
         if name == "Currency":
             return "NOK"
         elif name == "TimeZoneIANA":
             return "Europe/Oslo"
         return None
-    
+
     with patch.object(
         coordinator, "get_active_installations", return_value=coordinator._installations
     ), patch.object(
@@ -133,16 +140,48 @@ async def test_estimated_combined_water_sensor_skips_metered_cache(
         # Set up coordinator data with metered cache (should be ignored for estimated)
         coordinator.data = {
             "latest_cost_cache": {
-                "HW_1_metered": {"value": 30.0, "time": int(datetime.now().timestamp()), "unit": "NOK"},
-                "CW_1_metered": {"value": 20.0, "time": int(datetime.now().timestamp()), "unit": "NOK"},
+                "HW_1_metered": {
+                    "value": 30.0,
+                    "time": int(datetime.now().timestamp()),
+                    "unit": "NOK",
+                },
+                "CW_1_metered": {
+                    "value": 20.0,
+                    "time": int(datetime.now().timestamp()),
+                    "unit": "NOK",
+                },
             },
             "daily_price_cache": {
-                "HW_1_metered": [{"value": 30.0, "time": int(datetime.now().timestamp()), "unit": "NOK"}],
-                "CW_1_metered": [{"value": 20.0, "time": int(datetime.now().timestamp()), "unit": "NOK"}],
+                "HW_1_metered": [
+                    {
+                        "value": 30.0,
+                        "time": int(datetime.now().timestamp()),
+                        "unit": "NOK",
+                    }
+                ],
+                "CW_1_metered": [
+                    {
+                        "value": 20.0,
+                        "time": int(datetime.now().timestamp()),
+                        "unit": "NOK",
+                    }
+                ],
             },
             "daily_consumption_cache": {
-                "HW_1": [{"value": 0.1, "time": int(datetime.now().timestamp()), "unit": "m3"}],
-                "CW_1": [{"value": 0.1, "time": int(datetime.now().timestamp()), "unit": "m3"}],
+                "HW_1": [
+                    {
+                        "value": 0.1,
+                        "time": int(datetime.now().timestamp()),
+                        "unit": "m3",
+                    }
+                ],
+                "CW_1": [
+                    {
+                        "value": 0.1,
+                        "time": int(datetime.now().timestamp()),
+                        "unit": "m3",
+                    }
+                ],
             },
         }
 
@@ -164,10 +203,14 @@ async def test_estimated_combined_water_sensor_skips_metered_cache(
         sensor._update_from_coordinator_data()
 
         # Verify that async fetch was triggered (not using metered cache)
-        assert hass.async_create_task.called, "Async fetch should be triggered for estimated costs"
-        
+        assert (
+            hass.async_create_task.called
+        ), "Async fetch should be triggered for estimated costs"
+
         # Verify value is None (waiting for async fetch)
-        assert sensor._attr_native_value is None, "Value should be None until async fetch completes"
+        assert (
+            sensor._attr_native_value is None
+        ), "Value should be None until async fetch completes"
 
 
 async def test_estimated_aggregate_sensor_exposes_metadata(
@@ -175,17 +218,21 @@ async def test_estimated_aggregate_sensor_exposes_metadata(
 ):
     """Test that estimated aggregate sensor exposes estimation metadata."""
     coordinator._installations = [
-        {"MeasuringPointID": 1, "ExternalKey": "test-key", "Registers": [{"UtilityCode": "HW"}]},
+        {
+            "MeasuringPointID": 1,
+            "ExternalKey": "test-key",
+            "Registers": [{"UtilityCode": "HW"}],
+        },
     ]
     coordinator._measuring_points = [{"ID": 1, "Name": "MP1"}]
-    
+
     def mock_get_setting(name):
         if name == "Currency":
             return "NOK"
         elif name == "TimeZoneIANA":
             return "Europe/Oslo"
         return None
-    
+
     with patch.object(
         coordinator, "get_active_installations", return_value=coordinator._installations
     ), patch.object(
@@ -214,7 +261,9 @@ async def test_estimated_aggregate_sensor_exposes_metadata(
             "price_source": "nord_pool_api",
         }
 
-        coordinator.get_latest_estimated_cost = AsyncMock(return_value=mock_estimated_cost)
+        coordinator.get_latest_estimated_cost = AsyncMock(
+            return_value=mock_estimated_cost
+        )
 
         sensor = EcoGuardDailyCostAggregateSensor(
             hass=hass,
@@ -235,7 +284,9 @@ async def test_estimated_aggregate_sensor_exposes_metadata(
 
         # Check that estimation metadata is stored
         assert sensor._estimation_metadata is not None
-        assert sensor._estimation_metadata["calculation_method"] == "spot_price_calibrated"
+        assert (
+            sensor._estimation_metadata["calculation_method"] == "spot_price_calibrated"
+        )
         assert sensor._estimation_metadata["spot_price_per_kwh"] == 0.5234
         assert sensor._estimation_metadata["calibration_ratio"] == 1.85
 
@@ -261,14 +312,14 @@ async def test_estimated_combined_water_sensor_exposes_metadata(
         },
     ]
     coordinator._measuring_points = [{"ID": 1, "Name": "MP1"}]
-    
+
     def mock_get_setting(name):
         if name == "Currency":
             return "NOK"
         elif name == "TimeZoneIANA":
             return "Europe/Oslo"
         return None
-    
+
     with patch.object(
         coordinator, "get_active_installations", return_value=coordinator._installations
     ), patch.object(
@@ -302,7 +353,9 @@ async def test_estimated_combined_water_sensor_exposes_metadata(
                 return cw_estimated_cost
             return None
 
-        coordinator.get_latest_estimated_cost = AsyncMock(side_effect=mock_get_estimated_cost)
+        coordinator.get_latest_estimated_cost = AsyncMock(
+            side_effect=mock_get_estimated_cost
+        )
 
         sensor = EcoGuardDailyCombinedWaterCostSensor(
             hass=hass,
@@ -324,7 +377,10 @@ async def test_estimated_combined_water_sensor_exposes_metadata(
         assert sensor._estimation_metadata is not None
         assert "hw" in sensor._estimation_metadata
         assert "cw" in sensor._estimation_metadata
-        assert sensor._estimation_metadata["hw"]["calculation_method"] == "spot_price_calibrated"
+        assert (
+            sensor._estimation_metadata["hw"]["calculation_method"]
+            == "spot_price_calibrated"
+        )
         assert sensor._estimation_metadata["cw"]["calculation_method"] == "billing_rate"
 
         # Check that metadata is exposed in attributes
@@ -341,17 +397,21 @@ async def test_estimated_aggregate_sensor_skips_writing_none(
 ):
     """Test that estimated aggregate sensor doesn't write state when value is None."""
     coordinator._installations = [
-        {"MeasuringPointID": 1, "ExternalKey": "test-key", "Registers": [{"UtilityCode": "HW"}]},
+        {
+            "MeasuringPointID": 1,
+            "ExternalKey": "test-key",
+            "Registers": [{"UtilityCode": "HW"}],
+        },
     ]
     coordinator._measuring_points = [{"ID": 1, "Name": "MP1"}]
-    
+
     def mock_get_setting(name):
         if name == "Currency":
             return "NOK"
         elif name == "TimeZoneIANA":
             return "Europe/Oslo"
         return None
-    
+
     with patch.object(
         coordinator, "get_active_installations", return_value=coordinator._installations
     ), patch.object(
@@ -417,14 +477,14 @@ async def test_estimated_combined_water_sensor_skips_writing_none(
         },
     ]
     coordinator._measuring_points = [{"ID": 1, "Name": "MP1"}]
-    
+
     def mock_get_setting(name):
         if name == "Currency":
             return "NOK"
         elif name == "TimeZoneIANA":
             return "Europe/Oslo"
         return None
-    
+
     with patch.object(
         coordinator, "get_active_installations", return_value=coordinator._installations
     ), patch.object(
@@ -435,8 +495,20 @@ async def test_estimated_combined_water_sensor_skips_writing_none(
 
         coordinator.data = {
             "daily_consumption_cache": {
-                "HW_1": [{"value": 0.1, "time": int(datetime.now().timestamp()), "unit": "m3"}],
-                "CW_1": [{"value": 0.1, "time": int(datetime.now().timestamp()), "unit": "m3"}],
+                "HW_1": [
+                    {
+                        "value": 0.1,
+                        "time": int(datetime.now().timestamp()),
+                        "unit": "m3",
+                    }
+                ],
+                "CW_1": [
+                    {
+                        "value": 0.1,
+                        "time": int(datetime.now().timestamp()),
+                        "unit": "m3",
+                    }
+                ],
             },
         }
 
@@ -474,17 +546,21 @@ async def test_estimated_aggregate_sensor_writes_when_async_fetch_completes(
 ):
     """Test that estimated aggregate sensor writes state when async fetch completes with value."""
     coordinator._installations = [
-        {"MeasuringPointID": 1, "ExternalKey": "test-key", "Registers": [{"UtilityCode": "HW"}]},
+        {
+            "MeasuringPointID": 1,
+            "ExternalKey": "test-key",
+            "Registers": [{"UtilityCode": "HW"}],
+        },
     ]
     coordinator._measuring_points = [{"ID": 1, "Name": "MP1"}]
-    
+
     def mock_get_setting(name):
         if name == "Currency":
             return "NOK"
         elif name == "TimeZoneIANA":
             return "Europe/Oslo"
         return None
-    
+
     with patch.object(
         coordinator, "get_active_installations", return_value=coordinator._installations
     ), patch.object(
@@ -502,7 +578,9 @@ async def test_estimated_aggregate_sensor_writes_when_async_fetch_completes(
             "spot_price_per_kwh": 0.5234,
         }
 
-        coordinator.get_latest_estimated_cost = AsyncMock(return_value=mock_estimated_cost)
+        coordinator.get_latest_estimated_cost = AsyncMock(
+            return_value=mock_estimated_cost
+        )
 
         sensor = EcoGuardDailyCostAggregateSensor(
             hass=hass,
@@ -543,14 +621,14 @@ async def test_estimated_combined_water_sensor_writes_when_async_fetch_completes
         },
     ]
     coordinator._measuring_points = [{"ID": 1, "Name": "MP1"}]
-    
+
     def mock_get_setting(name):
         if name == "Currency":
             return "NOK"
         elif name == "TimeZoneIANA":
             return "Europe/Oslo"
         return None
-    
+
     with patch.object(
         coordinator, "get_active_installations", return_value=coordinator._installations
     ), patch.object(
@@ -575,7 +653,9 @@ async def test_estimated_combined_water_sensor_writes_when_async_fetch_completes
                 }
             return None
 
-        coordinator.get_latest_estimated_cost = AsyncMock(side_effect=mock_get_estimated_cost)
+        coordinator.get_latest_estimated_cost = AsyncMock(
+            side_effect=mock_get_estimated_cost
+        )
 
         sensor = EcoGuardDailyCombinedWaterCostSensor(
             hass=hass,
@@ -605,17 +685,21 @@ async def test_estimated_and_metered_show_different_values(
 ):
     """Test that estimated and metered sensors can show different values."""
     coordinator._installations = [
-        {"MeasuringPointID": 1, "ExternalKey": "test-key", "Registers": [{"UtilityCode": "HW"}]},
+        {
+            "MeasuringPointID": 1,
+            "ExternalKey": "test-key",
+            "Registers": [{"UtilityCode": "HW"}],
+        },
     ]
     coordinator._measuring_points = [{"ID": 1, "Name": "MP1"}]
-    
+
     def mock_get_setting(name):
         if name == "Currency":
             return "NOK"
         elif name == "TimeZoneIANA":
             return "Europe/Oslo"
         return None
-    
+
     with patch.object(
         coordinator, "get_active_installations", return_value=coordinator._installations
     ), patch.object(
@@ -625,7 +709,9 @@ async def test_estimated_and_metered_show_different_values(
     ):
 
         # Set up coordinator data with metered cache (old data with 11-day lag)
-        old_timestamp = int((datetime.now().replace(tzinfo=timezone.utc).timestamp() - 11 * 86400))
+        old_timestamp = int(
+            (datetime.now().replace(tzinfo=timezone.utc).timestamp() - 11 * 86400)
+        )
         coordinator.data = {
             "latest_cost_cache": {
                 "HW_1_metered": {
@@ -702,17 +788,15 @@ async def test_individual_estimated_sensor_skips_metered_cache(
     coordinator._measuring_points = mock_coordinator_data["measuring_points"]
     coordinator._installations = mock_coordinator_data["installations"]
     coordinator._settings = mock_coordinator_data["settings"]
-    
+
     def mock_get_setting(name):
         if name == "Currency":
             return "NOK"
         elif name == "TimeZoneIANA":
             return "Europe/Oslo"
         return None
-    
-    with patch.object(
-        coordinator, "get_setting", side_effect=mock_get_setting
-    ):
+
+    with patch.object(coordinator, "get_setting", side_effect=mock_get_setting):
 
         installation = {
             "MeasuringPointID": 1,
@@ -764,10 +848,14 @@ async def test_individual_estimated_sensor_skips_metered_cache(
         sensor._update_from_coordinator_data()
 
         # Verify that async fetch was triggered (not using metered cache)
-        assert hass.async_create_task.called, "Async fetch should be triggered for estimated costs"
-        
+        assert (
+            hass.async_create_task.called
+        ), "Async fetch should be triggered for estimated costs"
+
         # Verify value is None (waiting for async fetch)
-        assert sensor._attr_native_value is None, "Value should be None until async fetch completes"
+        assert (
+            sensor._attr_native_value is None
+        ), "Value should be None until async fetch completes"
 
 
 async def test_individual_estimated_sensor_exposes_metadata(
@@ -777,17 +865,15 @@ async def test_individual_estimated_sensor_exposes_metadata(
     coordinator._measuring_points = mock_coordinator_data["measuring_points"]
     coordinator._installations = mock_coordinator_data["installations"]
     coordinator._settings = mock_coordinator_data["settings"]
-    
+
     def mock_get_setting(name):
         if name == "Currency":
             return "NOK"
         elif name == "TimeZoneIANA":
             return "Europe/Oslo"
         return None
-    
-    with patch.object(
-        coordinator, "get_setting", side_effect=mock_get_setting
-    ):
+
+    with patch.object(coordinator, "get_setting", side_effect=mock_get_setting):
 
         installation = {
             "MeasuringPointID": 1,
@@ -809,7 +895,9 @@ async def test_individual_estimated_sensor_exposes_metadata(
             "calibration_ratio": 1.85,
         }
 
-        coordinator.get_latest_estimated_cost = AsyncMock(return_value=mock_estimated_cost)
+        coordinator.get_latest_estimated_cost = AsyncMock(
+            return_value=mock_estimated_cost
+        )
 
         sensor = EcoGuardDailyCostSensor(
             hass=hass,
@@ -833,7 +921,9 @@ async def test_individual_estimated_sensor_exposes_metadata(
 
         # Check that estimation metadata is stored
         assert sensor._estimation_metadata is not None
-        assert sensor._estimation_metadata["calculation_method"] == "spot_price_calibrated"
+        assert (
+            sensor._estimation_metadata["calculation_method"] == "spot_price_calibrated"
+        )
 
         # Check that metadata is exposed in attributes
         attrs = sensor.extra_state_attributes

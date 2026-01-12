@@ -1103,25 +1103,43 @@ class EcoGuardDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             "utility_code": utility_code,
                             "cost_type": "estimated",
                             # Pass through calculation metadata for transparency
-                            "calculation_method": hw_price_data.get("calculation_method"),
+                            "calculation_method": hw_price_data.get(
+                                "calculation_method"
+                            ),
                             "consumption_m3": consumption,
                         }
                         # Add HW-specific metadata if available
                         if "energy_per_m3_kwh" in hw_price_data:
-                            result["energy_per_m3_kwh"] = hw_price_data["energy_per_m3_kwh"]
+                            result["energy_per_m3_kwh"] = hw_price_data[
+                                "energy_per_m3_kwh"
+                            ]
                         if "total_energy_kwh" in hw_price_data:
-                            result["total_energy_kwh"] = hw_price_data["total_energy_kwh"]
+                            result["total_energy_kwh"] = hw_price_data[
+                                "total_energy_kwh"
+                            ]
                         if "spot_price_per_kwh" in hw_price_data:
-                            result["spot_price_per_kwh"] = hw_price_data["spot_price_per_kwh"]
-                            result["spot_price_currency"] = hw_price_data.get("spot_price_currency")
+                            result["spot_price_per_kwh"] = hw_price_data[
+                                "spot_price_per_kwh"
+                            ]
+                            result["spot_price_currency"] = hw_price_data.get(
+                                "spot_price_currency"
+                            )
                         if "heating_cost" in hw_price_data:
                             result["heating_cost"] = hw_price_data["heating_cost"]
                         if "calibration_ratio" in hw_price_data:
-                            result["calibration_ratio"] = hw_price_data["calibration_ratio"]
-                            result["base_heating_cost"] = hw_price_data.get("base_heating_cost")
+                            result["calibration_ratio"] = hw_price_data[
+                                "calibration_ratio"
+                            ]
+                            result["base_heating_cost"] = hw_price_data.get(
+                                "base_heating_cost"
+                            )
                         if "cold_water_rate_nok_per_m3" in hw_price_data:
-                            result["cold_water_rate_nok_per_m3"] = hw_price_data["cold_water_rate_nok_per_m3"]
-                            result["cold_water_cost"] = hw_price_data.get("cold_water_cost")
+                            result["cold_water_rate_nok_per_m3"] = hw_price_data[
+                                "cold_water_rate_nok_per_m3"
+                            ]
+                            result["cold_water_cost"] = hw_price_data.get(
+                                "cold_water_cost"
+                            )
                         if "nord_pool_area" in hw_price_data:
                             result["nord_pool_area"] = hw_price_data["nord_pool_area"]
                         if "price_source" in hw_price_data:
