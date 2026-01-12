@@ -139,6 +139,7 @@ def collect_meters_with_data(
         # Check if this meter has data using the provided callback
         meter_data = get_meter_data(measuring_point_id, utility_code)
 
+        # Include meter if it has data (including value 0 for cost sensors without price data)
         if meter_data and meter_data.get("value") is not None:
             meters_with_data.append(
                 {
@@ -219,28 +220,48 @@ def create_monthly_meter_data_getter(
                         "unit": unit,
                     }
 
-        elif aggregate_type == "price" and cost_type == "actual" and daily_price_cache:
-            # For cost: calculate from daily price cache
-            daily_price_cache_key = f"{utility_code}_{measuring_point_id}_metered"
-            daily_prices = daily_price_cache.get(daily_price_cache_key)
+        elif aggregate_type == "price":
+            if cost_type == "actual":
+                # For actual cost: try daily price cache, but if no data exists, return 0 to include the meter
+                if daily_price_cache:
+                    daily_price_cache_key = f"{utility_code}_{measuring_point_id}_metered"
+                    daily_prices = daily_price_cache.get(daily_price_cache_key)
 
-            if daily_prices:
-                # Filter daily prices for this month
-                month_prices = [
-                    p
-                    for p in daily_prices
-                    if from_time <= p.get("time", 0) < to_time
-                    and p.get("value") is not None
-                    and p.get("value", 0) > 0
-                ]
+                    if daily_prices:
+                        # Filter daily prices for this month
+                        # Include 0 values as they are valid cost values
+                        month_prices = [
+                            p
+                            for p in daily_prices
+                            if from_time <= p.get("time", 0) < to_time
+                            and p.get("value") is not None
+                        ]
 
-                if month_prices:
-                    total_value = sum(p["value"] for p in month_prices)
-                    unit = month_prices[0].get("unit", "") if month_prices else ""
-                    return {
-                        "value": total_value,
-                        "unit": unit,
-                    }
+                        if month_prices:
+                            total_value = sum(p["value"] for p in month_prices)
+                            unit = month_prices[0].get("unit", "") if month_prices else ""
+                            return {
+                                "value": total_value,
+                                "unit": unit,
+                            }
+                
+                # No price data found - return 0 to include the meter in the count
+                # This ensures meters are counted even when price data is not available
+                currency = "NOK"  # Default unit, will be overridden by sensor if needed
+                return {
+                    "value": 0.0,
+                    "unit": currency,
+                }
+            elif cost_type == "estimated":
+                # For estimated cost: check if we have monthly cache data
+                # Estimated costs are typically calculated from consumption + spot prices
+                # and stored in monthly aggregate cache, not daily price cache
+                # If no data found, return 0 to include the meter in the count
+                currency = "NOK"  # Default unit, will be overridden by sensor if needed
+                return {
+                    "value": 0.0,
+                    "unit": currency,
+                }
 
         return None
 
