@@ -95,6 +95,70 @@ The integration can estimate hot water heating costs using Nord Pool electricity
 
 **Note**: Estimates are only used when actual API price data is missing. When actual data is available, it takes precedence.
 
+### Estimation Metadata
+
+Estimated cost sensors expose detailed calculation metadata in their attributes for transparency. This allows you to understand exactly how the estimated cost was calculated.
+
+**Accessing Metadata:**
+- View sensor attributes in Home Assistant's Developer Tools → States
+- The metadata is available under the `estimation` attribute
+- Only available for sensors with `cost_type: estimated`
+
+**Metadata Structure:**
+
+For individual and aggregate sensors, the metadata is a flat dictionary:
+
+```yaml
+estimation:
+  calculation_method: "spot_price_calibrated"  # or "billing_rate"
+  consumption_m3: 0.125
+  spot_price_per_kwh: 0.5234
+  spot_price_currency: "NOK"
+  heating_cost: 29.45
+  calibration_ratio: 1.85
+  base_heating_cost: 15.92
+  nord_pool_area: "NO1"
+  price_source: "nord_pool_api"
+  # ... other fields
+```
+
+For combined water sensors, the metadata is nested by utility:
+
+```yaml
+estimation:
+  hw:  # Hot water metadata
+    calculation_method: "spot_price_calibrated"
+    spot_price_per_kwh: 0.5234
+    heating_cost: 29.45
+    # ... other HW fields
+  cw:  # Cold water metadata
+    calculation_method: "billing_rate"
+    consumption_m3: 1.0
+    rate_per_m3: 12.50
+    # ... other CW fields
+```
+
+**Available Metadata Fields:**
+
+| Field | Description | Available For |
+|-------|-------------|---------------|
+| `calculation_method` | How the cost was calculated (`spot_price_calibrated`, `billing_rate`) | All |
+| `consumption_m3` | Water consumption used in calculation (m³) | All |
+| `energy_per_m3_kwh` | Energy required per m³ of water (kWh/m³) | Hot Water only |
+| `total_energy_kwh` | Total energy required (kWh) | Hot Water only |
+| `spot_price_per_kwh` | Nord Pool spot price used (per kWh) | Hot Water only |
+| `spot_price_currency` | Currency of spot price | Hot Water only |
+| `heating_cost` | Calculated heating cost component | Hot Water only |
+| `calibration_ratio` | Calibration factor applied to improve accuracy | Hot Water only |
+| `base_heating_cost` | Base heating cost before calibration | Hot Water only |
+| `cold_water_rate_nok_per_m3` | Cold water rate component (NOK/m³) | Hot Water only |
+| `cold_water_cost` | Cold water cost component | Hot Water only |
+| `nord_pool_area` | Nord Pool pricing area used (e.g., "NO1", "SE3") | Hot Water only |
+| `price_source` | Source of price data (e.g., "nord_pool_api") | Hot Water only |
+| `rate_per_m3` | Billing rate used (per m³) | Non-Hot Water |
+
+**Note:** Not all fields are present in every estimation. Only fields with values are included in the metadata.
+
 ## Sensors
 
 The integration creates the following sensors, organized by purpose (Consumption, Cost, Reception):
