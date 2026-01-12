@@ -31,6 +31,25 @@ from ..sensor_base import EcoGuardBaseSensor
 
 _LOGGER = logging.getLogger(__name__)
 
+# Metadata keys that are exposed in sensor attributes for estimated costs
+# These provide transparency into how estimated costs are calculated
+ESTIMATION_METADATA_KEYS = [
+    "calculation_method",
+    "consumption_m3",
+    "energy_per_m3_kwh",
+    "total_energy_kwh",
+    "spot_price_per_kwh",
+    "spot_price_currency",
+    "heating_cost",
+    "calibration_ratio",
+    "base_heating_cost",
+    "cold_water_rate_nok_per_m3",
+    "cold_water_cost",
+    "nord_pool_area",
+    "price_source",
+    "rate_per_m3",
+]
+
 
 class EcoGuardDailyConsumptionSensor(EcoGuardBaseSensor):
     """Sensor for last known daily consumption for a specific meter."""
@@ -1424,6 +1443,8 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
         self._measuring_point_id = measuring_point_id
         self._measuring_point_name = measuring_point_name
         self._cost_type = cost_type
+        # Store estimation metadata for transparency
+        self._estimation_metadata: dict[str, Any] | None = None
 
         # Build sensor name
         if measuring_point_name:
@@ -1505,6 +1526,10 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
         if self._data_lag_days is not None:
             attrs["data_lag_days"] = self._data_lag_days
 
+        # Add estimation metadata for transparency (only for estimated costs)
+        if self._cost_type == "estimated" and self._estimation_metadata:
+            attrs["estimation"] = self._estimation_metadata
+
         return attrs
 
     async def _async_update_translated_name(self) -> None:
@@ -1568,16 +1593,26 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
         daily_price_cache = coordinator_data.get("daily_price_cache", {})
         daily_consumption_cache = coordinator_data.get("daily_consumption_cache", {})
 
-        # Build cache key - always use metered cache key
-        # For estimated costs, use metered cost if available (estimated = metered when metered exists)
+        # Build cache key
+        # For metered costs: use metered cache key
+        # For estimated costs: do NOT use metered cache - estimated costs are calculated from consumption
+        if self._cost_type == "actual":
+            if self._measuring_point_id:
+                cache_key = f"{self._utility_code}_{self._measuring_point_id}_metered"
+            else:
+                cache_key = f"{self._utility_code}_all_metered"
+        else:
+            # For estimated costs, we don't use the metered cache
+            # Estimated costs are calculated from consumption data, not from metered cost cache
+            cache_key = None
+
         if self._measuring_point_id:
-            cache_key = f"{self._utility_code}_{self._measuring_point_id}_metered"
             consumption_cache_key = f"{self._utility_code}_{self._measuring_point_id}"
         else:
-            cache_key = f"{self._utility_code}_all_metered"
             consumption_cache_key = f"{self._utility_code}_all"
 
-        cost_data = cost_cache.get(cache_key)
+        # Only read from metered cost cache for metered costs
+        cost_data = cost_cache.get(cache_key) if cache_key else None
 
         # Find actual last data date
         # For metered costs: use daily_price_cache
@@ -1605,11 +1640,10 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
             cost_data is not None,
         )
 
-        # For estimated costs: if we have metered cost data, use it (estimated = metered when available)
-        # Only calculate from consumption if metered cost is not available
-        if not cost_data and self._cost_type == "estimated":
-            # No metered cost available, trigger async fetch to calculate estimated cost
-            # This is needed for HW where metered cost is often not available
+        # For estimated costs: always calculate from consumption, not from metered cache
+        # Estimated costs should reflect current consumption × current rates, not old metered cost data
+        if self._cost_type == "estimated":
+            # Always trigger async fetch for estimated costs to calculate from consumption
             from homeassistant.core import CoreState
 
             if (
@@ -1645,6 +1679,7 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
                     self.hass.is_stopping if self.hass else None,
                     self.hass.state if self.hass else None,
                 )
+            # Don't use metered cost cache for estimated costs
             cost_data = None
 
         if cost_data:
@@ -1760,6 +1795,14 @@ class EcoGuardDailyCostSensor(EcoGuardBaseSensor):
                 self._data_lagging = True
                 self._data_lag_days = None
 
+            # Store estimation metadata for exposure in attributes
+            # Extract all metadata fields (excluding the basic ones we already use)
+            self._estimation_metadata = {
+                k: v
+                for k, v in cost_data.items()
+                if k in ESTIMATION_METADATA_KEYS and v is not None
+            }
+
             _LOGGER.info(
                 "Updated %s (estimated): %s %s",
                 self.entity_id,
@@ -1816,6 +1859,8 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
         self._hass = hass
         self._utility_code = utility_code
         self._cost_type = cost_type
+        # Store estimation metadata for transparency
+        self._estimation_metadata: dict[str, Any] | None = None
 
         # Build sensor name
         utility_name = get_translation_default(f"utility.{utility_code.lower()}")
@@ -1887,6 +1932,10 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
                 }
                 for m in self._meters_with_data
             ]
+
+        # Add estimation metadata for transparency (only for estimated costs)
+        if self._cost_type == "estimated" and self._estimation_metadata:
+            attrs["estimation"] = self._estimation_metadata
 
         return attrs
 
@@ -1970,9 +2019,14 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
                     break
 
             # Read cost from cache (no API call)
-            # Always use metered cache key
-            # For estimated costs, use metered cost if available (estimated = metered when metered exists)
-            cache_key = f"{self._utility_code}_{measuring_point_id}_metered"
+            # For metered costs: use metered cache key
+            # For estimated costs: do NOT use metered cache - estimated costs are calculated from consumption
+            if self._cost_type == "actual":
+                cache_key = f"{self._utility_code}_{measuring_point_id}_metered"
+            else:
+                # For estimated costs, we don't use the metered cache
+                # Estimated costs are calculated from consumption data, not from metered cost cache
+                cache_key = None
             consumption_cache_key = f"{self._utility_code}_{measuring_point_id}"
 
             # Find actual last data date for this meter
@@ -1988,7 +2042,8 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
                 meter_last_date = find_last_data_date(consumption_daily_cache, tz)
 
             # Fallback: if daily cache doesn't have data, use timestamp from latest cache
-            if not meter_last_date:
+            # Only for metered costs (estimated costs don't use metered cache)
+            if not meter_last_date and self._cost_type == "actual" and cache_key:
                 cost_data = cost_cache.get(cache_key)
                 if cost_data and cost_data.get("time"):
                     cost_timestamp = cost_data.get("time")
@@ -2040,7 +2095,14 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
         for measuring_point_id, meter_info in meter_info_map.items():
             cache_key = meter_info["cache_key"]
             measuring_point_name = meter_info["measuring_point_name"]
-            cost_data = cost_cache.get(cache_key)
+
+            # For estimated costs, do NOT use metered cost cache
+            # Estimated costs are calculated from consumption data, not from metered cost cache
+            if self._cost_type == "estimated":
+                # Skip reading from metered cost cache for estimated costs
+                cost_data = None
+            else:
+                cost_data = cost_cache.get(cache_key) if cache_key else None
 
             # Check if this meter has cost data
             # Track whether we found actual price data (even if 0) vs no data at all
@@ -2049,7 +2111,8 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             has_price_data_for_meter = False
 
             # Only proceed if we have a common_data_timestamp to ensure all meters use data from the same date
-            if common_data_timestamp:
+            # For estimated costs, we skip this and trigger async fetch instead
+            if common_data_timestamp and self._cost_type == "actual":
                 # First, try to use cost_data from latest_cost_cache if it's from common_data_date or earlier
                 if cost_data:
                     cost_timestamp = cost_data.get("time")
@@ -2063,8 +2126,10 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
 
                 # If we didn't find valid cost_data (either it doesn't exist or is too new),
                 # fall back to daily_price_cache to find the latest entry from common_data_date or earlier
-                if not has_price_data_for_meter and self._cost_type == "actual":
-                    price_daily_cache = daily_price_cache.get(cache_key, [])
+                if not has_price_data_for_meter:
+                    price_daily_cache = (
+                        daily_price_cache.get(cache_key, []) if cache_key else []
+                    )
                     if price_daily_cache:
                         # Filter to only use entries from common_data_date or earlier
                         # Then find the most recent entry using max() instead of sorting
@@ -2109,25 +2174,59 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
                 meter_info_dict["_has_price_data"] = True
             meters_with_data.append(meter_info_dict)
 
-        # Always populate meters_with_data for meter_count, even if no price data exists
-        # But only set sensor value if we have actual price data
-        # Check if we have actual price data by checking if we found any price values
-        # (total_value > 0 means we found price data, or latest_timestamp means we found price entries,
-        # or any meter has the _has_price_data flag set)
-        has_actual_price_data = (
-            total_value > 0
-            or latest_timestamp is not None
-            or any(m.get("_has_price_data", False) for m in meters_with_data)
-        )
-
-        if has_actual_price_data:
-            # We have actual price data - set the value (even if 0, it's valid price data)
-            self._attr_native_value = (
-                round_to_max_digits(total_value) if total_value > 0 else 0.0
-            )
-        else:
-            # We have meters but no price data at all - keep value as None (Unknown)
+        # For estimated costs, we don't use metered cache - always calculate from consumption
+        # So we should always trigger async fetch for estimated costs when we have meters
+        if self._cost_type == "estimated" and meters_with_data:
+            # For estimated costs, always trigger async fetch to calculate from consumption
+            # Don't set value from cache (estimated costs are calculated on-demand)
             self._attr_native_value = None
+            from homeassistant.core import CoreState
+
+            if (
+                self.hass
+                and not self.hass.is_stopping
+                and self.hass.state != CoreState.starting
+            ):
+                # Trigger async fetch in background (non-blocking)
+                async def _fetch_estimated_cost():
+                    try:
+                        _LOGGER.debug(
+                            "Starting async fetch for estimated cost aggregate: %s",
+                            self.entity_id,
+                        )
+                        await self._async_fetch_value()
+                    except Exception as err:
+                        _LOGGER.warning(
+                            "Error in async fetch for %s: %s",
+                            self.entity_id,
+                            err,
+                            exc_info=True,
+                        )
+
+                self.hass.async_create_task(_fetch_estimated_cost())
+                _LOGGER.debug(
+                    "Created async task for estimated cost aggregate fetch: %s",
+                    self.entity_id,
+                )
+        else:
+            # For metered costs, use the cache data we found
+            # Check if we have actual price data by checking if we found any price values
+            # (total_value > 0 means we found price data, or latest_timestamp means we found price entries,
+            # or any meter has the _has_price_data flag set)
+            has_actual_price_data = (
+                total_value > 0
+                or latest_timestamp is not None
+                or any(m.get("_has_price_data", False) for m in meters_with_data)
+            )
+
+            if has_actual_price_data:
+                # We have actual price data - set the value (even if 0, it's valid price data)
+                self._attr_native_value = (
+                    round_to_max_digits(total_value) if total_value > 0 else 0.0
+                )
+            else:
+                # We have meters but no price data at all - keep value as None (Unknown)
+                self._attr_native_value = None
 
         # Always set meters_with_data and other attributes if we have meters
         # This ensures meter_count is shown even when sensor value is Unknown
@@ -2136,7 +2235,12 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             self._attr_native_unit_of_measurement = currency
             # Use the common_data_date (most recent date where all meters have data)
             # This is the date we used for fetching cost data, ensuring all meters use data from the same date
-            if common_data_date:
+            # For estimated costs, don't set _last_data_date from consumption cache here
+            # (it will be set when async fetch completes with actual cost data)
+            if self._cost_type == "estimated":
+                # For estimated costs, don't set _last_data_date yet - wait for async fetch
+                self._last_data_date = None
+            elif common_data_date:
                 self._last_data_date = common_data_date
             elif latest_timestamp:
                 self._last_data_date = datetime.fromtimestamp(latest_timestamp, tz=tz)
@@ -2156,30 +2260,45 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             self._attr_available = True
 
             _LOGGER.info(
-                "Updated %s: %s %s (from %d meters, has_price_data=%s)",
+                "Updated %s: %s %s (from %d meters, cost_type=%s)",
                 self.entity_id,
                 self._attr_native_value,
                 currency,
                 len(clean_meters),
-                has_actual_price_data,
+                self._cost_type,
             )
-            # Always write state when we have meters (even if value is None/Unknown)
-            # This ensures meter_count and meters list are visible
-            data_date = None
-            if self._last_data_date:
-                data_date = self._last_data_date.date()
-
-            # If we have price data, use the normal write method (which skips None values)
-            # If we don't have price data but have meters, write state directly to show attributes
-            if has_actual_price_data:
-                self._async_write_ha_state_if_changed(data_date=data_date)
-            else:
-                # Write state directly when value is None but we have meters
-                # This ensures meter_count and meters list are visible even when value is Unknown
-                self.async_write_ha_state()
+            # For estimated costs, we've already triggered async fetch above
+            # Don't write state until async fetch completes with a value (prevents recording None)
+            # For metered costs, write state based on whether we have price data
+            if self._cost_type == "estimated":
+                # For estimated costs, don't write state yet - wait for async fetch to complete
+                # This prevents recording None/Unknown values to the database
+                # Attributes will be visible once async fetch completes and writes state with a valid value
+                _LOGGER.debug(
+                    "Skipping state write for %s (estimated): waiting for async fetch to complete",
+                    self.entity_id,
+                )
+            elif self._cost_type == "actual":
+                # For metered costs, write state based on whether we have price data
+                data_date = None
+                if self._last_data_date:
+                    data_date = self._last_data_date.date()
+                # For metered costs, use normal write method if we have price data
+                has_actual_price_data = (
+                    total_value > 0
+                    or latest_timestamp is not None
+                    or any(m.get("_has_price_data", False) for m in meters_with_data)
+                )
+                if has_actual_price_data:
+                    self._async_write_ha_state_if_changed(data_date=data_date)
+                else:
+                    # Write state directly when value is None but we have meters
+                    # This ensures meter_count and meters list are visible even when value is Unknown
+                    self.async_write_ha_state()
         else:
-            # No metered cost data available
-            # For estimated costs, trigger async fetch to calculate from consumption + rate/spot prices
+            # No meters found or no data available
+            # For estimated costs, always trigger async fetch to calculate from consumption + rate/spot prices
+            # (estimated costs are not stored in cache, they're calculated on-demand)
             if self._cost_type == "estimated":
                 from homeassistant.core import CoreState
 
@@ -2224,7 +2343,7 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             self._attr_native_unit_of_measurement = currency
             self._last_data_date = None
             self._meters_with_data = []
-            # Treat lack of metered cost data as missing data, mark as lagging
+            # Treat lack of cost data as missing data, mark as lagging
             self._data_lagging = True
             self._data_lag_days = None
             self._attr_available = True
@@ -2232,6 +2351,11 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             return
 
         # Write state only if value or date has meaningfully changed
+        # For estimated costs, don't write state here - wait for async fetch to complete
+        if self._cost_type == "estimated":
+            # For estimated costs, async fetch will write state when it completes
+            return
+
         data_date = None
         if self._last_data_date:
             data_date = self._last_data_date.date()
@@ -2243,6 +2367,8 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
         total_value = 0.0
         latest_timestamp = None
         meters_with_data = []
+        # Collect estimation metadata from all meters (for aggregate, use first meter's metadata as representative)
+        estimation_metadata: dict[str, Any] | None = None
 
         for installation in active_installations:
             registers = installation.get("Registers", [])
@@ -2289,6 +2415,14 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
                     if latest_timestamp is None or time_stamp > latest_timestamp:
                         latest_timestamp = time_stamp
 
+                # Store estimation metadata from first meter (for aggregate sensors)
+                if self._cost_type == "estimated" and estimation_metadata is None:
+                    estimation_metadata = {
+                        k: v
+                        for k, v in cost_data.items()
+                        if k in ESTIMATION_METADATA_KEYS and v is not None
+                    }
+
                 meters_with_data.append(
                     {
                         "measuring_point_id": measuring_point_id,
@@ -2304,6 +2438,8 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             if latest_timestamp:
                 self._last_data_date = datetime.fromtimestamp(latest_timestamp)
             self._meters_with_data = meters_with_data
+            # Store estimation metadata for exposure in attributes
+            self._estimation_metadata = estimation_metadata
         else:
             self._attr_native_value = None
             currency = self.coordinator.get_setting("Currency") or ""
@@ -2380,6 +2516,8 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         self._cw_meters_with_data: list[dict[str, Any]] = []
         self._data_lagging: bool = False
         self._data_lag_days: int | None = None
+        # Store estimation metadata for transparency
+        self._estimation_metadata: dict[str, Any] | None = None
 
         # Set icon for cost sensor (all money units use dollar icon)
         self._attr_icon = "mdi:currency-usd"
@@ -2427,6 +2565,10 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
                 }
                 for m in self._cw_meters_with_data
             ]
+
+        # Add estimation metadata for transparency (only for estimated costs)
+        if self._cost_type == "estimated" and self._estimation_metadata:
+            attrs["estimation"] = self._estimation_metadata
 
         return attrs
 
@@ -2506,13 +2648,22 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
                     continue
 
                 # Read cost from cache (no API call)
-                cache_key = f"{utility_code}_{measuring_point_id}_metered"
+                # For metered costs: use metered cache key
+                # For estimated costs: do NOT use metered cache - estimated costs are calculated from consumption
+                if self._cost_type == "actual":
+                    cache_key = f"{utility_code}_{measuring_point_id}_metered"
+                else:
+                    # For estimated costs, we don't use the metered cache
+                    # Estimated costs are calculated from consumption data, not from metered cost cache
+                    cache_key = None
                 consumption_cache_key = f"{utility_code}_{measuring_point_id}"
 
                 # Find actual last data date for this meter
                 if self._cost_type == "actual":
                     # Metered costs: use price cache
-                    price_daily_cache = daily_price_cache.get(cache_key, [])
+                    price_daily_cache = (
+                        daily_price_cache.get(cache_key, []) if cache_key else []
+                    )
                     meter_last_date = find_last_price_date(price_daily_cache, tz)
                 else:
                     # Estimated costs: use consumption cache
@@ -2522,7 +2673,8 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
                     meter_last_date = find_last_data_date(consumption_daily_cache, tz)
 
                 # Fallback: if daily cache doesn't have data, use timestamp from latest cache
-                if not meter_last_date:
+                # Only for metered costs (estimated costs don't use metered cache)
+                if not meter_last_date and self._cost_type == "actual" and cache_key:
                     cost_data = cost_cache.get(cache_key)
                     if cost_data and cost_data.get("time"):
                         cost_timestamp = cost_data.get("time")
@@ -2590,7 +2742,14 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         for (utility_code, measuring_point_id), meter_info in meter_info_map.items():
             cache_key = meter_info["cache_key"]
             measuring_point_name = meter_info["measuring_point_name"]
-            cost_data = cost_cache.get(cache_key)
+
+            # For estimated costs, do NOT use metered cost cache
+            # Estimated costs are calculated from consumption data, not from metered cost cache
+            if self._cost_type == "estimated":
+                # Skip reading from metered cost cache for estimated costs
+                cost_data = None
+            else:
+                cost_data = cost_cache.get(cache_key) if cache_key else None
 
             # Check if this meter has cost data
             # Track whether we found actual price data (even if 0) vs no data at all
@@ -2599,7 +2758,8 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
             has_price_data_for_meter = False
 
             # Only proceed if we have a common_data_timestamp to ensure all meters use data from the same date
-            if common_data_timestamp:
+            # For estimated costs, we skip this and trigger async fetch instead
+            if common_data_timestamp and self._cost_type == "actual":
                 # First, try to use cost_data from latest_cost_cache if it's from common_data_date or earlier
                 if cost_data:
                     cost_timestamp = cost_data.get("time")
@@ -2613,7 +2773,7 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
 
                 # If we didn't find valid cost_data (either it doesn't exist or is too new),
                 # fall back to daily_price_cache to find the latest entry from common_data_date or earlier
-                if not has_price_data_for_meter and self._cost_type == "actual":
+                if not has_price_data_for_meter:
                     price_daily_cache = daily_price_cache.get(cache_key, [])
                     if price_daily_cache:
                         # Filter to only use entries from common_data_date or earlier
@@ -2695,17 +2855,17 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
 
         total_value = hw_total + cw_total
 
-        # For estimated costs: if we don't have data for both HW and CW, trigger async fetch
-        # This is needed because HW estimated costs are calculated using spot prices, not from cache
-        # We need both utilities to show a value, so fetch if either is missing
+        # For estimated costs: always trigger async fetch to calculate from consumption
+        # Estimated costs are calculated from consumption data, not from metered cache
+        # This ensures we get current consumption × current rates, not old metered cost data
         if self._cost_type == "estimated":
-            # Check if we're missing data for either utility
+            # Always trigger async fetch for estimated costs (they're not in metered cache)
+            # Check if we have meters to calculate from
             has_hw_data = len(hw_meters_with_data) > 0
             has_cw_data = len(cw_meters_with_data) > 0
 
-            # If we're missing data for either utility, trigger async fetch
-            # This ensures we get the complete combined cost with both HW and CW
-            if not has_hw_data or not has_cw_data:
+            # Trigger async fetch if we have meters (estimated costs are calculated on-demand)
+            if has_hw_data or has_cw_data:
                 from homeassistant.core import CoreState
 
                 if (
@@ -2737,24 +2897,39 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
                         has_cw_data,
                     )
 
-        # Check if we have actual price data for both utilities
-        # (meters exist, but we need to check if they have price data)
-        has_hw_price_data = any(
-            m.get("_has_price_data", False) for m in hw_meters_with_data
-        )
-        has_cw_price_data = any(
-            m.get("_has_price_data", False) for m in cw_meters_with_data
-        )
-
-        # Only set a value if we have price data for BOTH HW and CW
-        # This ensures the combined sensor only shows a value when both utilities have price data
-        # If either utility has no price data, we show Unknown rather than partial cost
-        # (showing partial data would be misleading - it looks like total combined cost but is missing one utility)
-        if has_hw_price_data and has_cw_price_data:
-            self._attr_native_value = round_to_max_digits(total_value)
+        # For estimated costs, we don't use metered cache, so has_price_data_for_meter won't be set
+        # Instead, we rely on async fetch to calculate and set the value
+        # For metered costs, check if we have actual price data for both utilities
+        if self._cost_type == "estimated":
+            # For estimated costs, don't set value here - async fetch will handle it
+            # Just ensure we have meters to calculate from
+            has_hw_data = len(hw_meters_with_data) > 0
+            has_cw_data = len(cw_meters_with_data) > 0
+            if not has_hw_data or not has_cw_data:
+                # Missing meters for one or both utilities - keep value as None (Unknown)
+                self._attr_native_value = None
+            else:
+                # We have meters for both utilities, async fetch will calculate the value
+                # Don't set value here - wait for async fetch to complete
+                self._attr_native_value = None
         else:
-            # We have meters but missing price data for one or both utilities - keep value as None (Unknown)
-            self._attr_native_value = None
+            # For metered costs, check if we have actual price data for both utilities
+            has_hw_price_data = any(
+                m.get("_has_price_data", False) for m in hw_meters_with_data
+            )
+            has_cw_price_data = any(
+                m.get("_has_price_data", False) for m in cw_meters_with_data
+            )
+
+            # Only set a value if we have price data for BOTH HW and CW
+            # This ensures the combined sensor only shows a value when both utilities have price data
+            # If either utility has no price data, we show Unknown rather than partial cost
+            # (showing partial data would be misleading - it looks like total combined cost but is missing one utility)
+            if has_hw_price_data and has_cw_price_data:
+                self._attr_native_value = round_to_max_digits(total_value)
+            else:
+                # We have meters but missing price data for one or both utilities - keep value as None (Unknown)
+                self._attr_native_value = None
 
         currency = self.coordinator.get_setting("Currency") or ""
         self._attr_native_unit_of_measurement = currency
@@ -2791,17 +2966,34 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         self._cw_meters_with_data = clean_cw_meters
         self._attr_available = True
 
-        _LOGGER.info(
-            "Updated %s: %s (HW=%.2f from %d meters, CW=%.2f from %d meters, has_price_data: HW=%s, CW=%s)",
-            self.entity_id,
-            self._attr_native_value,
-            hw_total,
-            len(clean_hw_meters),
-            cw_total,
-            len(clean_cw_meters),
-            has_hw_price_data,
-            has_cw_price_data,
-        )
+        if self._cost_type == "estimated":
+            _LOGGER.info(
+                "Updated %s: %s (HW=%.2f from %d meters, CW=%.2f from %d meters, cost_type=estimated, async fetch triggered)",
+                self.entity_id,
+                self._attr_native_value,
+                hw_total,
+                len(clean_hw_meters),
+                cw_total,
+                len(clean_cw_meters),
+            )
+        else:
+            has_hw_price_data = any(
+                m.get("_has_price_data", False) for m in hw_meters_with_data
+            )
+            has_cw_price_data = any(
+                m.get("_has_price_data", False) for m in cw_meters_with_data
+            )
+            _LOGGER.info(
+                "Updated %s: %s (HW=%.2f from %d meters, CW=%.2f from %d meters, has_price_data: HW=%s, CW=%s)",
+                self.entity_id,
+                self._attr_native_value,
+                hw_total,
+                len(clean_hw_meters),
+                cw_total,
+                len(clean_cw_meters),
+                has_hw_price_data,
+                has_cw_price_data,
+            )
 
         # Always write state when we have meters (even if value is None/Unknown)
         # This ensures meter_count and meters lists are visible
@@ -2809,14 +3001,26 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         if self._last_data_date:
             data_date = self._last_data_date.date()
 
-        # If we have price data for both, use the normal write method (which skips None values)
-        # If we don't have price data but have meters, write state directly to show attributes
-        if has_hw_price_data and has_cw_price_data:
-            self._async_write_ha_state_if_changed(data_date=data_date)
+        # For estimated costs, don't write state until async fetch completes with a value
+        # This prevents recording None/Unknown values to the database
+        # For metered costs, check if we have price data for both
+        if self._cost_type == "estimated":
+            # For estimated costs, don't write state yet - wait for async fetch to complete
+            # This prevents recording None/Unknown values to the database
+            # Attributes will be visible once async fetch completes and writes state with a valid value
+            _LOGGER.debug(
+                "Skipping state write for %s (estimated): waiting for async fetch to complete",
+                self.entity_id,
+            )
         else:
-            # Write state directly when value is None but we have meters
-            # This ensures meter_count and meters lists are visible even when value is Unknown
-            self.async_write_ha_state()
+            # For metered costs, use the variables defined in the else block above
+            # (has_hw_price_data and has_cw_price_data are defined at lines 2892-2896)
+            if has_hw_price_data and has_cw_price_data:
+                self._async_write_ha_state_if_changed(data_date=data_date)
+            else:
+                # Write state directly when value is None but we have meters
+                # This ensures meter_count and meters lists are visible even when value is Unknown
+                self.async_write_ha_state()
 
     async def _async_fetch_value(self) -> None:
         """Fetch estimated combined water cost by fetching costs for all HW and CW meters."""
@@ -2832,6 +3036,9 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         latest_timestamp = None
         hw_meters_with_data = []
         cw_meters_with_data = []
+        # Collect estimation metadata from both HW and CW (use first meter's metadata as representative)
+        hw_estimation_metadata: dict[str, Any] | None = None
+        cw_estimation_metadata: dict[str, Any] | None = None
 
         for installation in active_installations:
             registers = installation.get("Registers", [])
@@ -2866,6 +3073,20 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
                         if latest_timestamp is None or time_stamp > latest_timestamp:
                             latest_timestamp = time_stamp
 
+                    # Collect estimation metadata from first meter of each utility
+                    if utility_code == "HW" and hw_estimation_metadata is None:
+                        hw_estimation_metadata = {
+                            k: v
+                            for k, v in cost_data.items()
+                            if k in ESTIMATION_METADATA_KEYS and v is not None
+                        }
+                    elif utility_code == "CW" and cw_estimation_metadata is None:
+                        cw_estimation_metadata = {
+                            k: v
+                            for k, v in cost_data.items()
+                            if k in ESTIMATION_METADATA_KEYS and v is not None
+                        }
+
                     meter_info = {
                         "measuring_point_id": measuring_point_id,
                         "measuring_point_name": measuring_point_name,
@@ -2886,7 +3107,8 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         has_hw_data = len(hw_meters_with_data) > 0
         has_cw_data = len(cw_meters_with_data) > 0
 
-        if has_hw_data and has_cw_data and total_value > 0:
+        # Set value if we have data for both utilities (even if total_value is 0, that's a valid cost)
+        if has_hw_data and has_cw_data:
             self._attr_native_value = round_to_max_digits(total_value)
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
@@ -2894,6 +3116,13 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
                 self._last_data_date = datetime.fromtimestamp(latest_timestamp)
             self._hw_meters_with_data = hw_meters_with_data
             self._cw_meters_with_data = cw_meters_with_data
+            # Store estimation metadata (combine HW and CW metadata)
+            combined_metadata: dict[str, Any] = {}
+            if hw_estimation_metadata:
+                combined_metadata["hw"] = hw_estimation_metadata
+            if cw_estimation_metadata:
+                combined_metadata["cw"] = cw_estimation_metadata
+            self._estimation_metadata = combined_metadata if combined_metadata else None
             self._attr_available = True
 
             _LOGGER.info(

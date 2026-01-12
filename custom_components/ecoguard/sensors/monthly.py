@@ -29,6 +29,9 @@ from ..sensor_base import EcoGuardBaseSensor
 
 _LOGGER = logging.getLogger(__name__)
 
+# Import estimation metadata keys from daily module to maintain consistency
+from .daily import ESTIMATION_METADATA_KEYS
+
 
 class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
     """Sensor for monthly accumulated consumption or price."""
@@ -72,6 +75,8 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
         self._utility_code = utility_code
         self._aggregate_type = aggregate_type
         self._cost_type = cost_type
+        # Store estimation metadata for transparency
+        self._estimation_metadata: dict[str, Any] | None = None
 
         # Build sensor name
         # Use English defaults here; will be updated in async_added_to_hass
@@ -184,6 +189,14 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
                 }
                 for m in self._meters_with_data
             ]
+
+        # Add estimation metadata for transparency (only for estimated costs)
+        if (
+            self._aggregate_type == "price"
+            and self._cost_type == "estimated"
+            and self._estimation_metadata
+        ):
+            attrs["estimation"] = self._estimation_metadata
 
         return attrs
 
@@ -445,6 +458,14 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             self._current_year = aggregate_data.get("year")
             self._current_month = aggregate_data.get("month")
 
+            # Store estimation metadata for exposure in attributes (only for estimated costs)
+            if self._aggregate_type == "price" and self._cost_type == "estimated":
+                self._estimation_metadata = {
+                    k: v
+                    for k, v in aggregate_data.items()
+                    if k in ESTIMATION_METADATA_KEYS and v is not None
+                }
+
             # Populate meters_with_data for meter_count attribute
             active_installations = self.coordinator.get_active_installations()
             self._meters_with_data = self._collect_meters_with_data(
@@ -592,6 +613,14 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             )
             self._current_year = aggregate_data.get("year")
             self._current_month = aggregate_data.get("month")
+
+            # Store estimation metadata for exposure in attributes (only for estimated costs)
+            if self._aggregate_type == "price" and self._cost_type == "estimated":
+                self._estimation_metadata = {
+                    k: v
+                    for k, v in aggregate_data.items()
+                    if k in ESTIMATION_METADATA_KEYS and v is not None
+                }
 
             # Populate meters_with_data for meter_count attribute
             coordinator_data = self.coordinator.data
