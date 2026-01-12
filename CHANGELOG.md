@@ -5,6 +5,90 @@ All notable changes to the EcoGuard Home Assistant integration will be documente
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.2] - 2026-01-12
+
+### Fixed
+
+#### Estimated Cost Sensors Using Metered Cache
+- **Fixed estimated cost sensors showing stale values**: Estimated cost sensors now correctly calculate from current consumption data instead of using old metered cost cache
+  - **Problem**: Estimated cost sensors (e.g., `cost_daily_estimated_hot_water`) were incorrectly using metered cache data, causing them to show the same (stale) values as their metered counterparts despite an 11-day data lag
+  - **Solution**: Modified cache key selection and data retrieval logic to ensure estimated costs always trigger async fetch that calculates values from consumption data (Nord Pool spot prices for HW, billing rates for CW) and not from stale metered API data
+  - **Affected sensors**:
+    - `cost_daily_estimated_{utility}` (individual sensors)
+    - `cost_daily_estimated_{utility}` (aggregate sensors)
+    - `cost_daily_estimated_combined_water`
+    - `cost_monthly_accumulated_estimated_{utility}`
+  - **Behavior**: Estimated sensors now show different, more current values than metered sensors, correctly reflecting real-time calculations
+
+#### Recording "Unknown" Values for Estimated Costs
+- **Fixed estimated sensors recording None values**: Estimated cost sensors now defer state writes until async fetch completes with valid data
+  - **Problem**: Estimated sensors were writing "Unknown" values to the database before async fetch completed, polluting historical data
+  - **Solution**: Modified state writing logic to skip writes in `_update_from_coordinator_data` for estimated costs and only write when `_async_fetch_value` completes with valid data
+  - **Behavior**: Sensors no longer record "Unknown" values while still allowing attributes to be visible once valid data is available
+
+### Added
+
+#### Estimation Metadata Exposure
+- **Transparency for estimated cost calculations**: All estimated cost sensors now expose detailed calculation metadata in their attributes
+  - **Access**: View metadata via Developer Tools → States → sensor → Attributes → `estimation`
+  - **Metadata structure**:
+    - Individual/aggregate sensors: Flat dictionary with all calculation details
+    - Combined water sensors: Nested structure with `hw` (hot water) and `cw` (cold water) keys
+  - **Available metadata fields** (14 total):
+    - `calculation_method`: Method used (e.g., "spot_price_calibrated", "billing_rate")
+    - `consumption_m3`: Water consumption in cubic meters
+    - `energy_per_m3_kwh`: Energy required per cubic meter
+    - `total_energy_kwh`: Total energy required
+    - `spot_price_per_kwh`: Nord Pool spot price used
+    - `spot_price_currency`: Currency of spot price
+    - `heating_cost`: Cost of heating the water
+    - `calibration_ratio`: Calibration ratio applied to spot prices
+    - `base_heating_cost`: Base heating cost before calibration
+    - `cold_water_rate_nok_per_m3`: Cold water rate
+    - `cold_water_cost`: Cost of cold water
+    - `nord_pool_area`: Nord Pool price area used
+    - `price_source`: Source of price data
+    - `rate_per_m3`: Billing rate per cubic meter (for non-HW utilities)
+  - **Affected sensors**: All estimated cost sensors (daily individual, daily aggregate, daily combined, monthly accumulated)
+  - **Benefit**: Users can now see exactly how estimated costs are calculated, making "magic numbers" transparent and understandable
+
+### Technical Improvements
+
+#### Code Refactoring
+- **Extracted estimation metadata keys to constant**: `ESTIMATION_METADATA_KEYS` module-level constant for better maintainability
+  - Defined in `daily.py` and imported in `monthly.py`
+  - Replaced 7 inline `metadata_keys` lists with constant reference
+  - Ensures consistency across all sensor types
+  - Makes it easier to add or remove metadata fields in the future
+
+#### Coordinator Enhancements
+- **Enhanced `get_latest_estimated_cost` method**: Now passes through detailed calculation metadata
+  - Hot water calculations include full Nord Pool spot price details with calibration
+  - Other utilities include billing rate information
+  - All metadata available for sensor attribute exposure
+
+#### Testing
+- **Added comprehensive test suite**: 11 new tests covering estimated cost sensor fixes
+  - Tests verify estimated sensors don't use metered cache
+  - Tests verify estimation metadata is exposed in attributes
+  - Tests verify state is not written when value is None
+  - Tests verify async fetch is triggered for estimated costs
+  - Tests verify estimated and metered sensors show different values
+  - All tests passing (11/11)
+
+#### Documentation
+- **Added estimation metadata documentation**: New section in README explaining:
+  - How to access estimation metadata
+  - Metadata structure for different sensor types
+  - Complete table of all available metadata fields
+  - Which fields are available for which utility types
+
+### Impact
+- Estimated cost sensors now provide accurate, real-time values instead of stale cached data
+- Users have full transparency into how estimated costs are calculated
+- Historical database is no longer polluted with "Unknown" values from estimated sensors
+- Improved data accuracy and user trust in estimated cost calculations
+
 ## [3.3.1] - 2026-01-12
 
 ### Fixed
