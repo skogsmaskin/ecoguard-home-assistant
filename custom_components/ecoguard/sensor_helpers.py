@@ -186,6 +186,7 @@ def create_monthly_meter_data_getter(
         A callback function that takes (measuring_point_id, utility_code)
         and returns meter data dict or None.
     """
+
     def get_meter_data(
         measuring_point_id: int, utility_code: str
     ) -> dict[str, Any] | None:
@@ -224,7 +225,9 @@ def create_monthly_meter_data_getter(
             if cost_type == "actual":
                 # For actual cost: try daily price cache, but if no data exists, return 0 to include the meter
                 if daily_price_cache:
-                    daily_price_cache_key = f"{utility_code}_{measuring_point_id}_metered"
+                    daily_price_cache_key = (
+                        f"{utility_code}_{measuring_point_id}_metered"
+                    )
                     daily_prices = daily_price_cache.get(daily_price_cache_key)
 
                     if daily_prices:
@@ -239,12 +242,14 @@ def create_monthly_meter_data_getter(
 
                         if month_prices:
                             total_value = sum(p["value"] for p in month_prices)
-                            unit = month_prices[0].get("unit", "") if month_prices else ""
+                            unit = (
+                                month_prices[0].get("unit", "") if month_prices else ""
+                            )
                             return {
                                 "value": total_value,
                                 "unit": unit,
                             }
-                
+
                 # No price data found - return 0 to include the meter in the count
                 # This ensures meters are counted even when price data is not available
                 currency = "NOK"  # Default unit, will be overridden by sensor if needed

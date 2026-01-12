@@ -122,7 +122,7 @@ def main():
     github_event_name = os.environ.get("GITHUB_EVENT_NAME", "")
     github_base_ref = os.environ.get("GITHUB_BASE_REF")
     github_before = os.environ.get("GITHUB_BEFORE")  # SHA before push
-    github_after = os.environ.get("GITHUB_AFTER")    # SHA after push
+    os.environ.get("GITHUB_AFTER")    # SHA after push
     github_pr_title = os.environ.get("GITHUB_PR_TITLE", "")  # PR title (for squash merge)
 
     # Validate PR title if this is a pull request (important for squash merges)

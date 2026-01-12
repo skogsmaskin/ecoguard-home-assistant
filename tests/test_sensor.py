@@ -142,7 +142,10 @@ async def test_daily_consumption_sensor_fetch_value(hass: HomeAssistant, coordin
     )
 
     # unique_id format when measuring_point_name is None: ecoguard_consumption_daily_metered_{utility_slug}_meter_mp{measuring_point_id}
-    assert sensor._attr_unique_id == "ecoguard_consumption_daily_metered_cold_water_meter_mp1"
+    assert (
+        sensor._attr_unique_id
+        == "ecoguard_consumption_daily_metered_cold_water_meter_mp1"
+    )
 
     # Set hass on sensor (normally done by async_added_to_hass)
     sensor.hass = hass
@@ -1066,6 +1069,7 @@ async def test_monthly_accumulated_sensor_consumption_with_meter_count(
 
     # Calculate month boundaries for filtering daily values
     from datetime import timezone
+
     from_date = datetime(year, month, 1, tzinfo=timezone.utc)
     if month == 12:
         to_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
@@ -1073,7 +1077,7 @@ async def test_monthly_accumulated_sensor_consumption_with_meter_count(
         to_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
 
     from_time = int(from_date.timestamp())
-    to_time = int(to_date.timestamp())
+    int(to_date.timestamp())
 
     # Set up coordinator data with:
     # 1. Monthly aggregate cache (only aggregate entry, no per-meter entries)
@@ -1163,6 +1167,7 @@ async def test_monthly_accumulated_sensor_cost_with_meter_count(
 
     # Calculate month boundaries for filtering daily values
     from datetime import timezone
+
     from_date = datetime(year, month, 1, tzinfo=timezone.utc)
     if month == 12:
         to_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
@@ -1170,7 +1175,7 @@ async def test_monthly_accumulated_sensor_cost_with_meter_count(
         to_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
 
     from_time = int(from_date.timestamp())
-    to_time = int(to_date.timestamp())
+    int(to_date.timestamp())
 
     # Set up coordinator data with:
     # 1. Monthly aggregate cache (only aggregate entry, no per-meter entries)
@@ -1261,6 +1266,7 @@ async def test_monthly_combined_water_sensor_with_meter_count(
 
     # Calculate month boundaries for filtering daily values
     from datetime import timezone
+
     from_date = datetime(year, month, 1, tzinfo=timezone.utc)
     if month == 12:
         to_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
@@ -1268,7 +1274,7 @@ async def test_monthly_combined_water_sensor_with_meter_count(
         to_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
 
     from_time = int(from_date.timestamp())
-    to_time = int(to_date.timestamp())
+    int(to_date.timestamp())
 
     # Set up coordinator data with:
     # 1. Monthly aggregate cache (only aggregate entries, no per-meter entries)
@@ -1312,8 +1318,14 @@ async def test_monthly_combined_water_sensor_with_meter_count(
         },
     }
     coordinator._installations = [
-        {"MeasuringPointID": 1, "Registers": [{"UtilityCode": "HW"}, {"UtilityCode": "CW"}]},
-        {"MeasuringPointID": 2, "Registers": [{"UtilityCode": "HW"}, {"UtilityCode": "CW"}]},
+        {
+            "MeasuringPointID": 1,
+            "Registers": [{"UtilityCode": "HW"}, {"UtilityCode": "CW"}],
+        },
+        {
+            "MeasuringPointID": 2,
+            "Registers": [{"UtilityCode": "HW"}, {"UtilityCode": "CW"}],
+        },
     ]
     coordinator._measuring_points = [
         {"ID": 1, "Name": "Water Meter 1"},
