@@ -797,50 +797,164 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
             return
 
         # Fallback: Sum consumption across all meters for this utility
+        # First pass: collect all last data dates for all meters
+        # This allows us to find the most recent date where ALL meters have data
         active_installations = self.coordinator.get_active_installations()
-        meters_with_data = self._collect_meters_with_data(
-            active_installations, consumption_cache
+        meter_info_map: dict[int, dict[str, Any]] = {}
+        actual_last_data_dates: list[datetime] = []
+
+        for installation in active_installations:
+            registers = installation.get("Registers", [])
+            measuring_point_id = installation.get("MeasuringPointID")
+
+            # Check if this installation has the utility we're looking for
+            has_utility = False
+            for register in registers:
+                if register.get("UtilityCode") == self._utility_code:
+                    has_utility = True
+                    break
+
+            if not has_utility:
+                continue
+
+            cache_key = f"{self._utility_code}_{measuring_point_id}"
+            meter_daily_cache = daily_consumption_cache.get(cache_key, [])
+            meter_last_date = find_last_data_date(meter_daily_cache, tz)
+
+            # Fallback: if daily cache doesn't have data, use timestamp from latest cache
+            if not meter_last_date:
+                consumption_data = consumption_cache.get(cache_key)
+                if consumption_data and consumption_data.get("time"):
+                    consumption_timestamp = consumption_data.get("time")
+                    meter_last_date = datetime.fromtimestamp(
+                        consumption_timestamp, tz=tz
+                    )
+
+            if meter_last_date:
+                actual_last_data_dates.append(meter_last_date)
+
+            # Store meter info for second pass
+            meter_info_map[measuring_point_id] = {
+                "measuring_point_id": measuring_point_id,
+                "cache_key": cache_key,
+                "meter_last_date": meter_last_date,
+            }
+
+        # Find the most recent date where ALL meters have data
+        # This is the minimum of all last data dates (most conservative)
+        common_data_date = (
+            min(actual_last_data_dates) if actual_last_data_dates else None
         )
 
-        # Calculate total and track latest timestamp
+        # Normalize to end of day (23:59:59) to include all entries from that day
+        # This ensures we compare dates at the day level, not exact timestamps
+        if common_data_date:
+            # Get the date (without time) and set to end of day
+            common_data_date_normalized = common_data_date.replace(
+                hour=23, minute=59, second=59, microsecond=999999
+            )
+            common_data_timestamp = int(common_data_date_normalized.timestamp())
+        else:
+            common_data_timestamp = None
+
+        if common_data_date:
+            _LOGGER.debug(
+                "Using common data date %s (normalized to end of day, timestamp %s) for %s (ensuring all meters use data from the same date)",
+                common_data_date.strftime("%Y-%m-%d"),
+                common_data_timestamp,
+                self.entity_id,
+            )
+
+        # Second pass: fetch consumption data, but only use entries from common_data_date or earlier
+        # This ensures all meters use data from the same date
         total_value = 0.0
         unit = None
         latest_timestamp = None
+        meters_with_data = []
 
-        for meter in meters_with_data:
-            value = meter.get("value", 0.0)
-            total_value += value
-
-            # Get unit and timestamp from cache
-            measuring_point_id = meter.get("measuring_point_id")
-            cache_key = f"{self._utility_code}_{measuring_point_id}"
+        for measuring_point_id, meter_info in meter_info_map.items():
+            cache_key = meter_info["cache_key"]
             consumption_data = consumption_cache.get(cache_key)
 
-            if consumption_data:
-                # Use unit from first meter with data
-                if unit is None:
-                    unit = consumption_data.get("unit")
+            # Check if this meter has consumption data
+            value = None
+            time_stamp = None
+
+            # Only proceed if we have a common_data_timestamp to ensure all meters use data from the same date
+            if common_data_timestamp:
+                # First, try to use consumption_data from latest_consumption_cache if it's from common_data_date or earlier
+                if consumption_data:
+                    consumption_timestamp = consumption_data.get("time")
+                    # Only use consumption_data if it's from common_data_date or earlier
+                    # This ensures all meters use data from the same date
+                    if (
+                        consumption_timestamp
+                        and consumption_timestamp <= common_data_timestamp
+                    ):
+                        if consumption_data.get("value") is not None:
+                            value = consumption_data.get("value", 0.0)
+                            time_stamp = consumption_timestamp
+                            # Use unit from first meter with data
+                            if unit is None:
+                                unit = consumption_data.get("unit")
+
+                # If we didn't find valid consumption_data (either it doesn't exist or is too new),
+                # fall back to daily_consumption_cache to find the latest entry from common_data_date or earlier
+                if value is None:
+                    meter_daily_cache = daily_consumption_cache.get(cache_key, [])
+                    if meter_daily_cache:
+                        # Filter to only use entries from common_data_date or earlier
+                        # Then find the most recent entry using max() instead of sorting
+                        valid_entries = [
+                            p
+                            for p in meter_daily_cache
+                            if p.get("time")
+                            and p.get("time") <= common_data_timestamp
+                            and p.get("value") is not None
+                        ]
+
+                        if valid_entries:
+                            # Find the entry with the maximum timestamp (most recent)
+                            consumption_entry = max(
+                                valid_entries, key=lambda x: x.get("time", 0)
+                            )
+                            consumption_value = consumption_entry.get("value")
+                            if consumption_value is not None:
+                                value = consumption_value
+                                time_stamp = consumption_entry.get("time")
+                                # Use unit from first meter with data
+                                if unit is None:
+                                    unit = consumption_entry.get("unit")
+
+            # Include meter in the list even if no consumption data found (for meter_count)
+            # But only add to total_value if we have actual consumption data
+            if value is not None:
+                total_value += value
 
                 # Track latest timestamp
-                time_stamp = consumption_data.get("time")
                 if time_stamp:
                     if latest_timestamp is None or time_stamp > latest_timestamp:
                         latest_timestamp = time_stamp
 
-        # Find actual last data date from daily consumption cache (fallback case)
-        if not actual_last_data_date and latest_timestamp:
-            # Check individual meter caches
-            for installation in active_installations:
-                measuring_point_id = installation.get("MeasuringPointID")
-                cache_key = f"{self._utility_code}_{measuring_point_id}"
-                meter_daily_cache = daily_consumption_cache.get(cache_key, [])
-                meter_last_date = find_last_data_date(meter_daily_cache, tz)
-                if meter_last_date:
-                    if (
-                        actual_last_data_date is None
-                        or meter_last_date > actual_last_data_date
-                    ):
-                        actual_last_data_date = meter_last_date
+            # Always add meter to list (with value 0 if no data, for meter_count purposes)
+            meter_info_dict = {
+                "measuring_point_id": measuring_point_id,
+                "measuring_point_name": None,  # Will be populated by _collect_meters_with_data if needed
+                "value": value if value is not None else 0.0,
+            }
+            meters_with_data.append(meter_info_dict)
+
+        # Update meter names from coordinator
+        for meter in meters_with_data:
+            measuring_point_id = meter.get("measuring_point_id")
+            for mp in self.coordinator.get_measuring_points():
+                if mp.get("ID") == measuring_point_id:
+                    meter["measuring_point_name"] = mp.get("Name")
+                    break
+
+        # Use the common_data_date (most recent date where all meters have data)
+        # This is the date we used for fetching consumption data, ensuring all meters use data from the same date
+        actual_last_data_date = common_data_date
 
         if total_value > 0:
             self._attr_native_value = round_to_max_digits(total_value)
@@ -1018,8 +1132,12 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
         latest_timestamp = None
         hw_meters_with_data = []
         cw_meters_with_data = []
-        hw_last_data_date: datetime | None = None
-        cw_last_data_date: datetime | None = None
+        hw_last_data_dates: list[datetime] = []
+        cw_last_data_dates: list[datetime] = []
+
+        # First pass: collect all last data dates for all meters
+        # This allows us to find the most recent date where ALL meters have data
+        meter_info_map: dict[tuple[str, int], dict[str, Any]] = {}
 
         for installation in active_installations:
             registers = installation.get("Registers", [])
@@ -1040,52 +1158,153 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
 
                 # Read consumption from cache (no API call)
                 cache_key = f"{utility_code}_{measuring_point_id}"
-                consumption_data = consumption_cache.get(cache_key)
 
                 # Find actual last data date from daily consumption cache
                 meter_daily_cache = daily_consumption_cache.get(cache_key, [])
                 meter_last_date = find_last_data_date(meter_daily_cache, tz)
 
-                if consumption_data and consumption_data.get("value") is not None:
-                    value = consumption_data.get("value", 0.0)
+                # Fallback: if daily cache doesn't have data, use timestamp from latest cache
+                if not meter_last_date:
+                    consumption_data = consumption_cache.get(cache_key)
+                    if consumption_data and consumption_data.get("time"):
+                        consumption_timestamp = consumption_data.get("time")
+                        meter_last_date = datetime.fromtimestamp(
+                            consumption_timestamp, tz=tz
+                        )
 
-                    # Use unit from first meter with data
-                    if unit is None:
-                        unit = consumption_data.get("unit")
-
-                    # Track latest timestamp
-                    time_stamp = consumption_data.get("time")
-                    if time_stamp:
-                        if latest_timestamp is None or time_stamp > latest_timestamp:
-                            latest_timestamp = time_stamp
-
-                    # Track last data date per utility
-                    if meter_last_date:
-                        if utility_code == "HW":
-                            if (
-                                hw_last_data_date is None
-                                or meter_last_date > hw_last_data_date
-                            ):
-                                hw_last_data_date = meter_last_date
-                        elif utility_code == "CW":
-                            if (
-                                cw_last_data_date is None
-                                or meter_last_date > cw_last_data_date
-                            ):
-                                cw_last_data_date = meter_last_date
-
-                    meter_info = {
-                        "measuring_point_id": measuring_point_id,
-                        "measuring_point_name": measuring_point_name,
-                        "value": value,
-                    }
-
+                if meter_last_date:
                     if utility_code == "HW":
-                        hw_total += value
-                        hw_meters_with_data.append(meter_info)
+                        hw_last_data_dates.append(meter_last_date)
                     elif utility_code == "CW":
-                        cw_total += value
-                        cw_meters_with_data.append(meter_info)
+                        cw_last_data_dates.append(meter_last_date)
+
+                # Store meter info for second pass
+                meter_info_map[(utility_code, measuring_point_id)] = {
+                    "utility_code": utility_code,
+                    "measuring_point_id": measuring_point_id,
+                    "measuring_point_name": measuring_point_name,
+                    "cache_key": cache_key,
+                    "meter_last_date": meter_last_date,
+                }
+
+        # Find the most recent date where ALL meters have data
+        # This is the minimum of all last data dates (most conservative)
+        all_last_dates = []
+        if hw_last_data_dates:
+            all_last_dates.extend(hw_last_data_dates)
+        if cw_last_data_dates:
+            all_last_dates.extend(cw_last_data_dates)
+
+        # Use the earliest date where all meters have data
+        # This ensures we only use data from dates where all meters have data available
+        common_data_date = min(all_last_dates) if all_last_dates else None
+
+        # Normalize to end of day (23:59:59) to include all entries from that day
+        # This ensures we compare dates at the day level, not exact timestamps
+        if common_data_date:
+            # Get the date (without time) and set to end of day
+            common_data_date_normalized = common_data_date.replace(
+                hour=23, minute=59, second=59, microsecond=999999
+            )
+            common_data_timestamp = int(common_data_date_normalized.timestamp())
+        else:
+            common_data_timestamp = None
+
+        if common_data_date:
+            _LOGGER.debug(
+                "Using common data date %s (normalized to end of day, timestamp %s) for %s (ensuring all meters use data from the same date). HW dates: %s, CW dates: %s",
+                common_data_date.strftime("%Y-%m-%d"),
+                common_data_timestamp,
+                self.entity_id,
+                (
+                    [d.strftime("%Y-%m-%d") for d in hw_last_data_dates]
+                    if hw_last_data_dates
+                    else []
+                ),
+                (
+                    [d.strftime("%Y-%m-%d") for d in cw_last_data_dates]
+                    if cw_last_data_dates
+                    else []
+                ),
+            )
+
+        # Second pass: fetch consumption data, but only use entries from common_data_date or earlier
+        # This ensures all meters use data from the same date
+        for (utility_code, measuring_point_id), meter_info in meter_info_map.items():
+            cache_key = meter_info["cache_key"]
+            measuring_point_name = meter_info["measuring_point_name"]
+            consumption_data = consumption_cache.get(cache_key)
+
+            # Check if this meter has consumption data
+            value = None
+            time_stamp = None
+
+            # Only proceed if we have a common_data_timestamp to ensure all meters use data from the same date
+            if common_data_timestamp:
+                # First, try to use consumption_data from latest_consumption_cache if it's from common_data_date or earlier
+                if consumption_data:
+                    consumption_timestamp = consumption_data.get("time")
+                    # Only use consumption_data if it's from common_data_date or earlier
+                    # This ensures all meters use data from the same date
+                    if (
+                        consumption_timestamp
+                        and consumption_timestamp <= common_data_timestamp
+                    ):
+                        if consumption_data.get("value") is not None:
+                            value = consumption_data.get("value", 0.0)
+                            time_stamp = consumption_timestamp
+                            # Use unit from first meter with data
+                            if unit is None:
+                                unit = consumption_data.get("unit")
+
+                # If we didn't find valid consumption_data (either it doesn't exist or is too new),
+                # fall back to daily_consumption_cache to find the latest entry from common_data_date or earlier
+                if value is None:
+                    meter_daily_cache = daily_consumption_cache.get(cache_key, [])
+                    if meter_daily_cache:
+                        # Filter to only use entries from common_data_date or earlier
+                        # Then find the most recent entry using max() instead of sorting
+                        valid_entries = [
+                            p
+                            for p in meter_daily_cache
+                            if p.get("time")
+                            and p.get("time") <= common_data_timestamp
+                            and p.get("value") is not None
+                        ]
+
+                        if valid_entries:
+                            # Find the entry with the maximum timestamp (most recent)
+                            consumption_entry = max(
+                                valid_entries, key=lambda x: x.get("time", 0)
+                            )
+                            consumption_value = consumption_entry.get("value")
+                            if consumption_value is not None:
+                                value = consumption_value
+                                time_stamp = consumption_entry.get("time")
+                                # Use unit from first meter with data
+                                if unit is None:
+                                    unit = consumption_entry.get("unit")
+
+            # Include meter in the list even if no consumption data found (for meter_count)
+            # But only add to totals if we have actual consumption data
+            if value is not None:
+                # Track latest timestamp
+                if time_stamp:
+                    if latest_timestamp is None or time_stamp > latest_timestamp:
+                        latest_timestamp = time_stamp
+
+                meter_info_dict = {
+                    "measuring_point_id": measuring_point_id,
+                    "measuring_point_name": measuring_point_name,
+                    "value": value,
+                }
+
+                if utility_code == "HW":
+                    hw_total += value
+                    hw_meters_with_data.append(meter_info_dict)
+                elif utility_code == "CW":
+                    cw_total += value
+                    cw_meters_with_data.append(meter_info_dict)
 
         total_value = hw_total + cw_total
         old_value = self._attr_native_value
@@ -1096,14 +1315,10 @@ class EcoGuardDailyCombinedWaterSensor(EcoGuardBaseSensor):
         has_hw_data = len(hw_meters_with_data) > 0
         has_cw_data = len(cw_meters_with_data) > 0
 
-        # Use the earliest of HW and CW last data dates (most conservative)
-        # This ensures we show lag if either utility is lagging
-        if hw_last_data_date and cw_last_data_date:
-            self._last_data_date = min(hw_last_data_date, cw_last_data_date)
-        elif hw_last_data_date:
-            self._last_data_date = hw_last_data_date
-        elif cw_last_data_date:
-            self._last_data_date = cw_last_data_date
+        # Use the common_data_date (most recent date where all meters have data)
+        # This is the date we used for fetching consumption data, ensuring all meters use data from the same date
+        if common_data_date:
+            self._last_data_date = common_data_date
         elif latest_timestamp:
             self._last_data_date = datetime.fromtimestamp(latest_timestamp, tz=tz)
         else:
@@ -1727,11 +1942,10 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
         timezone_str = self.coordinator.get_setting("TimeZoneIANA") or "UTC"
         tz = get_timezone(timezone_str)
 
-        # Sum costs across all meters for this utility
+        # First pass: collect all last data dates for all meters
+        # This allows us to find the most recent date where ALL meters have data
         active_installations = self.coordinator.get_active_installations()
-        total_value = 0.0
-        latest_timestamp = None
-        meters_with_data = []
+        meter_info_map: dict[int, dict[str, Any]] = {}
         actual_last_data_dates: list[datetime] = []
 
         for installation in active_installations:
@@ -1760,7 +1974,6 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             # For estimated costs, use metered cost if available (estimated = metered when metered exists)
             cache_key = f"{self._utility_code}_{measuring_point_id}_metered"
             consumption_cache_key = f"{self._utility_code}_{measuring_point_id}"
-            cost_data = cost_cache.get(cache_key)
 
             # Find actual last data date for this meter
             if self._cost_type == "actual":
@@ -1774,42 +1987,106 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
                 )
                 meter_last_date = find_last_data_date(consumption_daily_cache, tz)
 
+            # Fallback: if daily cache doesn't have data, use timestamp from latest cache
+            if not meter_last_date:
+                cost_data = cost_cache.get(cache_key)
+                if cost_data and cost_data.get("time"):
+                    cost_timestamp = cost_data.get("time")
+                    meter_last_date = datetime.fromtimestamp(cost_timestamp, tz=tz)
+
             if meter_last_date:
                 actual_last_data_dates.append(meter_last_date)
 
+            # Store meter info for second pass
+            meter_info_map[measuring_point_id] = {
+                "measuring_point_id": measuring_point_id,
+                "measuring_point_name": measuring_point_name,
+                "cache_key": cache_key,
+                "consumption_cache_key": consumption_cache_key,
+                "meter_last_date": meter_last_date,
+            }
+
+        # Find the most recent date where ALL meters have data
+        # This is the minimum of all last data dates (most conservative)
+        common_data_date = (
+            min(actual_last_data_dates) if actual_last_data_dates else None
+        )
+
+        # Normalize to end of day (23:59:59) to include all entries from that day
+        # This ensures we compare dates at the day level, not exact timestamps
+        if common_data_date:
+            # Get the date (without time) and set to end of day
+            common_data_date_normalized = common_data_date.replace(
+                hour=23, minute=59, second=59, microsecond=999999
+            )
+            common_data_timestamp = int(common_data_date_normalized.timestamp())
+        else:
+            common_data_timestamp = None
+
+        if common_data_date:
+            _LOGGER.debug(
+                "Using common data date %s (normalized to end of day, timestamp %s) for %s (ensuring all meters use data from the same date)",
+                common_data_date.strftime("%Y-%m-%d"),
+                common_data_timestamp,
+                self.entity_id,
+            )
+
+        # Second pass: fetch cost data, but only use entries from common_data_date or earlier
+        # This ensures all meters use data from the same date
+        total_value = 0.0
+        latest_timestamp = None
+        meters_with_data = []
+
+        for measuring_point_id, meter_info in meter_info_map.items():
+            cache_key = meter_info["cache_key"]
+            consumption_cache_key = meter_info["consumption_cache_key"]
+            measuring_point_name = meter_info["measuring_point_name"]
+            cost_data = cost_cache.get(cache_key)
+
             # Check if this meter has cost data
-            # First try latest_cost_cache, then fallback to daily_price_cache
-            # Track whether we found any price data (even if 0) vs no data at all
+            # Track whether we found actual price data (even if 0) vs no data at all
             value = None
             time_stamp = None
             has_price_data_for_meter = False
 
-            if cost_data:
-                # cost_data exists - check if it has a value (including 0)
-                if cost_data.get("value") is not None:
-                    value = cost_data.get("value", 0.0)
-                    time_stamp = cost_data.get("time")
-                    has_price_data_for_meter = True
-            elif self._cost_type == "actual":
-                # Fallback: check daily_price_cache if cost_data not in latest_cost_cache
-                # This handles cases where cost might be 0 or not yet in latest_cost_cache
-                # (e.g., for hot water where cost might be calculated but not cached)
-                price_daily_cache = daily_price_cache.get(cache_key, [])
-                if price_daily_cache:
-                    # Get the latest price value (most recent, including 0)
-                    sorted_prices = sorted(
-                        price_daily_cache,
-                        key=lambda x: x.get("time", 0),
-                        reverse=True,
-                    )
-                    for price_entry in sorted_prices:
-                        price_value = price_entry.get("value")
-                        if price_value is not None:
+            # Only proceed if we have a common_data_timestamp to ensure all meters use data from the same date
+            if common_data_timestamp:
+                # First, try to use cost_data from latest_cost_cache if it's from common_data_date or earlier
+                if cost_data:
+                    cost_timestamp = cost_data.get("time")
+                    # Only use cost_data if it's from common_data_date or earlier
+                    # This ensures all meters use data from the same date
+                    if cost_timestamp and cost_timestamp <= common_data_timestamp:
+                        if cost_data.get("value") is not None:
+                            value = cost_data.get("value", 0.0)
+                            time_stamp = cost_timestamp
+                            has_price_data_for_meter = True
+
+                # If we didn't find valid cost_data (either it doesn't exist or is too new),
+                # fall back to daily_price_cache to find the latest entry from common_data_date or earlier
+                if not has_price_data_for_meter and self._cost_type == "actual":
+                    price_daily_cache = daily_price_cache.get(cache_key, [])
+                    if price_daily_cache:
+                        # Filter to only use entries from common_data_date or earlier
+                        # Then find the most recent entry using max() instead of sorting
+                        valid_entries = [
+                            p
+                            for p in price_daily_cache
+                            if p.get("time")
+                            and p.get("time") <= common_data_timestamp
+                            and p.get("value") is not None
+                        ]
+
+                        if valid_entries:
+                            # Find the entry with the maximum timestamp (most recent)
+                            price_entry = max(
+                                valid_entries, key=lambda x: x.get("time", 0)
+                            )
+                            price_value = price_entry.get("value")
                             # Include even if 0, as 0 is a valid cost value
                             value = price_value if price_value > 0 else 0.0
                             time_stamp = price_entry.get("time")
                             has_price_data_for_meter = True
-                            break
 
             # Include meter in the list even if no price data found (for meter_count)
             # But only add to total_value if we have actual price data
@@ -1823,15 +2100,15 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
 
             # Always add meter to list (with value 0 if no data, for meter_count purposes)
             # This ensures all meters are counted, even when price data is not available
-            meter_info = {
+            meter_info_dict = {
                 "measuring_point_id": measuring_point_id,
                 "measuring_point_name": measuring_point_name,
                 "value": value if value is not None else 0.0,
             }
             # Track if this meter has price data (for determining if sensor should show Unknown)
             if has_price_data_for_meter:
-                meter_info["_has_price_data"] = True
-            meters_with_data.append(meter_info)
+                meter_info_dict["_has_price_data"] = True
+            meters_with_data.append(meter_info_dict)
 
         # Always populate meters_with_data for meter_count, even if no price data exists
         # But only set sensor value if we have actual price data
@@ -1858,9 +2135,10 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
         if meters_with_data:
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
-            # Use actual last data date if available (most recent across all meters), otherwise fall back to latest timestamp
-            if actual_last_data_dates:
-                self._last_data_date = max(actual_last_data_dates)
+            # Use the common_data_date (most recent date where all meters have data)
+            # This is the date we used for fetching cost data, ensuring all meters use data from the same date
+            if common_data_date:
+                self._last_data_date = common_data_date
             elif latest_timestamp:
                 self._last_data_date = datetime.fromtimestamp(latest_timestamp, tz=tz)
             else:
@@ -2207,6 +2485,10 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         hw_last_data_dates: list[datetime] = []
         cw_last_data_dates: list[datetime] = []
 
+        # First pass: collect all last data dates for all meters
+        # This allows us to find the most recent date where ALL meters have data
+        meter_info_map: dict[tuple[str, int], dict[str, Any]] = {}
+
         for installation in active_installations:
             registers = installation.get("Registers", [])
             measuring_point_id = installation.get("MeasuringPointID")
@@ -2227,7 +2509,6 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
                 # Read cost from cache (no API call)
                 cache_key = f"{utility_code}_{measuring_point_id}_metered"
                 consumption_cache_key = f"{utility_code}_{measuring_point_id}"
-                cost_data = cost_cache.get(cache_key)
 
                 # Find actual last data date for this meter
                 if self._cost_type == "actual":
@@ -2241,71 +2522,178 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
                     )
                     meter_last_date = find_last_data_date(consumption_daily_cache, tz)
 
+                # Fallback: if daily cache doesn't have data, use timestamp from latest cache
+                if not meter_last_date:
+                    cost_data = cost_cache.get(cache_key)
+                    if cost_data and cost_data.get("time"):
+                        cost_timestamp = cost_data.get("time")
+                        meter_last_date = datetime.fromtimestamp(cost_timestamp, tz=tz)
+
                 if meter_last_date:
                     if utility_code == "HW":
                         hw_last_data_dates.append(meter_last_date)
                     elif utility_code == "CW":
                         cw_last_data_dates.append(meter_last_date)
 
-                # Check if this meter has cost data
-                # Track whether we found actual price data (even if 0) vs no data at all
-                value = None
-                time_stamp = None
-                has_price_data_for_meter = False
-
-                if cost_data:
-                    # cost_data exists - check if it has a value (including 0)
-                    if cost_data.get("value") is not None:
-                        value = cost_data.get("value", 0.0)
-                        time_stamp = cost_data.get("time")
-                        has_price_data_for_meter = True
-                elif self._cost_type == "actual":
-                    # Fallback: check daily_price_cache if cost_data not in latest_cost_cache
-                    price_daily_cache = daily_price_cache.get(cache_key, [])
-                    if price_daily_cache:
-                        # Get the latest price value (most recent, including 0)
-                        sorted_prices = sorted(
-                            price_daily_cache,
-                            key=lambda x: x.get("time", 0),
-                            reverse=True,
-                        )
-                        for price_entry in sorted_prices:
-                            price_value = price_entry.get("value")
-                            if price_value is not None:
-                                # Include even if 0, as 0 is a valid cost value
-                                value = price_value if price_value > 0 else 0.0
-                                time_stamp = price_entry.get("time")
-                                has_price_data_for_meter = True
-                                break
-
-                # Include meter in the list even if no price data found (for meter_count)
-                # But only add to totals if we have actual price data
-                if value is not None:
-                    # Track latest timestamp
-                    if time_stamp:
-                        if latest_timestamp is None or time_stamp > latest_timestamp:
-                            latest_timestamp = time_stamp
-
-                    if utility_code == "HW":
-                        hw_total += value
-                    elif utility_code == "CW":
-                        cw_total += value
-
-                # Always add meter to list (with value 0 if no data, for meter_count purposes)
-                # This ensures all meters are counted, even when price data is not available
-                meter_info = {
+                # Store meter info for second pass
+                meter_info_map[(utility_code, measuring_point_id)] = {
+                    "utility_code": utility_code,
                     "measuring_point_id": measuring_point_id,
                     "measuring_point_name": measuring_point_name,
-                    "value": value if value is not None else 0.0,
+                    "cache_key": cache_key,
+                    "consumption_cache_key": consumption_cache_key,
+                    "meter_last_date": meter_last_date,
                 }
-                # Track if this meter has price data (for determining if sensor should show Unknown)
-                if has_price_data_for_meter:
-                    meter_info["_has_price_data"] = True
+
+        # Find the most recent date where ALL meters have data
+        # This is the minimum of all last data dates (most conservative)
+        all_last_dates = []
+        if hw_last_data_dates:
+            all_last_dates.extend(hw_last_data_dates)
+        if cw_last_data_dates:
+            all_last_dates.extend(cw_last_data_dates)
+
+        # Use the earliest date where all meters have data
+        # This ensures we only use data from dates where all meters have data available
+        common_data_date = min(all_last_dates) if all_last_dates else None
+
+        # Normalize to end of day (23:59:59) to include all entries from that day
+        # This ensures we compare dates at the day level, not exact timestamps
+        if common_data_date:
+            # Get the date (without time) and set to end of day
+            common_data_date_normalized = common_data_date.replace(
+                hour=23, minute=59, second=59, microsecond=999999
+            )
+            common_data_timestamp = int(common_data_date_normalized.timestamp())
+        else:
+            common_data_timestamp = None
+
+        if common_data_date:
+            _LOGGER.debug(
+                "Using common data date %s (normalized to end of day, timestamp %s) for %s (ensuring all meters use data from the same date). HW dates: %s, CW dates: %s",
+                common_data_date.strftime("%Y-%m-%d"),
+                common_data_timestamp,
+                self.entity_id,
+                (
+                    [d.strftime("%Y-%m-%d") for d in hw_last_data_dates]
+                    if hw_last_data_dates
+                    else []
+                ),
+                (
+                    [d.strftime("%Y-%m-%d") for d in cw_last_data_dates]
+                    if cw_last_data_dates
+                    else []
+                ),
+            )
+
+        # Second pass: fetch cost data, but only use entries from common_data_date or earlier
+        # This ensures all meters use data from the same date
+        for (utility_code, measuring_point_id), meter_info in meter_info_map.items():
+            cache_key = meter_info["cache_key"]
+            consumption_cache_key = meter_info["consumption_cache_key"]
+            measuring_point_name = meter_info["measuring_point_name"]
+            cost_data = cost_cache.get(cache_key)
+
+            # Check if this meter has cost data
+            # Track whether we found actual price data (even if 0) vs no data at all
+            value = None
+            time_stamp = None
+            has_price_data_for_meter = False
+
+            # Only proceed if we have a common_data_timestamp to ensure all meters use data from the same date
+            if common_data_timestamp:
+                # First, try to use cost_data from latest_cost_cache if it's from common_data_date or earlier
+                if cost_data:
+                    cost_timestamp = cost_data.get("time")
+                    # Only use cost_data if it's from common_data_date or earlier
+                    # This ensures all meters use data from the same date
+                    if cost_timestamp and cost_timestamp <= common_data_timestamp:
+                        if cost_data.get("value") is not None:
+                            value = cost_data.get("value", 0.0)
+                            time_stamp = cost_timestamp
+                            has_price_data_for_meter = True
+
+                # If we didn't find valid cost_data (either it doesn't exist or is too new),
+                # fall back to daily_price_cache to find the latest entry from common_data_date or earlier
+                if not has_price_data_for_meter and self._cost_type == "actual":
+                    price_daily_cache = daily_price_cache.get(cache_key, [])
+                    if price_daily_cache:
+                        # Filter to only use entries from common_data_date or earlier
+                        # Then find the most recent entry using max() instead of sorting
+                        valid_entries = [
+                            p
+                            for p in price_daily_cache
+                            if p.get("time")
+                            and p.get("time") <= common_data_timestamp
+                            and p.get("value") is not None
+                        ]
+
+                        if valid_entries:
+                            # Find the entry with the maximum timestamp (most recent)
+                            price_entry = max(
+                                valid_entries, key=lambda x: x.get("time", 0)
+                            )
+                            price_value = price_entry.get("value")
+                            # Include even if 0, as 0 is a valid cost value
+                            value = price_value if price_value > 0 else 0.0
+                            time_stamp = price_entry.get("time")
+                            entry_date = datetime.fromtimestamp(time_stamp, tz=tz)
+                            has_price_data_for_meter = True
+                            _LOGGER.debug(
+                                "Found price data for %s meter %s: value=%.2f from date %s (timestamp %s, common_data_date=%s)",
+                                utility_code,
+                                measuring_point_id,
+                                value,
+                                entry_date.strftime("%Y-%m-%d"),
+                                time_stamp,
+                                common_data_date.strftime("%Y-%m-%d"),
+                            )
+                        else:
+                            _LOGGER.debug(
+                                "No price data found in daily_price_cache for %s meter %s on or before common_data_date %s (timestamp %s). Available entries: %s",
+                                utility_code,
+                                measuring_point_id,
+                                common_data_date.strftime("%Y-%m-%d"),
+                                common_data_timestamp,
+                                [
+                                    datetime.fromtimestamp(
+                                        p.get("time"), tz=tz
+                                    ).strftime("%Y-%m-%d")
+                                    for p in price_daily_cache[
+                                        :5
+                                    ]  # Show first 5 for debugging
+                                    if p.get("time")
+                                ],
+                            )
+
+            # Include meter in the list even if no price data found (for meter_count)
+            # But only add to totals if we have actual price data
+            if value is not None:
+                # Track latest timestamp
+                if time_stamp:
+                    if latest_timestamp is None or time_stamp > latest_timestamp:
+                        latest_timestamp = time_stamp
 
                 if utility_code == "HW":
-                    hw_meters_with_data.append(meter_info)
+                    hw_total += value
                 elif utility_code == "CW":
-                    cw_meters_with_data.append(meter_info)
+                    cw_total += value
+
+            # Always add meter to list (with value 0 if no data, for meter_count purposes)
+            # This ensures all meters are counted, even when price data is not available
+            meter_info_dict = {
+                "measuring_point_id": measuring_point_id,
+                "measuring_point_name": measuring_point_name,
+                "value": value if value is not None else 0.0,
+            }
+            # Track if this meter has price data (for determining if sensor should show Unknown)
+            if has_price_data_for_meter:
+                meter_info_dict["_has_price_data"] = True
+
+            if utility_code == "HW":
+                hw_meters_with_data.append(meter_info_dict)
+            elif utility_code == "CW":
+                cw_meters_with_data.append(meter_info_dict)
 
         total_value = hw_total + cw_total
 
@@ -2373,15 +2761,10 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
         currency = self.coordinator.get_setting("Currency") or ""
         self._attr_native_unit_of_measurement = currency
 
-        # Use the earliest of HW and CW last data dates (most conservative)
-        # This ensures we show lag if either utility is lagging
-        all_last_dates = []
-        if hw_last_data_dates:
-            all_last_dates.extend(hw_last_data_dates)
-        if cw_last_data_dates:
-            all_last_dates.extend(cw_last_data_dates)
-        if all_last_dates:
-            self._last_data_date = min(all_last_dates)
+        # Use the common_data_date (most recent date where all meters have data)
+        # This is the date we used for fetching cost data, ensuring all meters use data from the same date
+        if common_data_date:
+            self._last_data_date = common_data_date
         elif latest_timestamp:
             self._last_data_date = datetime.fromtimestamp(latest_timestamp, tz=tz)
         else:
