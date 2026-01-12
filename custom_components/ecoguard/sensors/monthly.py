@@ -465,9 +465,17 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             # Monthly accumulated sensors should record daily to track progression
             data_month = (self._current_year or year, self._current_month or month)
             data_date = now.date()  # Current date for daily recording
-            self._async_write_ha_state_if_changed(
-                data_date=data_date, data_month=data_month
-            )
+
+            # If we have price data, use the normal write method (which skips None values)
+            # If we don't have price data but have meters, write state directly to show attributes
+            if self._attr_native_value is not None:
+                self._async_write_ha_state_if_changed(
+                    data_date=data_date, data_month=data_month
+                )
+            elif self._meters_with_data:
+                # Write state directly when value is None but we have meters
+                # This ensures meter_count and meters list are visible even when value is Unknown
+                self.async_write_ha_state()
         else:
             # No data available yet
             # For estimated costs (especially HW), trigger async fetch to calculate using spot prices
@@ -508,18 +516,35 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             self._attr_native_value = None
             # Always set unit even when no data to maintain consistency for statistics
             self._attr_native_unit_of_measurement = default_unit
-            self._current_year = None
-            self._current_month = None
-            self._meters_with_data = []
+            self._current_year = year
+            self._current_month = month
+
+            # Populate meters_with_data even when no aggregate data exists
+            # This ensures meter_count is shown even when sensor value is Unknown
+            active_installations = self.coordinator.get_active_installations()
+            self._meters_with_data = self._collect_meters_with_data(
+                active_installations, monthly_cache, year, month
+            )
+
             self._attr_available = True
 
-            _LOGGER.debug(
-                "No cached monthly aggregate for %s (cache_key: %s, available keys: %s) - skipping state write",
+            _LOGGER.info(
+                "Updated %s: %s %s (no aggregate data, but %d meters found, year=%d, month=%d)",
                 self.entity_id,
-                cache_key,
-                list(monthly_cache.keys())[:5],
+                self._attr_native_value,
+                default_unit,
+                len(self._meters_with_data),
+                year,
+                month,
             )
-            # Don't write state when value is None - wait for data to be available
+
+            # Write state directly when value is None but we have meters
+            # This ensures meter_count and meters list are visible even when value is Unknown
+            if self._meters_with_data:
+                data_month = (year, month)
+                data_date = now.date()
+                self.async_write_ha_state()
+            # If no meters, don't write state - wait for data to be available
 
     async def _async_fetch_value(self) -> None:
         """Fetch current month's aggregate value."""
@@ -599,17 +624,37 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             self._attr_native_value = None
             # Always set unit even when no data to maintain consistency for statistics
             self._attr_native_unit_of_measurement = default_unit
-            self._current_year = None
-            self._current_month = None
-            self._meters_with_data = []
+            self._current_year = year
+            self._current_month = month
+
+            # Populate meters_with_data even when no aggregate data exists
+            # This ensures meter_count is shown even when sensor value is Unknown
+            coordinator_data = self.coordinator.data
+            if coordinator_data:
+                monthly_cache = coordinator_data.get("monthly_aggregate_cache", {})
+                active_installations = self.coordinator.get_active_installations()
+                self._meters_with_data = self._collect_meters_with_data(
+                    active_installations, monthly_cache, year, month
+                )
+            else:
+                self._meters_with_data = []
+
             self._attr_available = True
-            _LOGGER.debug(
-                "No monthly aggregate data returned for %s (utility=%s, cost_type=%s) - skipping state write",
+            _LOGGER.info(
+                "No monthly aggregate data returned for %s (utility=%s, cost_type=%s, but %d meters found) - will show Unknown",
                 self.entity_id,
                 self._utility_code,
                 cost_type_to_use,
+                len(self._meters_with_data),
             )
-            # Don't write state when value is None - wait for data to be available
+
+            # Write state directly when value is None but we have meters
+            # This ensures meter_count and meters list are visible even when value is Unknown
+            if self._meters_with_data:
+                data_date = now.date()
+                data_month = (year, month)
+                self.async_write_ha_state()
+            # If no meters, don't write state - wait for data to be available
             return
 
         # Write state only if value, month, or date has meaningfully changed
@@ -620,9 +665,17 @@ class EcoGuardMonthlyAccumulatedSensor(EcoGuardBaseSensor):
             if self._current_year
             else (year, month)
         )
-        self._async_write_ha_state_if_changed(
-            data_date=data_date, data_month=data_month
-        )
+
+        # If we have price data, use the normal write method (which skips None values)
+        # If we don't have price data but have meters, write state directly to show attributes
+        if self._attr_native_value is not None:
+            self._async_write_ha_state_if_changed(
+                data_date=data_date, data_month=data_month
+            )
+        elif self._meters_with_data:
+            # Write state directly when value is None but we have meters
+            # This ensures meter_count and meters list are visible even when value is Unknown
+            self.async_write_ha_state()
 
 
 class EcoGuardMonthlyMeterSensor(EcoGuardBaseSensor):
@@ -1782,16 +1835,24 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
                 now = datetime.now()
                 data_date = now.date()
                 data_month = (year, month)
-                self._async_write_ha_state_if_changed(
-                    data_date=data_date, data_month=data_month
-                )
+
+                # If we have price data, use the normal write method (which skips None values)
+                # If we don't have price data but have meters, write state directly to show attributes
+                if self._attr_native_value is not None:
+                    self._async_write_ha_state_if_changed(
+                        data_date=data_date, data_month=data_month
+                    )
+                elif self._hw_meters_with_data or self._cw_meters_with_data:
+                    # Write state directly when value is None but we have meters
+                    # This ensures meter_count and meters lists are visible even when value is Unknown
+                    self.async_write_ha_state()
                 return
             else:
-                # Missing data for one or both utilities - don't write state yet
-                # Wait until both dependencies are available to avoid recording "unknown" states
+                # Missing data for one or both utilities - keep value as None (Unknown)
+                # But still populate meters and write state so meter_count is visible
                 if self._aggregate_type == "price" and self._cost_type == "actual":
                     _LOGGER.debug(
-                        "Skipping state write for monthly combined water cost: %s (hw_value=%s, cw_value=%s) - waiting for both dependencies",
+                        "Monthly combined water cost: %s (hw_value=%s, cw_value=%s) - no price data, but will show meters",
                         self.entity_id,
                         hw_value,
                         cw_value,
@@ -1804,10 +1865,27 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
                     # For consumption, use "m³" as default
                     default_unit = "m³"
                 self._attr_native_unit_of_measurement = default_unit
-                self._hw_meters_with_data = []
-                self._cw_meters_with_data = []
+                self._current_year = year
+                self._current_month = month
+
+                # Populate meters_with_data even when no aggregate data exists
+                # This ensures meter_count is shown even when sensor value is Unknown
+                active_installations = self.coordinator.get_active_installations()
+                self._hw_meters_with_data = self._collect_meters_with_data(
+                    active_installations, monthly_cache, "HW", year, month
+                )
+                self._cw_meters_with_data = self._collect_meters_with_data(
+                    active_installations, monthly_cache, "CW", year, month
+                )
                 self._attr_available = True
-                # Don't write state - wait for both dependencies
+
+                # Write state directly when value is None but we have meters
+                # This ensures meter_count and meters lists are visible even when value is Unknown
+                if self._hw_meters_with_data or self._cw_meters_with_data:
+                    data_date = now.date()
+                    data_month = (year, month)
+                    self.async_write_ha_state()
+                # If no meters, don't write state - wait for data to be available
                 return
 
         # No cached data - set placeholder and defer async fetch until after startup
@@ -1904,22 +1982,54 @@ class EcoGuardCombinedWaterSensor(EcoGuardBaseSensor):
             # Monthly accumulated sensors should record daily to track progression
             data_date = now.date()
             data_month = (year, month)
-            self._async_write_ha_state_if_changed(
-                data_date=data_date, data_month=data_month
-            )
+
+            # If we have price data, use the normal write method (which skips None values)
+            # If we don't have price data but have meters, write state directly to show attributes
+            if self._attr_native_value is not None:
+                self._async_write_ha_state_if_changed(
+                    data_date=data_date, data_month=data_month
+                )
+            elif self._hw_meters_with_data or self._cw_meters_with_data:
+                # Write state directly when value is None but we have meters
+                # This ensures meter_count and meters lists are visible even when value is Unknown
+                self.async_write_ha_state()
         else:
-            # Missing data for one or both utilities - don't write state yet
-            # Wait until both dependencies are available to avoid recording "unknown" states
-            self._hw_meters_with_data = []
-            self._cw_meters_with_data = []
-            _LOGGER.debug(
-                "Skipping state write for %s: missing dependencies (hw_value=%s, cw_value=%s)",
-                self.entity_id,
-                hw_value,
-                cw_value,
-            )
+            # Missing data for one or both utilities - keep value as None (Unknown)
+            # But still populate meters and write state so meter_count is visible
+            self._current_year = year
+            self._current_month = month
+
+            # Populate meters_with_data even when no aggregate data exists
+            # This ensures meter_count is shown even when sensor value is Unknown
+            coordinator_data = self.coordinator.data
+            if coordinator_data:
+                monthly_cache = coordinator_data.get("monthly_aggregate_cache", {})
+                active_installations = self.coordinator.get_active_installations()
+                self._hw_meters_with_data = self._collect_meters_with_data(
+                    active_installations, monthly_cache, "HW", year, month
+                )
+                self._cw_meters_with_data = self._collect_meters_with_data(
+                    active_installations, monthly_cache, "CW", year, month
+                )
+            else:
+                self._hw_meters_with_data = []
+                self._cw_meters_with_data = []
+
             self._attr_native_value = None
             self._attr_native_unit_of_measurement = default_unit
-            self._current_year = None
-            self._current_month = None
-            # Don't write state - wait for both dependencies
+            self._attr_available = True
+
+            _LOGGER.info(
+                "Monthly combined water (async fetch): %s (no price data for both utilities, but HW=%d meters, CW=%d meters) - will show Unknown",
+                self.entity_id,
+                len(self._hw_meters_with_data),
+                len(self._cw_meters_with_data),
+            )
+
+            # Write state directly when value is None but we have meters
+            # This ensures meter_count and meters lists are visible even when value is Unknown
+            if self._hw_meters_with_data or self._cw_meters_with_data:
+                data_date = now.date()
+                data_month = (year, month)
+                self.async_write_ha_state()
+            # If no meters, don't write state - wait for data to be available
