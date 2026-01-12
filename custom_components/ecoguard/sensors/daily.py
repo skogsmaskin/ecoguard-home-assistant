@@ -23,6 +23,7 @@ from ..translations import (
     get_translation_default,
 )
 from ..sensor_helpers import (
+    collect_meters_with_data,
     slugify_name,
     utility_code_to_slug,
 )
@@ -655,46 +656,20 @@ class EcoGuardDailyConsumptionAggregateSensor(EcoGuardBaseSensor):
             List of meters with data, each containing measuring_point_id,
             measuring_point_name, and value.
         """
-        meters_with_data = []
 
-        for installation in active_installations:
-            registers = installation.get("Registers", [])
-            measuring_point_id = installation.get("MeasuringPointID")
+        def get_meter_data(
+            measuring_point_id: int, utility_code: str
+        ) -> dict[str, Any] | None:
+            """Get meter data from consumption cache."""
+            cache_key = f"{utility_code}_{measuring_point_id}"
+            return consumption_cache.get(cache_key)
 
-            # Check if this installation has the utility we're looking for
-            has_utility = False
-            for register in registers:
-                if register.get("UtilityCode") == self._utility_code:
-                    has_utility = True
-                    break
-
-            if not has_utility:
-                continue
-
-            # Get measuring point name
-            measuring_point_name = None
-            for mp in self.coordinator.get_measuring_points():
-                if mp.get("ID") == measuring_point_id:
-                    measuring_point_name = mp.get("Name")
-                    break
-
-            # Check if this meter has data in the cache
-            cache_key = f"{self._utility_code}_{measuring_point_id}"
-            meter_consumption_data = consumption_cache.get(cache_key)
-
-            if (
-                meter_consumption_data
-                and meter_consumption_data.get("value") is not None
-            ):
-                meters_with_data.append(
-                    {
-                        "measuring_point_id": measuring_point_id,
-                        "measuring_point_name": measuring_point_name,
-                        "value": meter_consumption_data.get("value", 0.0),
-                    }
-                )
-
-        return meters_with_data
+        return collect_meters_with_data(
+            active_installations,
+            self._utility_code,
+            self.coordinator,
+            get_meter_data,
+        )
 
     async def _async_update_translated_name(self) -> None:
         """Update the sensor name with translated strings."""
@@ -1802,29 +1777,85 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
             if meter_last_date:
                 actual_last_data_dates.append(meter_last_date)
 
-            if cost_data and cost_data.get("value") is not None:
-                value = cost_data.get("value", 0.0)
+            # Check if this meter has cost data
+            # First try latest_cost_cache, then fallback to daily_price_cache
+            # Track whether we found any price data (even if 0) vs no data at all
+            value = None
+            time_stamp = None
+            has_price_data_for_meter = False
+
+            if cost_data:
+                # cost_data exists - check if it has a value (including 0)
+                if cost_data.get("value") is not None:
+                    value = cost_data.get("value", 0.0)
+                    time_stamp = cost_data.get("time")
+                    has_price_data_for_meter = True
+            elif self._cost_type == "actual":
+                # Fallback: check daily_price_cache if cost_data not in latest_cost_cache
+                # This handles cases where cost might be 0 or not yet in latest_cost_cache
+                # (e.g., for hot water where cost might be calculated but not cached)
+                price_daily_cache = daily_price_cache.get(cache_key, [])
+                if price_daily_cache:
+                    # Get the latest price value (most recent, including 0)
+                    sorted_prices = sorted(
+                        price_daily_cache,
+                        key=lambda x: x.get("time", 0),
+                        reverse=True,
+                    )
+                    for price_entry in sorted_prices:
+                        price_value = price_entry.get("value")
+                        if price_value is not None:
+                            # Include even if 0, as 0 is a valid cost value
+                            value = price_value if price_value > 0 else 0.0
+                            time_stamp = price_entry.get("time")
+                            has_price_data_for_meter = True
+                            break
+
+            # Include meter in the list even if no price data found (for meter_count)
+            # But only add to total_value if we have actual price data
+            if value is not None:
                 total_value += value
 
                 # Track latest timestamp
-                time_stamp = cost_data.get("time")
                 if time_stamp:
                     if latest_timestamp is None or time_stamp > latest_timestamp:
                         latest_timestamp = time_stamp
 
-                meters_with_data.append(
-                    {
-                        "measuring_point_id": measuring_point_id,
-                        "measuring_point_name": measuring_point_name,
-                        "value": value,
-                    }
-                )
+            # Always add meter to list (with value 0 if no data, for meter_count purposes)
+            # This ensures all meters are counted, even when price data is not available
+            meter_info = {
+                "measuring_point_id": measuring_point_id,
+                "measuring_point_name": measuring_point_name,
+                "value": value if value is not None else 0.0,
+            }
+            # Track if this meter has price data (for determining if sensor should show Unknown)
+            if has_price_data_for_meter:
+                meter_info["_has_price_data"] = True
+            meters_with_data.append(meter_info)
 
-        if total_value > 0 or (self._cost_type == "actual" and meters_with_data):
-            # Even if total is 0, update if we have meter data (shows 0 is valid)
+        # Always populate meters_with_data for meter_count, even if no price data exists
+        # But only set sensor value if we have actual price data
+        # Check if we have actual price data by checking if we found any price values
+        # (total_value > 0 means we found price data, or latest_timestamp means we found price entries,
+        # or any meter has the _has_price_data flag set)
+        has_actual_price_data = (
+            total_value > 0
+            or latest_timestamp is not None
+            or any(m.get("_has_price_data", False) for m in meters_with_data)
+        )
+
+        if has_actual_price_data:
+            # We have actual price data - set the value (even if 0, it's valid price data)
             self._attr_native_value = (
                 round_to_max_digits(total_value) if total_value > 0 else 0.0
             )
+        else:
+            # We have meters but no price data at all - keep value as None (Unknown)
+            self._attr_native_value = None
+
+        # Always set meters_with_data and other attributes if we have meters
+        # This ensures meter_count is shown even when sensor value is Unknown
+        if meters_with_data:
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
             # Use actual last data date if available (most recent across all meters), otherwise fall back to latest timestamp
@@ -1839,21 +1870,36 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
                 self._last_data_date,
                 tz,
             )
-            self._meters_with_data = meters_with_data
+            # Remove internal flags from meters list before storing
+            clean_meters = [
+                {k: v for k, v in m.items() if k != "_has_price_data"}
+                for m in meters_with_data
+            ]
+            self._meters_with_data = clean_meters
             self._attr_available = True
 
             _LOGGER.info(
-                "Updated %s: %s %s (from %d meters)",
+                "Updated %s: %s %s (from %d meters, has_price_data=%s)",
                 self.entity_id,
                 self._attr_native_value,
                 currency,
-                len(meters_with_data),
+                len(clean_meters),
+                has_actual_price_data,
             )
-            # Write state only if value or date has meaningfully changed
+            # Always write state when we have meters (even if value is None/Unknown)
+            # This ensures meter_count and meters list are visible
             data_date = None
             if self._last_data_date:
                 data_date = self._last_data_date.date()
-            self._async_write_ha_state_if_changed(data_date=data_date)
+
+            # If we have price data, use the normal write method (which skips None values)
+            # If we don't have price data but have meters, write state directly to show attributes
+            if has_actual_price_data:
+                self._async_write_ha_state_if_changed(data_date=data_date)
+            else:
+                # Write state directly when value is None but we have meters
+                # This ensures meter_count and meters list are visible even when value is Unknown
+                self.async_write_ha_state()
         else:
             # No metered cost data available
             # For estimated costs, trigger async fetch to calculate from consumption + rate/spot prices
@@ -2201,36 +2247,65 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
                     elif utility_code == "CW":
                         cw_last_data_dates.append(meter_last_date)
 
-                if cost_data and cost_data.get("value") is not None:
-                    value = cost_data.get("value", 0.0)
+                # Check if this meter has cost data
+                # Track whether we found actual price data (even if 0) vs no data at all
+                value = None
+                time_stamp = None
+                has_price_data_for_meter = False
 
+                if cost_data:
+                    # cost_data exists - check if it has a value (including 0)
+                    if cost_data.get("value") is not None:
+                        value = cost_data.get("value", 0.0)
+                        time_stamp = cost_data.get("time")
+                        has_price_data_for_meter = True
+                elif self._cost_type == "actual":
+                    # Fallback: check daily_price_cache if cost_data not in latest_cost_cache
+                    price_daily_cache = daily_price_cache.get(cache_key, [])
+                    if price_daily_cache:
+                        # Get the latest price value (most recent, including 0)
+                        sorted_prices = sorted(
+                            price_daily_cache,
+                            key=lambda x: x.get("time", 0),
+                            reverse=True,
+                        )
+                        for price_entry in sorted_prices:
+                            price_value = price_entry.get("value")
+                            if price_value is not None:
+                                # Include even if 0, as 0 is a valid cost value
+                                value = price_value if price_value > 0 else 0.0
+                                time_stamp = price_entry.get("time")
+                                has_price_data_for_meter = True
+                                break
+
+                # Include meter in the list even if no price data found (for meter_count)
+                # But only add to totals if we have actual price data
+                if value is not None:
                     # Track latest timestamp
-                    time_stamp = cost_data.get("time")
                     if time_stamp:
                         if latest_timestamp is None or time_stamp > latest_timestamp:
                             latest_timestamp = time_stamp
 
-                    meter_info = {
-                        "measuring_point_id": measuring_point_id,
-                        "measuring_point_name": measuring_point_name,
-                        "value": value,
-                    }
-
                     if utility_code == "HW":
                         hw_total += value
-                        hw_meters_with_data.append(meter_info)
                     elif utility_code == "CW":
                         cw_total += value
-                        cw_meters_with_data.append(meter_info)
-                elif utility_code == "HW" and self._cost_type == "actual":
-                    # For metered HW costs: if data is missing (Unknown), we need to know about it
-                    # This happens when all HW price values are 0 (no metered price data from API)
-                    # We track this so we can show Unknown for the combined sensor
-                    _LOGGER.debug(
-                        "HW cost data is Unknown (missing from cache) for meter %d in combined sensor %s",
-                        measuring_point_id,
-                        self.entity_id,
-                    )
+
+                # Always add meter to list (with value 0 if no data, for meter_count purposes)
+                # This ensures all meters are counted, even when price data is not available
+                meter_info = {
+                    "measuring_point_id": measuring_point_id,
+                    "measuring_point_name": measuring_point_name,
+                    "value": value if value is not None else 0.0,
+                }
+                # Track if this meter has price data (for determining if sensor should show Unknown)
+                if has_price_data_for_meter:
+                    meter_info["_has_price_data"] = True
+
+                if utility_code == "HW":
+                    hw_meters_with_data.append(meter_info)
+                elif utility_code == "CW":
+                    cw_meters_with_data.append(meter_info)
 
         total_value = hw_total + cw_total
 
@@ -2276,86 +2351,91 @@ class EcoGuardDailyCombinedWaterCostSensor(EcoGuardBaseSensor):
                         has_cw_data,
                     )
 
-        # Only set a value if we have data for BOTH HW and CW
-        # This ensures the combined sensor only shows a value when both utilities are available
-        # If HW is Unknown (missing from cache), we show Unknown rather than just CW cost
-        # (showing partial data would be misleading - it looks like total combined cost but is missing HW)
-        has_hw_data = len(hw_meters_with_data) > 0
-        has_cw_data = len(cw_meters_with_data) > 0
+        # Check if we have actual price data for both utilities
+        # (meters exist, but we need to check if they have price data)
+        has_hw_price_data = any(
+            m.get("_has_price_data", False) for m in hw_meters_with_data
+        )
+        has_cw_price_data = any(
+            m.get("_has_price_data", False) for m in cw_meters_with_data
+        )
 
-        if has_hw_data and has_cw_data:
+        # Only set a value if we have price data for BOTH HW and CW
+        # This ensures the combined sensor only shows a value when both utilities have price data
+        # If either utility has no price data, we show Unknown rather than partial cost
+        # (showing partial data would be misleading - it looks like total combined cost but is missing one utility)
+        if has_hw_price_data and has_cw_price_data:
             self._attr_native_value = round_to_max_digits(total_value)
-            currency = self.coordinator.get_setting("Currency") or ""
-            self._attr_native_unit_of_measurement = currency
-            # Use the earliest of HW and CW last data dates (most conservative)
-            # This ensures we show lag if either utility is lagging
-            all_last_dates = []
-            if hw_last_data_dates:
-                all_last_dates.extend(hw_last_data_dates)
-            if cw_last_data_dates:
-                all_last_dates.extend(cw_last_data_dates)
-            if all_last_dates:
-                self._last_data_date = min(all_last_dates)
-            elif latest_timestamp:
-                self._last_data_date = datetime.fromtimestamp(latest_timestamp, tz=tz)
-            else:
-                self._last_data_date = None
-
-            # Detect lag
-            if self._last_data_date:
-                is_lagging, lag_days = detect_data_lag(self._last_data_date, tz)
-                self._data_lagging = is_lagging
-                self._data_lag_days = lag_days
-            else:
-                self._data_lagging = True
-                self._data_lag_days = None
-
-            self._hw_meters_with_data = hw_meters_with_data
-            self._cw_meters_with_data = cw_meters_with_data
-            self._attr_available = True
-            _LOGGER.debug(
-                "Updated %s: HW=%.2f, CW=%.2f, Total=%.2f",
-                self.entity_id,
-                hw_total,
-                cw_total,
-                total_value,
-            )
         else:
-            # Missing data for one or both utilities - don't write state yet
-            # Wait until both dependencies are available to avoid recording "unknown" states
-            if self._cost_type == "estimated":
-                _LOGGER.debug(
-                    "Skipping state write for %s: waiting for both utilities (has_hw_data=%s, has_cw_data=%s)",
-                    self.entity_id,
-                    has_hw_data,
-                    has_cw_data,
-                )
-            elif self._cost_type == "actual":
-                _LOGGER.debug(
-                    "Skipping state write for %s: waiting for both utilities (has_hw_data=%s, has_cw_data=%s)",
-                    self.entity_id,
-                    has_hw_data,
-                    has_cw_data,
-                )
+            # We have meters but missing price data for one or both utilities - keep value as None (Unknown)
             self._attr_native_value = None
-            currency = self.coordinator.get_setting("Currency") or ""
-            self._attr_native_unit_of_measurement = currency
+
+        currency = self.coordinator.get_setting("Currency") or ""
+        self._attr_native_unit_of_measurement = currency
+
+        # Use the earliest of HW and CW last data dates (most conservative)
+        # This ensures we show lag if either utility is lagging
+        all_last_dates = []
+        if hw_last_data_dates:
+            all_last_dates.extend(hw_last_data_dates)
+        if cw_last_data_dates:
+            all_last_dates.extend(cw_last_data_dates)
+        if all_last_dates:
+            self._last_data_date = min(all_last_dates)
+        elif latest_timestamp:
+            self._last_data_date = datetime.fromtimestamp(latest_timestamp, tz=tz)
+        else:
             self._last_data_date = None
-            self._hw_meters_with_data = []
-            self._cw_meters_with_data = []
-            # Keep sensor available even if no data (shows as "unknown" not "unavailable")
-            self._attr_available = True
-            # Mark as lagging when data is missing
+
+        # Detect lag
+        if self._last_data_date:
+            is_lagging, lag_days = detect_data_lag(self._last_data_date, tz)
+            self._data_lagging = is_lagging
+            self._data_lag_days = lag_days
+        else:
             self._data_lagging = True
             self._data_lag_days = None
-            # Don't write state - wait for both dependencies
-            return
 
-        # Write state only if value or date has meaningfully changed
+        # Remove internal flags from meters lists before storing
+        clean_hw_meters = [
+            {k: v for k, v in m.items() if k != "_has_price_data"}
+            for m in hw_meters_with_data
+        ]
+        clean_cw_meters = [
+            {k: v for k, v in m.items() if k != "_has_price_data"}
+            for m in cw_meters_with_data
+        ]
+
+        self._hw_meters_with_data = clean_hw_meters
+        self._cw_meters_with_data = clean_cw_meters
+        self._attr_available = True
+
+        _LOGGER.info(
+            "Updated %s: %s (HW=%.2f from %d meters, CW=%.2f from %d meters, has_price_data: HW=%s, CW=%s)",
+            self.entity_id,
+            self._attr_native_value,
+            hw_total,
+            len(clean_hw_meters),
+            cw_total,
+            len(clean_cw_meters),
+            has_hw_price_data,
+            has_cw_price_data,
+        )
+
+        # Always write state when we have meters (even if value is None/Unknown)
+        # This ensures meter_count and meters lists are visible
         data_date = None
         if self._last_data_date:
             data_date = self._last_data_date.date()
-        self._async_write_ha_state_if_changed(data_date=data_date)
+
+        # If we have price data for both, use the normal write method (which skips None values)
+        # If we don't have price data but have meters, write state directly to show attributes
+        if has_hw_price_data and has_cw_price_data:
+            self._async_write_ha_state_if_changed(data_date=data_date)
+        else:
+            # Write state directly when value is None but we have meters
+            # This ensures meter_count and meters lists are visible even when value is Unknown
+            self.async_write_ha_state()
 
     async def _async_fetch_value(self) -> None:
         """Fetch estimated combined water cost by fetching costs for all HW and CW meters."""

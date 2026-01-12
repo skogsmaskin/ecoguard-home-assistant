@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 import inspect
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -142,7 +142,10 @@ async def test_daily_consumption_sensor_fetch_value(hass: HomeAssistant, coordin
     )
 
     # unique_id format when measuring_point_name is None: ecoguard_consumption_daily_metered_{utility_slug}_meter_mp{measuring_point_id}
-    assert sensor._attr_unique_id == "ecoguard_consumption_daily_metered_cold_water_meter_mp1"
+    assert (
+        sensor._attr_unique_id
+        == "ecoguard_consumption_daily_metered_cold_water_meter_mp1"
+    )
 
     # Set hass on sensor (normally done by async_added_to_hass)
     sensor.hass = hass
@@ -1049,6 +1052,308 @@ async def test_monthly_meter_sensor_cost(
     assert "Meter" in sensor._attr_name
     assert sensor._attr_state_class is not None
     assert sensor._attr_entity_registry_enabled_default is False
+
+
+async def test_monthly_accumulated_sensor_consumption_with_meter_count(
+    hass: HomeAssistant, coordinator
+):
+    """Test monthly accumulated sensor for consumption with meter_count.
+
+    This test verifies that the sensor correctly populates meter_count
+    by calculating from daily cache when per-meter monthly cache entries
+    are not available (the common real-world scenario).
+    """
+    now = datetime.now()
+    year = now.year
+    month = now.month
+
+    # Calculate month start for filtering daily values
+    from_date = datetime(year, month, 1, tzinfo=timezone.utc)
+    from_time = int(from_date.timestamp())
+
+    # Set up coordinator data with:
+    # 1. Monthly aggregate cache (only aggregate entry, no per-meter entries)
+    # 2. Daily consumption cache (per-meter entries that we'll calculate from)
+    coordinator.data = {
+        "monthly_aggregate_cache": {
+            # Only aggregated cache (no per-meter entries)
+            # This simulates the real-world scenario where per-meter monthly
+            # cache entries don't exist
+            f"HW_{year}_{month}_con_actual": {
+                "value": 45.5,
+                "unit": "m³",
+                "year": year,
+                "month": month,
+            },
+        },
+        "daily_consumption_cache": {
+            # Daily consumption data for each meter
+            "HW_1": [
+                {"time": from_time + 86400, "value": 10.0, "unit": "m³"},  # Day 1
+                {"time": from_time + 172800, "value": 10.0, "unit": "m³"},  # Day 2
+            ],
+            "HW_2": [
+                {"time": from_time + 86400, "value": 12.75, "unit": "m³"},  # Day 1
+                {"time": from_time + 172800, "value": 12.75, "unit": "m³"},  # Day 2
+            ],
+        },
+    }
+    coordinator._installations = [
+        {"MeasuringPointID": 1, "Registers": [{"UtilityCode": "HW"}]},
+        {"MeasuringPointID": 2, "Registers": [{"UtilityCode": "HW"}]},
+    ]
+    coordinator._measuring_points = [
+        {"ID": 1, "Name": "Hot Water Meter 1"},
+        {"ID": 2, "Name": "Hot Water Meter 2"},
+    ]
+    coordinator._settings = [{"Name": "TimeZoneIANA", "Value": "UTC"}]
+
+    sensor = EcoGuardMonthlyAccumulatedSensor(
+        hass=hass,
+        coordinator=coordinator,
+        utility_code="HW",
+        aggregate_type="con",
+    )
+
+    sensor.hass = hass
+    sensor.platform = MagicMock()
+    sensor.entity_id = "sensor.test_monthly_consumption_aggregate"
+
+    with patch.object(sensor, "async_write_ha_state", new_callable=AsyncMock):
+        sensor._update_from_coordinator_data()
+
+        # Should use aggregated value
+        assert sensor._attr_native_value == 45.5
+        assert sensor._attr_native_unit_of_measurement == "m³"
+
+        # meter_count should be populated by calculating from daily cache
+        # (since per-meter monthly cache entries don't exist)
+        assert len(sensor._meters_with_data) == 2
+        assert sensor.extra_state_attributes["meter_count"] == 2
+
+        # Verify meter details (calculated from daily cache)
+        meters = sensor.extra_state_attributes["meters"]
+        assert len(meters) == 2
+        assert meters[0]["measuring_point_id"] == 1
+        assert meters[0]["measuring_point_name"] == "Hot Water Meter 1"
+        # Value should be sum of daily values: 10.0 + 10.0 = 20.0
+        assert meters[0]["value"] == 20.0
+        assert meters[1]["measuring_point_id"] == 2
+        assert meters[1]["measuring_point_name"] == "Hot Water Meter 2"
+        # Value should be sum of daily values: 12.75 + 12.75 = 25.5
+        assert meters[1]["value"] == 25.5
+
+
+async def test_monthly_accumulated_sensor_cost_with_meter_count(
+    hass: HomeAssistant, coordinator
+):
+    """Test monthly accumulated sensor for cost with meter_count.
+
+    This test verifies that the sensor correctly populates meter_count
+    by calculating from daily price cache when per-meter monthly cache entries
+    are not available (the common real-world scenario).
+    """
+    now = datetime.now()
+    year = now.year
+    month = now.month
+
+    # Calculate month start for filtering daily values
+    from_date = datetime(year, month, 1, tzinfo=timezone.utc)
+    from_time = int(from_date.timestamp())
+
+    # Set up coordinator data with:
+    # 1. Monthly aggregate cache (only aggregate entry, no per-meter entries)
+    # 2. Daily price cache (per-meter entries that we'll calculate from)
+    coordinator.data = {
+        "monthly_aggregate_cache": {
+            # Only aggregated cache (no per-meter entries)
+            # This simulates the real-world scenario where per-meter monthly
+            # cache entries don't exist
+            f"CW_{year}_{month}_price_actual": {
+                "value": 150.0,
+                "unit": "NOK",
+                "year": year,
+                "month": month,
+            },
+        },
+        "daily_price_cache": {
+            # Daily price data for each meter
+            "CW_1_metered": [
+                {"time": from_time + 86400, "value": 2.0, "unit": "NOK"},  # Day 1
+                {"time": from_time + 172800, "value": 2.0, "unit": "NOK"},  # Day 2
+            ],
+            "CW_2_metered": [
+                {"time": from_time + 86400, "value": 3.0, "unit": "NOK"},  # Day 1
+                {"time": from_time + 172800, "value": 3.0, "unit": "NOK"},  # Day 2
+            ],
+        },
+    }
+    coordinator._installations = [
+        {"MeasuringPointID": 1, "Registers": [{"UtilityCode": "CW"}]},
+        {"MeasuringPointID": 2, "Registers": [{"UtilityCode": "CW"}]},
+    ]
+    coordinator._measuring_points = [
+        {"ID": 1, "Name": "Cold Water Meter 1"},
+        {"ID": 2, "Name": "Cold Water Meter 2"},
+    ]
+    coordinator._settings = [{"Name": "TimeZoneIANA", "Value": "UTC"}]
+
+    sensor = EcoGuardMonthlyAccumulatedSensor(
+        hass=hass,
+        coordinator=coordinator,
+        utility_code="CW",
+        aggregate_type="price",
+        cost_type="actual",
+    )
+
+    sensor.hass = hass
+    sensor.platform = MagicMock()
+    sensor.entity_id = "sensor.test_monthly_cost_aggregate"
+
+    with patch.object(sensor, "async_write_ha_state", new_callable=AsyncMock):
+        sensor._update_from_coordinator_data()
+
+        # Should use aggregated value
+        assert sensor._attr_native_value == 150.0
+        assert sensor._attr_native_unit_of_measurement == "NOK"
+
+        # meter_count should be populated by calculating from daily price cache
+        # (since per-meter monthly cache entries don't exist)
+        assert len(sensor._meters_with_data) == 2
+        assert sensor.extra_state_attributes["meter_count"] == 2
+
+        # Verify meter details (calculated from daily price cache)
+        meters = sensor.extra_state_attributes["meters"]
+        assert len(meters) == 2
+        assert meters[0]["measuring_point_id"] == 1
+        assert meters[0]["measuring_point_name"] == "Cold Water Meter 1"
+        # Value should be sum of daily prices: 2.0 + 2.0 = 4.0
+        assert meters[0]["value"] == 4.0
+        assert meters[1]["measuring_point_id"] == 2
+        assert meters[1]["measuring_point_name"] == "Cold Water Meter 2"
+        # Value should be sum of daily prices: 3.0 + 3.0 = 6.0
+        assert meters[1]["value"] == 6.0
+
+
+async def test_monthly_combined_water_sensor_with_meter_count(
+    hass: HomeAssistant, coordinator
+):
+    """Test monthly combined water sensor with hw_meter_count and cw_meter_count.
+
+    This test verifies that the sensor correctly populates hw_meter_count
+    and cw_meter_count by calculating from daily cache when per-meter
+    monthly cache entries are not available (the common real-world scenario).
+    """
+    now = datetime.now()
+    year = now.year
+    month = now.month
+
+    # Calculate month start for filtering daily values
+    from_date = datetime(year, month, 1, tzinfo=timezone.utc)
+    from_time = int(from_date.timestamp())
+
+    # Set up coordinator data with:
+    # 1. Monthly aggregate cache (only aggregate entries, no per-meter entries)
+    # 2. Daily consumption cache (per-meter entries that we'll calculate from)
+    coordinator.data = {
+        "monthly_aggregate_cache": {
+            # Only aggregated caches for HW and CW (no per-meter entries)
+            # This simulates the real-world scenario where per-meter monthly
+            # cache entries don't exist
+            f"HW_{year}_{month}_con_actual": {
+                "value": 30.0,
+                "unit": "m³",
+                "year": year,
+                "month": month,
+            },
+            f"CW_{year}_{month}_con_actual": {
+                "value": 50.0,
+                "unit": "m³",
+                "year": year,
+                "month": month,
+            },
+        },
+        "daily_consumption_cache": {
+            # Daily consumption data for each meter
+            "HW_1": [
+                {"time": from_time + 86400, "value": 0.5, "unit": "m³"},  # Day 1
+                {"time": from_time + 172800, "value": 0.5, "unit": "m³"},  # Day 2
+            ],
+            "HW_2": [
+                {"time": from_time + 86400, "value": 0.5, "unit": "m³"},  # Day 1
+                {"time": from_time + 172800, "value": 0.5, "unit": "m³"},  # Day 2
+            ],
+            "CW_1": [
+                {"time": from_time + 86400, "value": 0.8, "unit": "m³"},  # Day 1
+                {"time": from_time + 172800, "value": 0.7, "unit": "m³"},  # Day 2
+            ],
+            "CW_2": [
+                {"time": from_time + 86400, "value": 0.8, "unit": "m³"},  # Day 1
+                {"time": from_time + 172800, "value": 0.7, "unit": "m³"},  # Day 2
+            ],
+        },
+    }
+    coordinator._installations = [
+        {
+            "MeasuringPointID": 1,
+            "Registers": [{"UtilityCode": "HW"}, {"UtilityCode": "CW"}],
+        },
+        {
+            "MeasuringPointID": 2,
+            "Registers": [{"UtilityCode": "HW"}, {"UtilityCode": "CW"}],
+        },
+    ]
+    coordinator._measuring_points = [
+        {"ID": 1, "Name": "Water Meter 1"},
+        {"ID": 2, "Name": "Water Meter 2"},
+    ]
+    coordinator._settings = [{"Name": "TimeZoneIANA", "Value": "UTC"}]
+
+    sensor = EcoGuardCombinedWaterSensor(
+        hass=hass,
+        coordinator=coordinator,
+        aggregate_type="con",
+    )
+
+    sensor.hass = hass
+    sensor.platform = MagicMock()
+    sensor.entity_id = "sensor.test_monthly_combined_water"
+
+    with patch.object(sensor, "async_write_ha_state", new_callable=AsyncMock):
+        sensor._update_from_coordinator_data()
+
+        # Should sum HW and CW values
+        assert sensor._attr_native_value == 80.0
+        assert sensor._attr_native_unit_of_measurement == "m³"
+
+        # meter_count should be populated by calculating from daily cache
+        # (since per-meter monthly cache entries don't exist)
+        assert len(sensor._hw_meters_with_data) == 2
+        assert len(sensor._cw_meters_with_data) == 2
+        assert sensor.extra_state_attributes["hw_meter_count"] == 2
+        assert sensor.extra_state_attributes["cw_meter_count"] == 2
+
+        # Verify HW meter details (calculated from daily cache)
+        hw_meters = sensor.extra_state_attributes["hw_meters"]
+        assert len(hw_meters) == 2
+        assert hw_meters[0]["measuring_point_id"] == 1
+        assert hw_meters[0]["measuring_point_name"] == "Water Meter 1"
+        # Value should be sum of daily values: 0.5 + 0.5 = 1.0
+        assert hw_meters[0]["value"] == 1.0
+        assert hw_meters[1]["measuring_point_id"] == 2
+        assert hw_meters[1]["measuring_point_name"] == "Water Meter 2"
+        assert hw_meters[1]["value"] == 1.0
+
+        # Verify CW meter details (calculated from daily cache)
+        cw_meters = sensor.extra_state_attributes["cw_meters"]
+        assert len(cw_meters) == 2
+        assert cw_meters[0]["measuring_point_id"] == 1
+        assert cw_meters[0]["measuring_point_name"] == "Water Meter 1"
+        # Value should be sum of daily values: 0.8 + 0.7 = 1.5
+        assert cw_meters[0]["value"] == 1.5
+        assert cw_meters[1]["measuring_point_id"] == 2
+        assert cw_meters[1]["measuring_point_name"] == "Water Meter 2"
+        assert cw_meters[1]["value"] == 1.5
 
 
 async def test_sensor_descriptions(

@@ -5,6 +5,74 @@ All notable changes to the EcoGuard Home Assistant integration will be documente
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] - 2026-01-12
+
+### Added
+
+#### Meter Count for Aggregate Sensors
+- **Meter count for monthly sensors**: All monthly accumulated sensors now expose meter count information
+  - Added `meter_count` and `meters` attributes to monthly accumulated sensors
+  - Meters collected from monthly cache or calculated from daily cache when needed
+  - Provides visibility into how many meters contribute to aggregate values
+- **Meter count for combined water sensors**: Combined water sensors now show separate meter counts for hot and cold water
+  - Added `hw_meter_count`, `cw_meter_count`, `hw_meters`, and `cw_meters` attributes
+  - Helps identify which meters contribute to combined totals
+- **Meter count for total monthly cost sensor**: `EcoGuardTotalMonthlyCostSensor` now includes meter information
+  - Collects meters from all water utilities (HW + CW)
+  - Shows meter details with `utility_code` for clarity
+  - Provides complete visibility into cost calculation sources
+
+### Fixed
+
+#### Meter Count Display for "Unknown" Values
+- **Daily cost sensors**: Meter count now displays even when sensor value is "Unknown"
+  - Fixed `cost_daily_metered_hot_water` showing `meter_count: 0` when value was "Unknown"
+  - Fixed `cost_daily_metered_combined_water` showing `meter_count: 0` when value was "Unknown"
+  - Solution: Write state directly when value is `None` but meters exist (bypasses `_async_write_ha_state_if_changed` which skips `None` values)
+- **Monthly cost sensors**: Meter count now displays even when sensor value is "Unknown"
+  - Ensures meter information is available regardless of data availability
+- **Combined water sensors**: Meter counts now display even when sensor value is "Unknown"
+  - Both hot and cold water meter counts remain visible during data gaps
+
+#### Estimated Cost Sensor Meter Count
+- **Fixed `cost_monthly_accumulated_estimated_combined_water`**: Now properly shows meter count instead of `meter_count: 0`
+  - Updated `create_monthly_meter_data_getter` to handle `estimated` cost_type
+  - Returns `0.0` for estimated costs when no data exists to ensure meters are counted
+- **Fixed `cost_monthly_total_estimated`**: Added missing meter count entirely
+  - Now includes meter information for all water utilities
+
+#### Monthly Cost Sensor Meter Count Fallback
+- **Fixed `cost_monthly_accumulated_metered_cold_water`**: Now properly shows meter count instead of `meter_count: 0`
+  - Added fallback to calculate monthly cost meter_count from daily price cache when per-meter monthly cache entries are missing
+  - Handles edge cases where monthly cache data is incomplete but daily data is available
+
+### Technical Improvements
+
+#### Code Refactoring
+- **Extracted `create_monthly_meter_data_getter` helper function**: Centralized meter data collection logic
+  - Reduces code duplication by ~65 lines in monthly sensors
+  - Ensures consistent meter count handling across all sensor types
+- **Extracted `get_month_timestamps` usage**: Standardized month boundary calculations
+  - All sensors now use shared helpers for consistency
+- **Shared `collect_meters_with_data` helper**: All sensors now use unified meter collection logic
+  - Improved code maintainability and consistency
+  - Easier to update meter collection logic in the future
+
+#### Testing
+- **Added comprehensive tests for monthly sensor meter_count functionality**: 15 meter_count/cost related tests
+  - Tests cover meter count collection from monthly cache
+  - Tests cover fallback to daily cache when monthly cache is incomplete
+  - Updated tests to reflect real-world scenarios (missing per-meter monthly cache entries)
+  - All tests passing
+
+### Impact
+- All aggregate sensors now consistently show meter count
+- Meter count visible even when sensor value is "Unknown" (improves debugging and monitoring)
+- Estimated cost sensors properly include meters in count
+- Total monthly cost sensor now includes meter information
+- Improved code maintainability through shared helpers
+- Better visibility into data sources for all aggregate calculations
+
 ## [3.2.0] - 2026-01-11
 
 ### Added
@@ -500,6 +568,7 @@ Sensor names have been restructured to improve grouping and sorting in lists. Wh
 - Configuration guide
 - Nord Pool integration explanation
 
+[3.3.0]: https://github.com/skogsmaskin/ecoguard-home-assistant/releases/tag/v3.3.0
 [3.2.0]: https://github.com/skogsmaskin/ecoguard-home-assistant/releases/tag/v3.2.0
 [3.1.0]: https://github.com/skogsmaskin/ecoguard-home-assistant/releases/tag/v3.1.0
 [3.0.0]: https://github.com/skogsmaskin/ecoguard-home-assistant/releases/tag/v3.0.0

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, Callable
 import logging
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
 
 from .entity_registry_updater import get_entity_id_by_unique_id
+
+if TYPE_CHECKING:
+    from .coordinator import EcoGuardDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -88,3 +92,189 @@ def utility_code_to_slug(utility_code: str) -> str:
         "HE": "heat",
     }
     return utility_map.get(utility_code.upper(), utility_code.lower())
+
+
+def collect_meters_with_data(
+    active_installations: list[dict[str, Any]],
+    utility_code: str,
+    coordinator: Any,
+    get_meter_data: Callable[[int, str], dict[str, Any] | None],
+) -> list[dict[str, Any]]:
+    """Collect meters with data for a given utility code.
+
+    This is a shared helper function used by both daily and monthly aggregate sensors
+    to collect which meters have data, avoiding code duplication.
+
+    Args:
+        active_installations: List of active installations.
+        utility_code: Utility code to filter by (e.g., "HW", "CW").
+        coordinator: The coordinator instance (for accessing measuring points).
+        get_meter_data: Callable that takes (measuring_point_id, utility_code) and
+            returns meter data dict with "value" key, or None if no data.
+
+    Returns:
+        List of meters with data, each containing measuring_point_id,
+        measuring_point_name, and value.
+    """
+    meters_with_data = []
+
+    for installation in active_installations:
+        registers = installation.get("Registers", [])
+        measuring_point_id = installation.get("MeasuringPointID")
+
+        # Check if this installation has the utility we're looking for
+        has_utility = False
+        for register in registers:
+            if register.get("UtilityCode") == utility_code:
+                has_utility = True
+                break
+
+        if not has_utility:
+            continue
+
+        # Get measuring point name
+        measuring_point_name = None
+        for mp in coordinator.get_measuring_points():
+            if mp.get("ID") == measuring_point_id:
+                measuring_point_name = mp.get("Name")
+                break
+
+        # Check if this meter has data using the provided callback
+        meter_data = get_meter_data(measuring_point_id, utility_code)
+
+        # Include meter if it has data (including value 0 for cost sensors without price data)
+        if meter_data and meter_data.get("value") is not None:
+            meters_with_data.append(
+                {
+                    "measuring_point_id": measuring_point_id,
+                    "measuring_point_name": measuring_point_name,
+                    "value": meter_data.get("value", 0.0),
+                }
+            )
+
+    return meters_with_data
+
+
+def create_monthly_meter_data_getter(
+    monthly_cache: dict[str, Any],
+    daily_cache: dict[str, Any],
+    daily_price_cache: dict[str, Any] | None,
+    aggregate_type: str,
+    cost_type: str,
+    year: int,
+    month: int,
+    from_time: int,
+    to_time: int,
+    coordinator: EcoGuardDataUpdateCoordinator | None = None,
+) -> Callable[[int, str], dict[str, Any] | None]:
+    """Create a get_meter_data callback for monthly sensors.
+
+    This helper creates a callback function that:
+    1. First tries to get data from monthly aggregate cache
+    2. Falls back to calculating from daily cache if not found:
+       - For consumption: calculates from daily consumption cache
+       - For cost: calculates from daily price cache
+
+    Args:
+        monthly_cache: Monthly aggregate cache dictionary.
+        daily_cache: Daily consumption cache dictionary.
+        daily_price_cache: Daily price cache dictionary (for cost sensors).
+        aggregate_type: "con" for consumption, "price" for price/cost.
+        cost_type: "actual" for metered API data, "estimated" for estimated.
+        year: Year to check.
+        month: Month to check.
+        from_time: Start timestamp for the month.
+        to_time: End timestamp for the month.
+        coordinator: Optional coordinator for getting currency setting.
+
+    Returns:
+        A callback function that takes (measuring_point_id, utility_code)
+        and returns meter data dict or None.
+    """
+
+    def get_meter_data(
+        measuring_point_id: int, utility_code: str
+    ) -> dict[str, Any] | None:
+        """Get meter data from monthly cache or calculate from daily cache."""
+        # First try monthly aggregate cache
+        cache_key = f"{utility_code}_{measuring_point_id}_{year}_{month}_{aggregate_type}_{cost_type}"
+        meter_data = monthly_cache.get(cache_key)
+
+        if meter_data and meter_data.get("value") is not None:
+            return meter_data
+
+        # If not in monthly cache, calculate from daily cache
+        if aggregate_type == "con" and daily_cache:
+            # For consumption: calculate from daily consumption cache
+            daily_cache_key = f"{utility_code}_{measuring_point_id}"
+            daily_values = daily_cache.get(daily_cache_key)
+
+            if daily_values:
+                # Filter daily values for this month
+                month_values = [
+                    v
+                    for v in daily_values
+                    if from_time <= v.get("time", 0) < to_time
+                    and v.get("value") is not None
+                ]
+
+                if month_values:
+                    total_value = sum(v["value"] for v in month_values)
+                    unit = month_values[0].get("unit", "") if month_values else ""
+                    return {
+                        "value": total_value,
+                        "unit": unit,
+                    }
+
+        elif aggregate_type == "price":
+            if cost_type == "actual":
+                # For actual cost: try daily price cache, but if no data exists, return 0 to include the meter
+                if daily_price_cache:
+                    daily_price_cache_key = (
+                        f"{utility_code}_{measuring_point_id}_metered"
+                    )
+                    daily_prices = daily_price_cache.get(daily_price_cache_key)
+
+                    if daily_prices:
+                        # Filter daily prices for this month
+                        # Include 0 values as they are valid cost values
+                        month_prices = [
+                            p
+                            for p in daily_prices
+                            if from_time <= p.get("time", 0) < to_time
+                            and p.get("value") is not None
+                        ]
+
+                        if month_prices:
+                            total_value = sum(p["value"] for p in month_prices)
+                            unit = month_prices[0].get("unit", "")
+                            return {
+                                "value": total_value,
+                                "unit": unit,
+                            }
+
+                # No price data found - return 0 to include the meter in the count
+                # This ensures meters are counted even when price data is not available
+                currency = (
+                    coordinator.get_setting("Currency") if coordinator else None
+                ) or "NOK"
+                return {
+                    "value": 0.0,
+                    "unit": currency,
+                }
+            elif cost_type == "estimated":
+                # For estimated cost: check if we have monthly cache data
+                # Estimated costs are typically calculated from consumption + spot prices
+                # and stored in monthly aggregate cache, not daily price cache
+                # If no data found, return 0 to include the meter in the count
+                currency = (
+                    coordinator.get_setting("Currency") if coordinator else None
+                ) or "NOK"
+                return {
+                    "value": 0.0,
+                    "unit": currency,
+                }
+
+        return None
+
+    return get_meter_data

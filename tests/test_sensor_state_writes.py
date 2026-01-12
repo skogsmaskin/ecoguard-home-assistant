@@ -72,24 +72,16 @@ class TestShouldWriteState:
         sensor._last_written_date = date(2024, 1, 1)
 
         # Same date, same value - no write
-        assert (
-            sensor._should_write_state(100.0, data_date=date(2024, 1, 1)) is False
-        )
+        assert sensor._should_write_state(100.0, data_date=date(2024, 1, 1)) is False
 
         # Same date, different value - write
-        assert (
-            sensor._should_write_state(200.0, data_date=date(2024, 1, 1)) is True
-        )
+        assert sensor._should_write_state(200.0, data_date=date(2024, 1, 1)) is True
 
         # Different date, same value - write (daily sensors record once per day)
-        assert (
-            sensor._should_write_state(100.0, data_date=date(2024, 1, 2)) is True
-        )
+        assert sensor._should_write_state(100.0, data_date=date(2024, 1, 2)) is True
 
         # Different date, different value - write
-        assert (
-            sensor._should_write_state(200.0, data_date=date(2024, 1, 2)) is True
-        )
+        assert sensor._should_write_state(200.0, data_date=date(2024, 1, 2)) is True
 
     def test_monthly_sensor_month_change(self, coordinator):
         """Test that monthly sensors write when month changes."""
@@ -103,19 +95,13 @@ class TestShouldWriteState:
         sensor._last_written_month = (2024, 1)
 
         # Same month, same value - no write
-        assert (
-            sensor._should_write_state(100.0, data_month=(2024, 1)) is False
-        )
+        assert sensor._should_write_state(100.0, data_month=(2024, 1)) is False
 
         # Same month, different value - write
-        assert (
-            sensor._should_write_state(200.0, data_month=(2024, 1)) is True
-        )
+        assert sensor._should_write_state(200.0, data_month=(2024, 1)) is True
 
         # Different month, same value - write
-        assert (
-            sensor._should_write_state(100.0, data_month=(2024, 2)) is True
-        )
+        assert sensor._should_write_state(100.0, data_month=(2024, 2)) is True
 
     def test_monthly_sensor_date_change(self, coordinator):
         """Test that monthly sensors write when date changes (daily progression)."""
@@ -180,7 +166,9 @@ class TestShouldWriteState:
         # No interval means record all updates (even same value)
         # This is because RECORDING_INTERVAL=None returns True early
         assert sensor._should_write_state(200.0) is True
-        assert sensor._should_write_state(100.0) is True  # Same value - still writes (record all updates)
+        assert (
+            sensor._should_write_state(100.0) is True
+        )  # Same value - still writes (record all updates)
 
 
 class TestAsyncWriteHaStateIfChanged:
@@ -353,10 +341,17 @@ class TestDailySensorIntegration:
         yesterday = today - timedelta(days=1)
         tz = coordinator.get_setting("TimeZoneIANA") or "UTC"
         from pytz import timezone as get_timezone
+
         timezone = get_timezone(tz)
-        
-        yesterday_ts = int(timezone.localize(datetime.combine(yesterday, datetime.min.time())).timestamp())
-        today_ts = int(timezone.localize(datetime.combine(today, datetime.min.time())).timestamp())
+
+        yesterday_ts = int(
+            timezone.localize(
+                datetime.combine(yesterday, datetime.min.time())
+            ).timestamp()
+        )
+        today_ts = int(
+            timezone.localize(datetime.combine(today, datetime.min.time())).timestamp()
+        )
 
         coordinator.data = {
             "latest_consumption_cache": {
@@ -398,15 +393,21 @@ class TestDailySensorIntegration:
 
         # Simulate date change by updating coordinator data
         tomorrow = today + timedelta(days=1)
-        tomorrow_ts = int(timezone.localize(datetime.combine(tomorrow, datetime.min.time())).timestamp())
+        tomorrow_ts = int(
+            timezone.localize(
+                datetime.combine(tomorrow, datetime.min.time())
+            ).timestamp()
+        )
         coordinator.data["latest_consumption_cache"]["CW_1"]["value"] = 30.0
         coordinator.data["latest_consumption_cache"]["CW_1"]["time"] = tomorrow_ts
-        coordinator.data["daily_consumption_cache"]["CW_1"].append({
-            "value": 30.0,
-            "date": tomorrow,
-            "unit": "m³",
-            "timestamp": tomorrow_ts,
-        })
+        coordinator.data["daily_consumption_cache"]["CW_1"].append(
+            {
+                "value": 30.0,
+                "date": tomorrow,
+                "unit": "m³",
+                "timestamp": tomorrow_ts,
+            }
+        )
 
         # Update with new date - should write
         sensor._update_from_coordinator_data()
@@ -472,14 +473,13 @@ class TestMonthlySensorIntegration:
         ]
         coordinator._settings = [{"Name": "Currency", "Value": "NOK"}]
 
-
         sensor = EcoGuardMonthlyAccumulatedSensor(
             hass=hass,
             coordinator=coordinator,
             utility_code="CW",
             aggregate_type="con",  # "con" for consumption, not "consumption"
         )
-        
+
         # Set hass and platform on sensor (normally done by async_added_to_hass)
         sensor.hass = hass
         sensor.platform = MagicMock()
@@ -504,11 +504,11 @@ class TestMonthlySensorIntegration:
         }
 
         sensor.async_write_ha_state = MagicMock()
-        
+
         # Patch datetime.now() for the monthly sensor
         with patch("custom_components.ecoguard.sensors.monthly.datetime") as mock_dt:
             mock_dt.now.return_value = now
-            
+
             # First update - should write (first write)
             sensor._update_from_coordinator_data()
             assert sensor.async_write_ha_state.call_count == 1
@@ -544,14 +544,13 @@ class TestMonthlySensorIntegration:
         ]
         coordinator._settings = [{"Name": "Currency", "Value": "NOK"}]
 
-
         sensor = EcoGuardMonthlyAccumulatedSensor(
             hass=hass,
             coordinator=coordinator,
             utility_code="CW",
             aggregate_type="con",  # "con" for consumption, not "consumption"
         )
-        
+
         # Set hass and platform on sensor (normally done by async_added_to_hass)
         sensor.hass = hass
         sensor.platform = MagicMock()
@@ -614,14 +613,13 @@ class TestMonthlySensorIntegration:
         ]
         coordinator._settings = [{"Name": "Currency", "Value": "NOK"}]
 
-
         sensor = EcoGuardMonthlyAccumulatedSensor(
             hass=hass,
             coordinator=coordinator,
             utility_code="CW",
             aggregate_type="con",  # "con" for consumption, not "consumption"
         )
-        
+
         # Set hass and platform on sensor (normally done by async_added_to_hass)
         sensor.hass = hass
         sensor.platform = MagicMock()
