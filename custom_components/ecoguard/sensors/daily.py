@@ -2039,7 +2039,6 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
 
         for measuring_point_id, meter_info in meter_info_map.items():
             cache_key = meter_info["cache_key"]
-            consumption_cache_key = meter_info["consumption_cache_key"]
             measuring_point_name = meter_info["measuring_point_name"]
             cost_data = cost_cache.get(cache_key)
 
