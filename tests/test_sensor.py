@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 import inspect
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -1068,8 +1068,6 @@ async def test_monthly_accumulated_sensor_consumption_with_meter_count(
     month = now.month
 
     # Calculate month boundaries for filtering daily values
-    from datetime import timezone
-
     from_date = datetime(year, month, 1, tzinfo=timezone.utc)
     if month == 12:
         to_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
@@ -1077,7 +1075,6 @@ async def test_monthly_accumulated_sensor_consumption_with_meter_count(
         to_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
 
     from_time = int(from_date.timestamp())
-    int(to_date.timestamp())
 
     # Set up coordinator data with:
     # 1. Monthly aggregate cache (only aggregate entry, no per-meter entries)
@@ -1166,8 +1163,6 @@ async def test_monthly_accumulated_sensor_cost_with_meter_count(
     month = now.month
 
     # Calculate month boundaries for filtering daily values
-    from datetime import timezone
-
     from_date = datetime(year, month, 1, tzinfo=timezone.utc)
     if month == 12:
         to_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
@@ -1175,7 +1170,6 @@ async def test_monthly_accumulated_sensor_cost_with_meter_count(
         to_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
 
     from_time = int(from_date.timestamp())
-    int(to_date.timestamp())
 
     # Set up coordinator data with:
     # 1. Monthly aggregate cache (only aggregate entry, no per-meter entries)
@@ -1265,8 +1259,6 @@ async def test_monthly_combined_water_sensor_with_meter_count(
     month = now.month
 
     # Calculate month boundaries for filtering daily values
-    from datetime import timezone
-
     from_date = datetime(year, month, 1, tzinfo=timezone.utc)
     if month == 12:
         to_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
@@ -1274,7 +1266,6 @@ async def test_monthly_combined_water_sensor_with_meter_count(
         to_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
 
     from_time = int(from_date.timestamp())
-    int(to_date.timestamp())
 
     # Set up coordinator data with:
     # 1. Monthly aggregate cache (only aggregate entries, no per-meter entries)

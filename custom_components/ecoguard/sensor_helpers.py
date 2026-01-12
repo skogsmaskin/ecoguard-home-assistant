@@ -162,6 +162,7 @@ def create_monthly_meter_data_getter(
     month: int,
     from_time: int,
     to_time: int,
+    coordinator: Any = None,
 ) -> Callable[[int, str], dict[str, Any] | None]:
     """Create a get_meter_data callback for monthly sensors.
 
@@ -181,6 +182,7 @@ def create_monthly_meter_data_getter(
         month: Month to check.
         from_time: Start timestamp for the month.
         to_time: End timestamp for the month.
+        coordinator: Optional coordinator for getting currency setting.
 
     Returns:
         A callback function that takes (measuring_point_id, utility_code)
@@ -242,9 +244,7 @@ def create_monthly_meter_data_getter(
 
                         if month_prices:
                             total_value = sum(p["value"] for p in month_prices)
-                            unit = (
-                                month_prices[0].get("unit", "") if month_prices else ""
-                            )
+                            unit = month_prices[0].get("unit", "") if month_prices else ""
                             return {
                                 "value": total_value,
                                 "unit": unit,
@@ -252,7 +252,9 @@ def create_monthly_meter_data_getter(
 
                 # No price data found - return 0 to include the meter in the count
                 # This ensures meters are counted even when price data is not available
-                currency = "NOK"  # Default unit, will be overridden by sensor if needed
+                currency = (
+                    coordinator.get_setting("Currency") if coordinator else None
+                ) or "NOK"
                 return {
                     "value": 0.0,
                     "unit": currency,
@@ -262,7 +264,9 @@ def create_monthly_meter_data_getter(
                 # Estimated costs are typically calculated from consumption + spot prices
                 # and stored in monthly aggregate cache, not daily price cache
                 # If no data found, return 0 to include the meter in the count
-                currency = "NOK"  # Default unit, will be overridden by sensor if needed
+                currency = (
+                    coordinator.get_setting("Currency") if coordinator else None
+                ) or "NOK"
                 return {
                     "value": 0.0,
                     "unit": currency,

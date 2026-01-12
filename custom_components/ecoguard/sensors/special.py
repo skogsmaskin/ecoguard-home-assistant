@@ -464,8 +464,6 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
         # Write state directly when value is None but we have meters
         # This ensures meter_count and meters list are visible even when value is Unknown
         if self._meters_with_data:
-            data_date = now.date()
-            data_month = (year, month)
             self.async_write_ha_state()
         # If no meters, don't write state - wait for data to be available
 
@@ -640,6 +638,7 @@ class EcoGuardTotalMonthlyCostSensor(EcoGuardBaseSensor):
                 month,
                 from_time,
                 to_time,
+                self.coordinator,
             )
 
             # Collect meters for this utility
