@@ -2431,7 +2431,10 @@ class EcoGuardDailyCostAggregateSensor(EcoGuardBaseSensor):
                     }
                 )
 
-        if total_value > 0:
+        # Set value if we have data from at least one meter
+        # Note: total_value can be 0 (valid case: zero cost/consumption), so we don't check > 0
+        # We only verify that we have actual data from meters (meters_with_data)
+        if len(meters_with_data) > 0:
             self._attr_native_value = round_to_max_digits(total_value)
             currency = self.coordinator.get_setting("Currency") or ""
             self._attr_native_unit_of_measurement = currency
