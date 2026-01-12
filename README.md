@@ -33,6 +33,8 @@ This integration provides comprehensive monitoring of your water consumption and
 
 The "Latest Reception" sensors show when data was last received by EcoGuard's systems for each measuring point. Note that this timestamp reflects when the data was received by EcoGuard, not when it becomes available through the API for consumption queries.
 
+**Combined and Aggregate Sensors**: When multiple meters have different data freshness (data lag), combined and aggregate sensors automatically synchronize to use data from the same date across all meters. This ensures accurate totals even when individual meters have different update delays. If no common date exists across all meters, the sensor will show "Unknown" rather than displaying an incorrect mixed-date value.
+
 ## Installation
 
 ### HACS (Recommended)

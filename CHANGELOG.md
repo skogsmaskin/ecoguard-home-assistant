@@ -5,6 +5,41 @@ All notable changes to the EcoGuard Home Assistant integration will be documente
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.1] - 2026-01-12
+
+### Fixed
+
+#### Date Synchronization for Combined and Aggregate Sensors
+- **Fixed date synchronization issue**: Combined and aggregate sensors now ensure all meters use data from the same date when calculating totals
+  - **Problem**: When meters had different data freshness (e.g., HW data from 11 days ago, CW data from today), sensors would incorrectly mix data from different dates
+  - **Solution**: Implemented two-pass approach that finds the most recent date where ALL meters have data, then filters all data retrieval to use only entries from that common date
+  - **Affected sensors**:
+    - `cost_daily_metered_combined_water` / `cost_daily_estimated_combined_water`
+    - `consumption_daily_metered_combined_water`
+    - `cost_daily_metered_{utility}` (aggregate sensors)
+    - `consumption_daily_metered_{utility}` (aggregate sensors)
+  - **Behavior**: Sensors now show "Unknown" when no common date exists across all meters (better than showing incorrect mixed-date values)
+  - **Backward compatible**: No breaking changes; existing behavior preserved when all meters have the same data date
+
+### Technical Improvements
+
+#### Code Quality
+- **Performance optimization**: Uses `max()` instead of sorting for O(N) performance when finding latest entries
+- **Date normalization**: Normalizes dates to end of day (23:59:59.999999) for consistent day-level comparisons
+- **Fallback logic**: Falls back to latest cache timestamp when daily cache is empty (maintains backward compatibility)
+
+#### Testing
+- **Added comprehensive test suite**: 7 new tests covering date synchronization scenarios
+  - Tests cover combined water sensors (consumption and cost) with date lag
+  - Tests cover aggregate sensors (consumption and cost) with date lag
+  - Tests cover edge cases (no common date, multiple meters with different dates, all meters same date)
+  - All tests passing
+
+### Impact
+- Combined and aggregate sensors now provide accurate values even when meters have different data freshness
+- Sensors correctly handle data lag scenarios without mixing dates
+- Improved data accuracy for users with multiple meters experiencing different update delays
+
 ## [3.3.0] - 2026-01-12
 
 ### Added
