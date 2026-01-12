@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 import logging
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
 
 from .entity_registry_updater import get_entity_id_by_unique_id
+
+if TYPE_CHECKING:
+    from .coordinator import EcoGuardDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -162,7 +165,7 @@ def create_monthly_meter_data_getter(
     month: int,
     from_time: int,
     to_time: int,
-    coordinator: Any = None,
+    coordinator: EcoGuardDataUpdateCoordinator | None = None,
 ) -> Callable[[int, str], dict[str, Any] | None]:
     """Create a get_meter_data callback for monthly sensors.
 
@@ -244,7 +247,7 @@ def create_monthly_meter_data_getter(
 
                         if month_prices:
                             total_value = sum(p["value"] for p in month_prices)
-                            unit = month_prices[0].get("unit", "") if month_prices else ""
+                            unit = month_prices[0].get("unit", "")
                             return {
                                 "value": total_value,
                                 "unit": unit,
